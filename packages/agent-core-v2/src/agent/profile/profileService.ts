@@ -384,8 +384,15 @@ export class AgentProfileService implements IAgentProfileService {
     if (changed.cwd !== undefined) payload.cwd = changed.cwd;
     if (changed.modelAlias !== undefined) payload.modelAlias = changed.modelAlias;
     if (changed.profileName !== undefined) payload.profileName = changed.profileName;
-    if (changed.thinkingLevel !== undefined) {
-      const model = this.resolveModelForThinking(changed.modelAlias);
+    // Resolve thinking when it is explicitly set, OR when a model is being
+    // (re)bound without an explicit thinking level. In the latter case
+    // `resolveThinkingEffort(undefined, ...)` falls back to the model's default
+    // (thinking-capable models → 'on'), matching v1's unconditional resolution
+    // at session build. Without this, a plain `setModel` leaves thinkingLevel at
+    // the wire default 'off', which some models (e.g. kimi-k2.7) reject with
+    // "only type=enabled is allowed".
+    if (changed.thinkingLevel !== undefined || changed.modelAlias !== undefined) {
+      const model = this.resolveModelForThinking(changed.modelAlias ?? this.modelAlias);
       payload.thinkingLevel = resolveThinkingEffort(
         changed.thinkingLevel,
         this.config.get<ThinkingConfig>(THINKING_SECTION),
