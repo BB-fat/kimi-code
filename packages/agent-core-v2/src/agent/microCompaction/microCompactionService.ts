@@ -29,6 +29,7 @@ import { IConfigService } from '#/app/config/config';
 import { IEventBus } from '#/app/event/eventBus';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import { IAgentContextSizeService } from '#/agent/contextSize/contextSize';
+import { isSpineEnabled } from '#/agent/spine/flag';
 import { IFlagService } from '#/app/flag/flag';
 import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentProfileService } from '#/agent/profile/profile';
@@ -162,6 +163,7 @@ export class AgentMicroCompactionService
 
   compact(messages: readonly ContextMessage[]): readonly ContextMessage[] {
     if (!this.flags.enabled('micro_compaction')) return messages;
+    if (isSpineEnabled()) return messages;
 
     const result: ContextMessage[] = [];
     let index = 0;

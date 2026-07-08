@@ -4,6 +4,8 @@ import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { ErrorCodes, KimiError } from '#/errors';
 import { IAgentMicroCompactionService } from '#/agent/microCompaction/microCompaction';
+import { isSpineEnabled } from '#/agent/spine/flag';
+import { IAgentSpineService } from '#/agent/spine/spine';
 import type { ContentPart, Message } from '#/app/llmProtocol/message';
 import { IAgentContextProjectorService } from './contextProjector';
 
@@ -14,17 +16,25 @@ export class AgentContextProjectorService implements IAgentContextProjectorServi
   ) {}
 
   project(messages: readonly ContextMessage[]): readonly Message[] {
-    return project(this.microCompaction().compact(messages));
+    return project(this.foldSpine(this.microCompaction().compact(messages)));
   }
 
   projectStrict(messages: readonly ContextMessage[]): readonly Message[] {
-    return projectStrict(this.microCompaction().compact(messages));
+    return projectStrict(this.foldSpine(this.microCompaction().compact(messages)));
+  }
+
+  private foldSpine(messages: readonly ContextMessage[]): readonly ContextMessage[] {
+    return isSpineEnabled() ? this.spine().fold(messages) : messages;
   }
 
   private microCompaction(): IAgentMicroCompactionService {
     return this.instantiation.invokeFunction((accessor) =>
       accessor.get(IAgentMicroCompactionService),
     );
+  }
+
+  private spine(): IAgentSpineService {
+    return this.instantiation.invokeFunction((accessor) => accessor.get(IAgentSpineService));
   }
 }
 

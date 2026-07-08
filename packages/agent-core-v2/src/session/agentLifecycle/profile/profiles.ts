@@ -50,6 +50,17 @@ const AGENT_TOOLS = [
   'SetGoalBudget',
   'UpdateGoal',
   'mcp__*',
+  // Spine task-tree control tools. Harmless when the spine experiment is off:
+  // the tools are only registered when `KIMI_CODE_SPINE` is set (see
+  // `registerTool(..., { when: () => isSpineEnabled() })`), so a name listed
+  // here with no matching registered tool contributes nothing — same as an
+  // unmatched `mcp__*` pattern. Without these names the profile's active-tool
+  // whitelist would filter the spine tools out of every LLM request even when
+  // the experiment is enabled.
+  'spine_open',
+  'spine_close',
+  'spine_next',
+  'spine_tree',
 ] as const;
 
 const CODER_TOOLS = [

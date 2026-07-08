@@ -20,6 +20,8 @@ import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory'
 import { IAgentContextProjectorService } from '#/agent/contextProjector/contextProjector';
 import { IAgentContextSizeService } from '#/agent/contextSize/contextSize';
 import { IAgentProfileService } from '#/agent/profile/profile';
+import { isSpineEnabled } from '#/agent/spine/flag';
+import { appendSpineView } from '#/agent/spine/instructions';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { IAgentUsageService } from '#/agent/usage/usage';
 import { IConfigService } from '#/app/config/config';
@@ -315,10 +317,12 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     });
 
     const messages = overrides.messages ?? this.context.get();
+    const baseSystemPrompt = overrides.systemPrompt ?? this.profile.getSystemPrompt();
+    const systemPrompt = isSpineEnabled() ? appendSpineView(baseSystemPrompt) : baseSystemPrompt;
     return {
       model,
       modelAlias: resolved.modelAlias,
-      systemPrompt: overrides.systemPrompt ?? this.profile.getSystemPrompt(),
+      systemPrompt,
       tools: [...(overrides.tools ?? this.defaultTools())],
       messages: [...messages],
       source: overrides.source,

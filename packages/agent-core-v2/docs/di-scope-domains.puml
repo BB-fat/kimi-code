@@ -103,6 +103,7 @@ package "Agent scope (per agent)" #FDF5E6 {
   rectangle "<b>mcp</b>\n<size:9><i>Agent</i></size>\n  IAgentMcpService" as mcp #FDEBD0
   rectangle "<b>fullCompaction</b>\n<size:9><i>Agent</i></size>\n  IAgentFullCompactionService" as fullCompaction #FDEBD0
   rectangle "<b>microCompaction</b>\n<size:9><i>Agent</i></size>\n  IAgentMicroCompactionService" as microCompaction #FDEBD0
+  rectangle "<b>spine</b>\n<size:9><i>Agent</i></size>\n  IAgentSpineService" as spine #FDEBD0
   rectangle "<b>externalHooks</b>\n<size:9><i>Agent</i></size>\n  IAgentExternalHooksService" as externalHooks #FDEBD0
   rectangle "<b>usage</b>\n<size:9><i>Agent</i></size>\n  IAgentUsageService" as usage #FDEBD0
   rectangle "<b>rpc</b>\n<size:9><i>Agent</i></size>\n  IAgentRPCService" as rpc #FDEBD0
@@ -305,6 +306,16 @@ microCompaction --> profile #34495E
 microCompaction --> telemetry #34495E
 microCompaction --> loop #34495E
 microCompaction --> config #34495E
+spine --> contextMemory #34495E
+spine --> contextSize #34495E
+spine --> profile #34495E
+spine --> wire #34495E
+spine --> loop #34495E
+spine --> hostFs #34495E
+spine --> hostEnvironment #34495E
+spine --> workspaceContext #34495E
+spine --> toolRegistry #34495E
+contextProjector --> spine #34495E
 externalHooks --> config #34495E
 externalHooks --> bootstrap #34495E
 externalHooks --> plugin #34495E
@@ -374,6 +385,9 @@ goal ..> turn #16A085 : turn lifecycle hooks
 goal ..> loop #16A085 : step/usage hooks
 goal ..> eventSink #16A085 : hook.result / goal.updated
 microCompaction ..> wire #16A085 : micro_compaction.apply
+spine ..> wire #16A085 : spine.open/close/next
+spine ..> loop #16A085 : beforeStep/afterStep hooks
+fullCompaction ..> wire #16A085 : spine.root_compact (spine on)
 swarm ..> wire #16A085 : swarm_mode.enter/exit
 swarm ..> turn #16A085 : hooks.onEnded
 task ..> wire #16A085 : task.started/terminated

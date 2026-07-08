@@ -337,6 +337,7 @@ export * from '#/agent/microCompaction/microCompaction';
 export * from '#/agent/microCompaction/microCompactionOps';
 export * from '#/agent/microCompaction/flag';
 export * from '#/agent/microCompaction/microCompactionService';
+export * from '#/agent/spine/index';
 export * from '#/agent/permissionMode/permissionMode';
 export * from '#/agent/permissionMode/permissionModeService';
 export * from '#/agent/permissionPolicy/permissionPolicy';

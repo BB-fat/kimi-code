@@ -3,10 +3,17 @@ import { InstantiationType } from '#/_base/di/extensions';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
 import { renderPrompt } from "#/_base/utils/render-prompt";
 import { estimateTokensForMessages } from "#/_base/utils/tokens";
-import { buildCompactionSummaryText, isRealUserInput } from '#/agent/contextMemory/compactionHandoff';
+import {
+  buildCompactionSummaryText,
+  createCompactionSummaryMessage,
+  isRealUserInput,
+} from '#/agent/contextMemory/compactionHandoff';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentContextSizeService } from '#/agent/contextSize/contextSize';
+import { contextSizeMeasured } from '#/agent/contextSize/contextSizeOps';
+import { isSpineEnabled } from '#/agent/spine/flag';
+import { SpineModel, spineRootCompact } from '#/agent/spine/spineOps';
 import { IAgentLLMRequesterService, type LLMRequestFinish } from '#/agent/llmRequester/llmRequester';
 import { retryBackoffDelays, sleepForRetry } from '#/agent/llmRequester/retry';
 import { IAgentLoopService, type LoopErrorContext } from '#/agent/loop/loop';
@@ -465,12 +472,14 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
       }
 
       const summary = this.postProcessSummary(attempt.summary);
-      const result = this.context.applyCompaction({
-        summary,
-        contextSummary: buildCompactionSummaryText(summary),
-        compactedCount,
-        tokensBefore,
-      });
+      const result = isSpineEnabled()
+        ? this.applyRootCompaction(summary, compactedCount, tokensBefore)
+        : this.context.applyCompaction({
+            summary,
+            contextSummary: buildCompactionSummaryText(summary),
+            compactedCount,
+            tokensBefore,
+          });
 
       this.telemetry.track('compaction_finished', {
         // Never send `data.instruction` (user-authored content) to telemetry.
@@ -499,6 +508,37 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
       if (isKimiError(error) && error.code === ErrorCodes.AUTH_LOGIN_REQUIRED) throw error;
       throw new KimiError(ErrorCodes.COMPACTION_FAILED, String(error), { cause: error });
     }
+  }
+
+  private applyRootCompaction(
+    summary: string,
+    compactedCount: number,
+    tokensBefore: number,
+  ): CompactionResult {
+    const contextSummary = buildCompactionSummaryText(summary);
+    const summaryMessage = createCompactionSummaryMessage(contextSummary);
+    const summaryAt = this.context.get().length;
+    this.context.append(summaryMessage);
+    const epochStartAt = this.context.get().length;
+    const tokensAfter = estimateTokensForMessages([summaryMessage]);
+    const spineState = this.wire.getModel(SpineModel);
+    this.wire.dispatch(
+      spineRootCompact({
+        epoch: spineState.rootEpoch + 1,
+        epochStartAt,
+        epochMemoryAt: summaryAt,
+      }),
+      contextSizeMeasured({ length: epochStartAt, tokens: tokensAfter }),
+    );
+    return {
+      summary,
+      contextSummary,
+      compactedCount,
+      tokensBefore,
+      tokensAfter,
+      keptUserMessageCount: 0,
+      droppedCount: compactedCount,
+    };
   }
 
   private postProcessSummary(summary: string): string {
