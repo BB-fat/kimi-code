@@ -134,6 +134,12 @@ const MIGRATE_CLI_OPTIONS: CLIOptions = {
 
 export function main(): void {
   process.title = PROCESS_NAME;
+  // spine-v2 branch dogfood default: turn on the v2 engine and the spine
+  // experiment out of the box so an installed `kimi` needs no env prelude.
+  // `??=` only fills an unset value, so `KIMI_CODE_EXPERIMENTAL_FLAG=0` /
+  // `KIMI_CODE_SPINE=0` still opt out. Not intended for upstream.
+  process.env['KIMI_CODE_EXPERIMENTAL_FLAG'] ??= '1';
+  process.env['KIMI_CODE_SPINE'] ??= '1';
   installCrashHandlers();
   // Route all outbound fetch through HTTP_PROXY/HTTPS_PROXY (honoring NO_PROXY)
   // before any client is constructed. No-op when no proxy variable is set; an
