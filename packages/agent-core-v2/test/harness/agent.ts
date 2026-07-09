@@ -115,7 +115,7 @@ import {
   type ScopeSeed,
   type ServiceIdentifier,
 } from '#/index';
-import { ISessionActivityKernel } from '#/activity/activity';
+import { IAgentActivityService, ISessionActivityKernel } from '#/activity/activity';
 import { IEventBus } from '#/app/event/eventBus';
 import { IAgentWireService } from '#/wire/tokens';
 import type { PersistedRecord } from '#/wire/wireService';
@@ -1105,6 +1105,7 @@ export class AgentTestContext {
     });
 
     this.initializeRestorableServices();
+    this.get(IAgentActivityService).markReady();
 
     const wire = this.get(IAgentWireService);
     this.disposables.push(

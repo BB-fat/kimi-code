@@ -5,7 +5,7 @@
  * through the DI scope tree and seeding each with its identity and storage
  * addressing, running lifecycle hook slots, and tearing them down on
  * close/archive — archiving flags the session's `sessionMetadata`, removes
- * its `agentLifecycle` agents, and
+ * its `agentLifecycle` agents, restoring clears the archived flag, and
  * broadcasts through `event`. Materializes the session's initial metadata on
  * creation by resolving `sessionMetadata`. Bound at App scope. Persisted
  * sessions are discovered through the `sessionIndex` read model, and workspace
@@ -228,18 +228,11 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
       // Resolve context memory BEFORE restoring so its reducers are registered;
       // otherwise the wire replay applies context records into a void and the
       // restored transcript never lands in context memory.
-      const contextMemory = main.accessor.get(IAgentContextMemoryService);
+      main.accessor.get(IAgentContextMemoryService);
       const mainWireRecord = main.accessor.get(IAgentWireRecordService);
       await mainWireRecord.restore();
       const records = mainWireRecord.getRecords() as readonly PersistedRecord[];
       await main.accessor.get(IAgentWireService).replay(...records);
-      const contextAfter = contextMemory.get();
-      console.log(
-        `[doResume] session=${sessionId} wireRecords=${records.length}` +
-          ` contextRecordTypes=[${records.filter((r) => r.type.startsWith('context.')).map((r) => r.type)}]` +
-          ` contextAfterReplay=${contextAfter.length}` +
-          ` roles=[${contextAfter.map((m) => `${m.role}:${m.origin?.kind ?? 'none'}`)}]`,
-      );
     }
     await this.announceCreated({ sessionId, handle, source: 'resume' });
     return handle;
@@ -275,6 +268,13 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
     this.sessions.delete(sessionId);
     handle.dispose();
     this._onDidArchiveSession.fire({ sessionId });
+  }
+
+  async restore(sessionId: string): Promise<ISessionScopeHandle | undefined> {
+    const handle = await this.resume(sessionId);
+    if (handle === undefined) return undefined;
+    await handle.accessor.get(ISessionMetadata).setArchived(false);
+    return handle;
   }
 
   private async announceWillClose(event: SessionWillCloseEvent): Promise<void> {
