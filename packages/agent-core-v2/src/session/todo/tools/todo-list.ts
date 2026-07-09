@@ -9,11 +9,13 @@
  *
  * The list is session-shared: the tool reads/writes `ISessionTodoService`,
  * which persists every change as a `todo.set` wire record on the main agent.
- * Self-registers via `registerTool(TodoListTool)` at module load; the Eager
+ * Self-registers via `registerTool(...)` at module load; the Eager
  * `AgentBuiltinToolsRegistrar` instantiates one per agent (resolving the
  * Session-scope `ISessionTodoService` from the parent scope) and registers it
  * into that agent's tool registry — never from a service constructor, which
  * would re-enter `ISessionTodoService` while it is still being constructed.
+ * Registration is skipped entirely when the spine experiment is enabled (see
+ * the `when` gate at the bottom of this module).
  */
 
 import { z } from 'zod';
@@ -22,6 +24,7 @@ import type { BuiltinTool, ToolExecution } from '#/agent/tool/toolContract';
 import { registerTool } from '#/agent/toolRegistry/toolContribution';
 import { toInputJsonSchema } from '#/_base/tools/support/input-schema';
 
+import { isSpineEnabled } from '#/agent/spine/flag';
 import { ISessionTodoService } from '#/session/todo/sessionTodo';
 import {
   TODO_LIST_TOOL_NAME,
@@ -89,4 +92,10 @@ export class TodoListTool implements BuiltinTool<TodoListInput> {
   }
 }
 
-registerTool(TodoListTool);
+// While the spine experiment runs, the model manages task progress through the
+// spine tree instead, so the flat TodoList tool steps aside: two parallel
+// progress trackers (flat list + tree) would drift apart and confuse the
+// model. `when` is evaluated per Agent registry construction (see
+// `toolContribution`), which happens after the CLI `main()` process env is
+// settled, so `KIMI_CODE_SPINE` toggles take effect for every new agent.
+registerTool(TodoListTool, { when: () => !isSpineEnabled() });

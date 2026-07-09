@@ -7,6 +7,8 @@
  * themselves; the local filesystem backend supplies the implementation.
  */
 
+import { normalize } from 'pathe';
+
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';
 
 export interface WorkspaceAdditionalDirsLoadResult {
@@ -28,3 +30,21 @@ export interface IWorkspaceLocalConfigService {
 
 export const IWorkspaceLocalConfigService: ServiceIdentifier<IWorkspaceLocalConfigService> =
   createDecorator<IWorkspaceLocalConfigService>('workspaceLocalConfigService');
+
+/**
+ * Normalize each entry and drop duplicates while preserving first-seen order.
+ * v1 parity: `packages/agent-core/src/config/workspace-local.ts`.
+ */
+export function normalizeAdditionalDirs(additionalDirs: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const normalizedDirs: string[] = [];
+
+  for (const additionalDir of additionalDirs) {
+    const normalized = normalize(additionalDir);
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    normalizedDirs.push(normalized);
+  }
+
+  return normalizedDirs;
+}

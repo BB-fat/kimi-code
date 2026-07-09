@@ -550,6 +550,11 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
   }
 
   private currentTodos(): readonly TodoItem[] {
+    // With spine enabled the tree (not the frozen flat list) carries the plan:
+    // the TodoList tool is gated off, so anything left here is stale data from
+    // before the experiment switched on. The tree itself survives compaction
+    // in the wire and needs no re-injection.
+    if (isSpineEnabled()) return [];
     return this.todo.getTodos();
   }
 

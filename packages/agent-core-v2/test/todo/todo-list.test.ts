@@ -1,9 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { type ISessionTodoService } from '#/session/todo/sessionTodo';
 import { TODO_LIST_TOOL_NAME, type TodoItem } from '#/session/todo/todoItem';
 import { TodoListInputSchema, TodoListTool } from '#/session/todo/tools/todo-list';
+import { testAgent } from '../harness';
 import { executeTool } from '../tools/fixtures/execute-tool';
+
+const SPINE_ENV = 'KIMI_CODE_SPINE';
 
 const signal = new AbortController().signal;
 
@@ -169,5 +172,25 @@ describe('TodoListTool', () => {
     expect(readExecution.description).toBe('Reading todo list');
     expect(clearExecution.description).toBe('Clearing todo list');
     expect(updateExecution.description).toBe('Updating todo list');
+  });
+});
+
+describe('TodoList tool registration', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('is registered when spine is disabled', () => {
+    vi.stubEnv(SPINE_ENV, '0');
+    const ctx = testAgent();
+    expect(ctx.toolsData().some((tool) => tool.name === TODO_LIST_TOOL_NAME)).toBe(true);
+  });
+
+  it('is not registered when spine is enabled', () => {
+    // The spine tree takes over progress tracking; two parallel trackers
+    // (flat list + tree) would drift apart, so the flat tool steps aside.
+    vi.stubEnv(SPINE_ENV, '1');
+    const ctx = testAgent();
+    expect(ctx.toolsData().some((tool) => tool.name === TODO_LIST_TOOL_NAME)).toBe(false);
   });
 });

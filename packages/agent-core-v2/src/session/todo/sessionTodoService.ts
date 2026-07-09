@@ -20,6 +20,7 @@ import { Emitter } from '#/_base/event';
 import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import { IAgentProfileService } from '#/agent/profile/profile';
+import { isSpineEnabled } from '#/agent/spine/flag';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
 import { IAgentWireService } from '#/wire/tokens';
 
@@ -125,7 +126,11 @@ export class SessionTodoService extends Disposable implements ISessionTodoServic
     const memory = handle.accessor.get(IAgentContextMemoryService);
     const profile = handle.accessor.get(IAgentProfileService);
     return todoListStaleReminder({
-      active: profile.isToolActive(TODO_LIST_TOOL_NAME, 'builtin'),
+      // Spine replaces the flat todo list as the model's progress tracker
+      // (the tool itself is gated off via `registerTool(..., { when })` in
+      // `todo-list`), so the "update your todo list" nudge must stay silent
+      // too — otherwise the model gets prodded toward a tool it no longer has.
+      active: !isSpineEnabled() && profile.isToolActive(TODO_LIST_TOOL_NAME, 'builtin'),
       history: memory.get(),
       todos: this.todos,
     });

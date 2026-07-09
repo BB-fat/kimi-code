@@ -19,6 +19,11 @@ import type {
   TranscriptEntry,
 } from '../types';
 import { formatErrorMessage, isTodoItemShape } from '../utils/event-payload';
+import {
+  isSpineProjectionActive,
+  projectSpineTree,
+  scanSpineProjectionFromHistory,
+} from '../utils/spine-projection';
 import { formatBackgroundAgentTranscript } from '../utils/background-agent-status';
 import { formatBackgroundTaskTranscript } from '../utils/background-task-status';
 import { buildGoalCompletionMessage } from '../utils/goal-completion';
@@ -111,6 +116,7 @@ export class SessionReplayRenderer {
   private hydrateSnapshot(agent: ResumedAgentState): void {
     this.host.setAppState(appStateFromResumeAgent(agent));
     this.hydrateTodoPanel(agent);
+    this.hydrateSpineProjection(agent);
     this.hydrateBackgroundState(agent);
   }
 
@@ -130,6 +136,21 @@ export class SessionReplayRenderer {
     }
 
     this.host.streamingUI.setTodoList(todos);
+  }
+
+  /**
+   * Rebuilds the spine task tree from the stored history and hands it to both
+   * the todo panel and the live event handler (which keeps tracking accepted
+   * transitions after resume). Runs after {@link hydrateTodoPanel} and wins
+   * over it: a session with spine activity never maintained a flat todo list
+   * (the tool is gated off while spine is enabled), so any spine content is
+   * the authoritative progress view.
+   */
+  private hydrateSpineProjection(agent: ResumedAgentState): void {
+    const projection = scanSpineProjectionFromHistory(agent.context.history);
+    if (!isSpineProjectionActive(projection)) return;
+    this.host.sessionEventHandler.hydrateSpineProjection(projection);
+    this.host.streamingUI.setSpineTree(projectSpineTree(projection));
   }
 
   /**

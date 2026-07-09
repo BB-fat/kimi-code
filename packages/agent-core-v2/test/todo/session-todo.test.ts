@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { ServiceIdentifier, ServicesAccessor } from '#/_base/di/instantiation';
 import { IInstantiationService } from '#/_base/di/instantiation';
@@ -7,6 +7,7 @@ import { type IAgentScopeHandle, LifecycleScope } from '#/_base/di/scope';
 import { Emitter } from '#/_base/event';
 import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
+import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { createHooks } from '#/hooks';
@@ -25,17 +26,27 @@ interface RecordedTodoSet {
   readonly todos: readonly TodoItem[];
 }
 
+interface FakeAgentOptions {
+  /** What the profile stub answers for `isToolActive`. */
+  readonly toolActive?: boolean;
+  /** History returned by the context memory stub. */
+  readonly history?: readonly ContextMessage[];
+}
+
 interface FakeAgent {
   readonly handle: IAgentScopeHandle;
   readonly registeredTools: string[];
   readonly registeredVariants: string[];
+  readonly reminderProviders: Map<string, () => string | undefined>;
   readonly appended: RecordedTodoSet[];
   readonly resumers: Array<(record: RecordedTodoSet) => void>;
 }
 
-function makeFakeAgent(agentId: string): FakeAgent {
+function makeFakeAgent(agentId: string, options: FakeAgentOptions = {}): FakeAgent {
+  const { toolActive = false, history = [] } = options;
   const registeredTools: string[] = [];
   const registeredVariants: string[] = [];
+  const reminderProviders = new Map<string, () => string | undefined>();
   const appended: RecordedTodoSet[] = [];
   const resumers: Array<(record: RecordedTodoSet) => void> = [];
 
@@ -52,8 +63,9 @@ function makeFakeAgent(agentId: string): FakeAgent {
 
   const injectorStub = {
     _serviceBrand: undefined,
-    register: (variant: string) => {
+    register: (variant: string, provider?: () => string | undefined) => {
       registeredVariants.push(variant);
+      if (provider !== undefined) reminderProviders.set(variant, provider);
       return toDisposable(() => {});
     },
   };
@@ -64,12 +76,12 @@ function makeFakeAgent(agentId: string): FakeAgent {
 
   const memoryStub = {
     _serviceBrand: undefined,
-    get: () => [],
+    get: () => history,
   };
 
   const profileStub = {
     _serviceBrand: undefined,
-    isToolActive: () => false,
+    isToolActive: () => toolActive,
   };
 
   let todoState: readonly TodoItem[] = [];
@@ -125,7 +137,7 @@ function makeFakeAgent(agentId: string): FakeAgent {
     dispose: () => {},
   };
 
-  return { handle, registeredTools, registeredVariants, appended, resumers };
+  return { handle, registeredTools, registeredVariants, reminderProviders, appended, resumers };
 }
 
 interface LifecycleStub {
@@ -184,6 +196,10 @@ function makeLifecycleStub(handles: readonly IAgentScopeHandle[] = []): Lifecycl
 }
 
 describe('SessionTodoService', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('starts empty and updates in-memory list on setTodos', () => {
     const lifecycle = makeLifecycleStub();
     const service = new SessionTodoService(lifecycle.service);
@@ -296,5 +312,29 @@ describe('SessionTodoService', () => {
     expect(typeof service.setTodos).toBe('function');
     expect(typeof service.clear).toBe('function');
     expect(typeof service.onDidChange).toBe('function');
+  });
+
+  it('silences the stale-todo reminder while spine is enabled', () => {
+    // Stale by the reminder's own rules: well over ten assistant turns since
+    // the last TodoList write and since the last reminder.
+    const history = Array.from({ length: 12 }, () => ({
+      role: 'assistant',
+      content: [],
+      toolCalls: [],
+    })) as unknown as ContextMessage[];
+    const main = makeFakeAgent('main', { toolActive: true, history });
+    const lifecycle = makeLifecycleStub([main.handle]);
+    const service = new SessionTodoService(lifecycle.service);
+    service.setTodos([{ title: 'still open', status: 'in_progress' }]);
+    const reminder = main.reminderProviders.get(TODO_LIST_REMINDER_VARIANT);
+    expect(reminder).toBeDefined();
+
+    // Baseline: with the flat list tool active, the nudge fires.
+    expect(reminder!()).toBeDefined();
+
+    // With spine on the tool is gone, so the nudge must stay silent instead of
+    // prodding the model toward a tracker it can no longer see.
+    vi.stubEnv('KIMI_CODE_SPINE', '1');
+    expect(reminder!()).toBeUndefined();
   });
 });

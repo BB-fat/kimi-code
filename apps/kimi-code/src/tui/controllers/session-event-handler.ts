@@ -59,6 +59,13 @@ import {
 } from '../goal-queue-store';
 import { formatBackgroundTaskTranscript } from '../utils/background-task-status';
 import { formatHookResultMarkdown } from '../utils/hook-result-format';
+import {
+  applyAcceptedSpineTransition,
+  createSpineProjectionState,
+  isSpineControlToolName,
+  projectSpineTree,
+  type SpineProjectionState,
+} from '../utils/spine-projection';
 import { McpOAuthAuthorizationUrlOpener } from '../utils/mcp-oauth';
 import {
   formatMcpStartupStatusSummary,
@@ -146,6 +153,8 @@ export class SessionEventHandler {
   private queuedGoalPromotionPending = false;
   private queuedGoalPromotionInFlight = false;
   private queuedGoalPromotionTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Transcript-derived spine task-tree mirror; drives the todo panel when spine is active. */
+  private spineProjection: SpineProjectionState = createSpineProjectionState();
 
   resetRuntimeState(): void {
     this.backgroundTasks.clear();
@@ -154,6 +163,7 @@ export class SessionEventHandler {
     this.renderedSkillActivationIds.clear();
     this.renderedPluginCommandActivationIds.clear();
     this.renderedMcpServerStatusKeys.clear();
+    this.spineProjection = createSpineProjectionState();
     this.mcpServers.clear();
     this.goalCompletionAwaitingClear = false;
     this.goalCompletionTurnEnded = false;
@@ -163,6 +173,16 @@ export class SessionEventHandler {
     this.queuedGoalPromotionInFlight = false;
     this.clearQueuedGoalPromotionTimer();
     this.stopAllMcpServerStatusSpinners();
+  }
+
+  /**
+   * Seeds the spine projection from a resumed transcript (replay path). Replay
+   * mounts tool call components directly, bypassing `handleToolResult`, so
+   * without this the first post-resume transition would rebuild the tree from
+   * scratch and drop everything before it.
+   */
+  hydrateSpineProjection(state: SpineProjectionState): void {
+    this.spineProjection = state;
   }
 
   clearAgentSwarmProgress(): void {
@@ -582,15 +602,27 @@ export class SessionEventHandler {
       resultData,
       event.isError === true,
     );
-    if (matchedCall !== undefined && matchedCall.name === 'TodoList' && !event.isError) {
-      const rawTodos = (matchedCall.args as { todos?: unknown }).todos;
-      if (Array.isArray(rawTodos)) {
-        const sanitized = rawTodos
-          .filter((todo): todo is { title: string; status: 'pending' | 'in_progress' | 'done' } =>
-            isTodoItemShape(todo),
-          )
-          .map((t) => ({ title: t.title, status: t.status }));
-        streamingUI.setTodoList(sanitized);
+    if (matchedCall !== undefined && !event.isError) {
+      if (matchedCall.name === 'TodoList') {
+        const rawTodos = (matchedCall.args as { todos?: unknown }).todos;
+        if (Array.isArray(rawTodos)) {
+          const sanitized = rawTodos
+            .filter((todo): todo is { title: string; status: 'pending' | 'in_progress' | 'done' } =>
+              isTodoItemShape(todo),
+            )
+            .map((t) => ({ title: t.title, status: t.status }));
+          streamingUI.setTodoList(sanitized);
+        }
+      } else if (isSpineControlToolName(matchedCall.name)) {
+        // Spine sessions never emit TodoList calls (the tool is gated off
+        // core-side), so the panel tracks the accepted spine transition
+        // instead — the receipt means core will commit the tree move.
+        this.spineProjection = applyAcceptedSpineTransition(
+          this.spineProjection,
+          matchedCall.name,
+          matchedCall.args,
+        );
+        streamingUI.setSpineTree(projectSpineTree(this.spineProjection));
       }
     }
     this.host.patchLivePane({ mode: 'waiting' });

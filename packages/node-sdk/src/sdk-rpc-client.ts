@@ -28,6 +28,7 @@ import type {
   ResumedSessionSummary,
   SessionSummary,
 } from '#/types';
+import { V2Host } from '#/v2/host';
 
 export interface SDKRpcClientOptions {
   readonly homeDir?: string;
@@ -39,13 +40,21 @@ export interface SDKRpcClientOptions {
   readonly onOAuthRefresh?: (outcome: OAuthRefreshOutcome) => void;
 }
 
+function useAgentCoreV2(): boolean {
+  const on = (v: string | undefined): boolean => v !== undefined && v !== '' && v !== '0';
+  return (
+    on(process.env['KIMI_CODE_EXPERIMENTAL_AGENT_V2']) ||
+    on(process.env['KIMI_CODE_EXPERIMENTAL_FLAG'])
+  );
+}
+
 export class SDKRpcClient extends SDKRpcClientBase {
   readonly homeDir: string;
   readonly configPath: string;
   readonly identity: KimiHostIdentity | undefined;
   readonly telemetry: TelemetryClient;
   readonly auth: KimiAuthFacade;
-  readonly core: KimiCore;
+  readonly core: KimiCore | V2Host;
 
   private readonly ready: Promise<RPCMethods<CoreAPI>>;
 
@@ -69,7 +78,7 @@ export class SDKRpcClient extends SDKRpcClientBase {
     void getRootLogger().configure(resolveLoggingConfig({ homeDir: this.homeDir }));
 
     const [coreRpc, sdkRpc] = createRPC<CoreAPI, SDKAPI>();
-    this.core = new KimiCore(coreRpc, {
+    const coreOptions = {
       homeDir: options.homeDir,
       configPath: this.configPath,
       kimiRequestHeaders: this.createKimiRequestHeaders(),
@@ -78,7 +87,10 @@ export class SDKRpcClient extends SDKRpcClientBase {
       skillDirs: options.skillDirs,
       telemetry: this.telemetry,
       appVersion: this.identity?.version,
-    });
+    };
+    this.core = useAgentCoreV2()
+      ? new V2Host(coreRpc, coreOptions)
+      : new KimiCore(coreRpc, coreOptions);
     this.ready = sdkRpc(new ClientAPI(this));
   }
 
@@ -92,6 +104,9 @@ export class SDKRpcClient extends SDKRpcClientBase {
     } catch {
       // never let logger flush block process exit
     }
+    // Dispose the core (v2 app scope) so its services release ref'd handles
+    // (file watchers, sockets) and a one-shot CLI process can exit.
+    (this.core as { dispose?: () => void }).dispose?.();
   }
 
   protected async getRpc(): Promise<RPCMethods<CoreAPI>> {
@@ -105,6 +120,9 @@ export class SDKRpcClient extends SDKRpcClientBase {
   ): Promise<SessionSummary> {
     const { planMode, ...coreInput } = input;
     void planMode;
+    if (this.core instanceof V2Host) {
+      return this.core.createSession(coreInput) as Promise<SessionSummary>;
+    }
     return this.core.createSessionWithOverrides(coreInput, { kaos, persistenceKaos });
   }
 
@@ -113,6 +131,12 @@ export class SDKRpcClient extends SDKRpcClientBase {
     kaos: Kaos,
     persistenceKaos?: Kaos,
   ): Promise<ResumedSessionSummary> {
+    if (this.core instanceof V2Host) {
+      return this.core.resumeSession({
+        ...input,
+        sessionId: input.id,
+      }) as Promise<ResumedSessionSummary>;
+    }
     return this.core.resumeSessionWithOverrides(
       { ...input, sessionId: input.id },
       { kaos, persistenceKaos },

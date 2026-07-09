@@ -5,6 +5,7 @@ import {
   formatHiddenCounts,
   selectVisibleTodos,
   type TodoItem,
+  type TodoTreeNode,
 } from '#/tui/components/chrome/todo-panel';
 
 function strip(text: string): string {
@@ -192,6 +193,162 @@ describe('TodoPanelComponent', () => {
     panel.clear();
     panel.setTodos(many(7));
     expect(strip(panel.render(80).join('\n'))).toMatch(/\+2 more/);
+  });
+
+  // ── tree mode (spine sessions) ────────────────────────
+
+  const ip = (
+    title: string,
+    options: { active?: boolean; children?: TodoTreeNode[] } = {},
+  ): TodoTreeNode => ({
+    title,
+    status: 'in_progress',
+    active: options.active,
+    children: options.children ?? [],
+  });
+
+  const doneBranch = (title: string, children: readonly TodoTreeNode[] = []): TodoTreeNode => ({
+    title,
+    status: 'done',
+    children,
+  });
+
+  it('tree mode: renders hierarchy indented along the cursor chain', () => {
+    const panel = new TodoPanelComponent();
+    panel.setTree([ip('root task', { children: [ip('current step', { active: true })] })]);
+    const lines = panel.render(80).map(strip);
+    expect(lines).toEqual(['─'.repeat(80), '  Todo', '  ● root task', '    ● current step']);
+  });
+
+  it('tree mode: folds done subtrees into a single counted line', () => {
+    const panel = new TodoPanelComponent();
+    panel.setTree([
+      ip('root', {
+        children: [
+          doneBranch('branch', [doneBranch('leaf a'), doneBranch('leaf b')]),
+          ip('current', { active: true }),
+        ],
+      }),
+    ]);
+    const out = strip(panel.render(80).join('\n'));
+    expect(out).toMatch(/✓ branch · 2/);
+    expect(out).not.toMatch(/leaf a/);
+    expect(out).toMatch(/● current/);
+    expect(panel.hasOverflow()).toBe(true);
+  });
+
+  it('tree mode: toggleExpanded flips between folded and full tree', () => {
+    const panel = new TodoPanelComponent();
+    panel.setTree([
+      ip('root', {
+        children: [
+          doneBranch('branch', [doneBranch('leaf a'), doneBranch('leaf b')]),
+          ip('current', { active: true }),
+          doneBranch('tail 1'),
+          doneBranch('tail 2'),
+        ],
+      }),
+    ]);
+    expect(strip(panel.render(80).join('\n'))).toMatch(/✓ branch · 2/);
+
+    panel.toggleExpanded();
+    const expandedOut = strip(panel.render(80).join('\n'));
+    expect(expandedOut).toMatch(/leaf a/);
+    expect(expandedOut).not.toMatch(/branch · 2/);
+    expect(expandedOut).toMatch(/all 7 nodes · ctrl\+t to collapse/);
+
+    panel.toggleExpanded();
+    expect(strip(panel.render(80).join('\n'))).toMatch(/✓ branch · 2/);
+  });
+
+  it('tree mode: collapsed view keeps the cursor row visible when rows exceed the cap', () => {
+    const panel = new TodoPanelComponent();
+    panel.setTree([
+      ip('root', {
+        children: [
+          doneBranch('d0'),
+          doneBranch('d1'),
+          doneBranch('d2'),
+          doneBranch('d3'),
+          doneBranch('d4'),
+          ip('deep cursor', { active: true }),
+        ],
+      }),
+    ]);
+    const lines = panel.render(80).map(strip);
+    const out = lines.join('\n');
+    expect(lines.at(2)).toBe('    ✓ d1');
+    expect(out).not.toMatch(/● root/);
+    expect(lines.at(6)).toBe('    ● deep cursor');
+    expect(lines.at(7)).toBe('  … +2 more · ctrl+t to expand');
+  });
+
+  it('tree mode: hasOverflow is true only when expanding would reveal more', () => {
+    const panel = new TodoPanelComponent();
+    panel.setTree([
+      ip('root', { children: [doneBranch('leaf'), ip('current', { active: true })] }),
+    ]);
+    expect(panel.hasOverflow()).toBe(false); // 3 rows, nothing folded
+
+    panel.setTree([
+      ip('root', {
+        children: [
+          doneBranch('branch', [doneBranch('leaf')]),
+          ip('current', { active: true }),
+        ],
+      }),
+    ]);
+    expect(panel.hasOverflow()).toBe(true); // folded subtree
+
+    panel.setTree([
+      ip('root', {
+        children: [
+          doneBranch('d0'),
+          doneBranch('d1'),
+          doneBranch('d2'),
+          doneBranch('d3'),
+          doneBranch('d4'),
+          doneBranch('d5'),
+          ip('current', { active: true }),
+        ],
+      }),
+    ]);
+    expect(panel.hasOverflow()).toBe(true); // 8 rows over the cap
+  });
+
+  it('tree mode: empty roots render nothing (root epoch hides the panel)', () => {
+    const panel = new TodoPanelComponent();
+    panel.setTree([]);
+    expect(panel.isEmpty()).toBe(true);
+    expect(panel.hasOverflow()).toBe(false);
+    expect(panel.render(80)).toEqual([]);
+  });
+
+  it('tree mode: setTodos switches back to flat and clear() resets both', () => {
+    const panel = new TodoPanelComponent();
+    panel.setTree([ip('root', { active: true })]);
+    expect(strip(panel.render(80).join('\n'))).toMatch(/● root/);
+
+    panel.setTodos([{ title: 'flat', status: 'pending' }]);
+    const flat = strip(panel.render(80).join('\n'));
+    expect(flat).toMatch(/○ flat/);
+    expect(flat).not.toMatch(/● root/);
+
+    panel.setTree([ip('root', { active: true })]);
+    expect(panel.isEmpty()).toBe(false);
+    panel.clear();
+    expect(panel.isEmpty()).toBe(true);
+    expect(panel.render(80)).toEqual([]);
+  });
+
+  it('tree mode: setTree keeps a defensive copy', () => {
+    const panel = new TodoPanelComponent();
+    const mutable = ip('root', { children: [doneBranch('child')] });
+    panel.setTree([mutable]);
+    (mutable as unknown as { children: TodoTreeNode[] }).children = [doneBranch('hacked')];
+    const out = strip(panel.render(80).join('\n'));
+    expect(out).toMatch(/✓ child/);
+    expect(out).not.toMatch(/hacked/);
   });
 });
 

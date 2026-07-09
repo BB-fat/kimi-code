@@ -138,10 +138,12 @@ export * from '#/app/skillCatalog/skillRoots';
 export * from '#/app/skillCatalog/builtin/builtin';
 export * from '#/app/skillCatalog/builtinSkillSource';
 export * from '#/app/skillCatalog/userFileSkillSource';
+export * from '#/app/skillCatalog/cliSkillDirs';
 export * from '#/session/sessionSkillCatalog/skillCatalog';
 export * from '#/session/sessionSkillCatalog/skillCatalogService';
 export * from '#/session/sessionSkillCatalog/workspaceFileSkillSource';
 export * from '#/session/sessionSkillCatalog/pluginSkillSource';
+export * from '#/session/sessionSkillCatalog/explicitSkillSource';
 export * from '#/agent/permissionGate/permissionGate';
 export * from '#/agent/permissionGate/permissionGateService';
 import '#/app/flag/flag';
@@ -387,7 +389,10 @@ import '#/agent/toolRegistry/toolRegistryService';
 export { IAgentBuiltinToolsRegistrar } from '#/agent/toolRegistry/builtinToolsRegistrar';
 export { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 export { registerTool } from '#/agent/toolRegistry/toolContribution';
-export type { ToolContribution, ToolContributionOptions } from '#/agent/toolRegistry/toolContribution';
+export type {
+  ToolContribution,
+  ToolContributionOptions,
+} from '#/agent/toolRegistry/toolContribution';
 export * from '#/agent/userTool/userTool';
 export * from '#/agent/userTool/userToolOps';
 export * from '#/agent/userTool/userToolService';
