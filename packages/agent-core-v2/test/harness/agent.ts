@@ -25,6 +25,7 @@ import type { McpServiceOptions } from '#/agent/mcp/mcp';
 import type { PermissionMode } from '#/agent/permissionPolicy/types';
 import type { PermissionRule } from '#/agent/permissionRules/permissionRules';
 import { IAgentPlanService } from '#/agent/plan/plan';
+import { IAgentSpineService } from '#/agent/spine/spine';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentPromptService } from '#/agent/prompt/prompt';
 import type { AgentAPI } from '#/agent/rpc/core-api';
@@ -1207,6 +1208,10 @@ export class AgentTestContext {
     void permissionRules.rules;
     cron.list();
     void plan.status();
+    // The spine service owns the SpineModel reducer; realize it before
+    // `restorePersisted` replays, or restored spine records land in a void
+    // (same hazard as the context memory above).
+    this.get(IAgentSpineService).renderTree();
   }
 
   configure({
@@ -1697,6 +1702,16 @@ export class AgentTestContext {
           });
         }
         return interaction;
+      },
+      cancelPendingForTurn: (turnId) => {
+        for (const interaction of [...pending.values()]) {
+          if (interaction.origin.turnId !== turnId) continue;
+          pending.delete(interaction.id);
+          this.resolvePendingRpc('toolCall', interaction.id, {
+            cancelled: true,
+            reason: 'turn_ended',
+          });
+        }
       },
       respond: (id, response) => {
         pending.delete(id);
