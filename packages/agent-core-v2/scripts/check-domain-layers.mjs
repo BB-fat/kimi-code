@@ -121,6 +121,7 @@ const DOMAIN_LAYER = new Map([
   ['permissionGate', 3],
   ['flag', 3],
   ['toolExecutor', 3],
+  ['toolResultTruncation', 3],
   ['toolRegistry', 3],
   ['userTool', 3],
   ['permissionMode', 3],
@@ -131,6 +132,7 @@ const DOMAIN_LAYER = new Map([
   ['modelCatalog', 3],
   ['agentProfileCatalog', 3],
   // L4 — agent behaviour
+  ['activity', 4],
   ['context', 4],
   ['message', 4],
   ['turn', 4],
@@ -148,7 +150,6 @@ const DOMAIN_LAYER = new Map([
   ['contextProjector', 4],
   ['contextSize', 4],
   ['fullCompaction', 4],
-  ['microCompaction', 4],
   ['spine', 4],
   ['loop', 4],
   ['media', 4],
@@ -161,6 +162,9 @@ const DOMAIN_LAYER = new Map([
   ['llmRequester', 4],
   ['profile', 4],
   ['prompt', 4],
+  // `shellCommand` orchestrates user `!` commands through `toolRegistry` (L3),
+  // `contextMemory` / `prompt` (L4) and `eventBus` (L1); its highest dependency is L4.
+  ['shellCommand', 4],
   ['replayBuilder', 4],
   ['todo', 4],
   ['web', 4],

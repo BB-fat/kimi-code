@@ -35,8 +35,10 @@
  * **Anti-corruption**: this is the single protocol↔in-process adapter for
  * questions. The v2 domain stores the in-process `QuestionRequest` (camelCase,
  * options without ids); the wire shape (snake_case, synthesized item/option
- * ids, `expires_at`, 5-kind answer union) is derived here. No `agent-core`
- * (v1) imports.
+ * ids, 5-kind answer union) is derived here. On resolve, wire
+ * ids are translated back to question text / option labels (reading the
+ * pending request before it settles) so the flattened record the model sees
+ * is self-explanatory. No `agent-core` (v1) imports.
  */
 
 import {
@@ -100,13 +102,6 @@ const tailParamsSchema = z.object({
 
 const detailsSchema = z.array(z.object({ path: z.string(), message: z.string() }));
 
-/**
- * Wire `expires_at` horizon: v2 interactions never expire, so we emit the v1
- * broker's default timeout (60s) as a stable derived value, because the wire
- * schema requires an `expires_at`.
- */
-const QUESTION_EXPIRY_MS = 60_000;
-
 export function registerQuestionsRoutes(app: QuestionRouteHost, core: Scope): void {
   const listRoute = defineRoute(
     {
@@ -124,7 +119,7 @@ export function registerQuestionsRoutes(app: QuestionRouteHost, core: Scope): vo
     },
     async (req, reply) => {
       const { session_id } = req.params;
-      const handle = core.accessor.get(ISessionLifecycleService).get(session_id);
+      const handle = await core.accessor.get(ISessionLifecycleService).resume(session_id);
       if (handle === undefined) {
         reply.send(
           errEnvelope(ErrorCode.SESSION_NOT_FOUND, `session ${session_id} does not exist`, req.id),
@@ -173,7 +168,7 @@ export function registerQuestionsRoutes(app: QuestionRouteHost, core: Scope): vo
       const questionId = parsed.id;
       const action: 'resolve' | 'dismiss' = parsed.kind === 'bare' ? 'resolve' : parsed.action;
 
-      const handle = core.accessor.get(ISessionLifecycleService).get(session_id);
+      const handle = await core.accessor.get(ISessionLifecycleService).resume(session_id);
       if (handle === undefined) {
         reply.send(
           errEnvelope(ErrorCode.SESSION_NOT_FOUND, `session ${session_id} does not exist`, req.id),
@@ -182,9 +177,11 @@ export function registerQuestionsRoutes(app: QuestionRouteHost, core: Scope): vo
       }
 
       const interaction = handle.accessor.get(ISessionInteractionService);
-      const isPending = interaction.listPending('question').some((i) => i.id === questionId);
+      const pendingInteraction = interaction
+        .listPending('question')
+        .find((i) => i.id === questionId);
 
-      if (!isPending) {
+      if (pendingInteraction === undefined) {
         if (interaction.isRecentlyResolved(questionId)) {
           reply.send({
             code: ErrorCode.APPROVAL_ALREADY_RESOLVED, // 40902 — shared "already_resolved"
@@ -238,7 +235,13 @@ export function registerQuestionsRoutes(app: QuestionRouteHost, core: Scope): vo
         return;
       }
 
-      const result = toInProcessResponse(bodyParse.data);
+      // The pending request must be projected BEFORE answer() settles (and
+      // thereby drops) the kernel entry — its synthesized wire ids are the
+      // lookup table for the id → text translation below.
+      const result = toInProcessResponse(
+        bodyParse.data,
+        toWireQuestion(pendingInteraction, session_id),
+      );
       questions.answer(questionId, result);
       reply.send(
         okEnvelope({ resolved: true as const, resolved_at: new Date().toISOString() }, req.id),
@@ -286,15 +289,14 @@ function buildItem(item: QuestionItem, itemIdx: number): ProtocolQuestionItem {
 export function toWireQuestion(
   interaction: Interaction,
   sessionId: string,
-): ProtocolQuestionRequest & { expires_at: string } {
+): ProtocolQuestionRequest {
   const req = interaction.payload as QuestionRequest;
   const createdAt = new Date(interaction.createdAt).toISOString();
-  const out: ProtocolQuestionRequest & { expires_at: string } = {
+  const out: ProtocolQuestionRequest = {
     question_id: interaction.id,
     session_id: sessionId,
     questions: req.questions.map((q, i) => buildItem(q, i)),
     created_at: createdAt,
-    expires_at: new Date(interaction.createdAt + QUESTION_EXPIRY_MS).toISOString(),
   };
   if (req.turnId !== undefined) out.turn_id = req.turnId;
   if (req.toolCallId !== undefined) out.tool_call_id = req.toolCallId;
@@ -302,29 +304,60 @@ export function toWireQuestion(
 }
 
 /**
- * Protocol REST response body → in-process `QuestionResponse`. Normalization
- * rules (SCHEMAS §6.4):
- *   - single            → option_id
- *   - multi             → option_ids.join(',')
+ * Protocol REST response body → in-process `QuestionResponse`.
+ *
+ * The wire keeps synthesized ids (`q_<idx>` / `opt_<q>_<o>`) so clients can
+ * answer unambiguously, but the flattened record is what the ask-user tool
+ * feeds back to the model — so ids are translated back to text here using
+ * the pending wire `request` (ported from v1's `toAgentCoreResponse`):
+ *   - key               → the question's text (falls back to the raw qid
+ *                         when the request is unavailable or the qid is
+ *                         unknown — stale client, defensive)
+ *   - single            → option label
+ *   - multi             → labels.join(', ')
  *   - other             → text
- *   - multi_with_other  → [...option_ids, other_text].join(',')
+ *   - multi_with_other  → [...labels, other_text].join(', ')
  *   - skipped           → OMIT entry
+ *
+ * Multi-select joins use `', '` to match what the TUI reverse-RPC path
+ * already emits, so the model sees one format regardless of which client
+ * answered.
+ *
+ * Unknown qids and option ids — including ids that belong to a DIFFERENT
+ * question than the one being answered — are kept verbatim rather than
+ * resolved or dropped: translating a cross-question id would hand the model
+ * a plausible-looking label that was never offered for that question, while
+ * the raw id stays diagnosable.
  */
-function toInProcessResponse(resp: ProtocolQuestionResponse): QuestionResult {
+function toInProcessResponse(
+  resp: ProtocolQuestionResponse,
+  request?: ProtocolQuestionRequest,
+): QuestionResult {
+  const itemsById = new Map<string, ProtocolQuestionItem>();
+  for (const item of request?.questions ?? []) {
+    itemsById.set(item.id, item);
+  }
+
   const flattened: QuestionAnswers = {};
   for (const [qid, ans] of Object.entries(resp.answers)) {
+    const item = itemsById.get(qid);
+    const key = item?.question ?? qid;
+    // Resolve option ids only within the answered question's own options
+    // (at most 4, so a linear scan is fine).
+    const optionText = (id: string): string =>
+      item?.options.find((o) => o.id === id)?.label ?? id;
     switch (ans.kind) {
       case 'single':
-        flattened[qid] = ans.option_id;
+        flattened[key] = optionText(ans.option_id);
         break;
       case 'multi':
-        flattened[qid] = ans.option_ids.join(',');
+        flattened[key] = ans.option_ids.map(optionText).join(', ');
         break;
       case 'other':
-        flattened[qid] = ans.text;
+        flattened[key] = ans.text;
         break;
       case 'multi_with_other':
-        flattened[qid] = [...ans.option_ids, ans.other_text].join(',');
+        flattened[key] = [...ans.option_ids.map(optionText), ans.other_text].join(', ');
         break;
       case 'skipped':
         // Omitted from the record — matches SCHEMAS §6.4.

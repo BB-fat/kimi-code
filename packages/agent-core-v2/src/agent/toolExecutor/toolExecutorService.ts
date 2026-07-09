@@ -26,6 +26,7 @@ import type { ToolCall } from '#/app/llmProtocol/message';
 import { ILogService } from '#/_base/log/log';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { OrderedHookSlot } from '#/hooks';
+import { IAgentToolResultTruncationService } from '#/agent/toolResultTruncation/toolResultTruncation';
 import {
   IAgentToolExecutorService,
   type ToolExecutionResult,
@@ -88,6 +89,8 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
     @IAgentToolRegistryService private readonly toolRegistry: IAgentToolRegistryService,
     @IEventBus private readonly eventBus: IEventBus,
     @ITelemetryService private readonly telemetry: ITelemetryService,
+    @IAgentToolResultTruncationService
+    private readonly resultTruncation: IAgentToolResultTruncationService,
     @ILogService private readonly log?: ILogService,
   ) {}
 
@@ -451,6 +454,11 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
       description: displayFields?.description,
       display: displayFields?.display,
     });
+    options.onToolCall?.({
+      toolCallId: call.toolCall.id,
+      name: call.toolName,
+      args,
+    });
   }
 
   private dispatchToolResult(
@@ -517,7 +525,7 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
 
     const coercedResult = coerceToolResult(didCtx.result, call.toolName);
     const effectiveResult = normalizeToolResult(coercedResult);
-    return {
+    const finalResult: ToolResult = {
       ...effectiveResult,
       message: coercedResult.message ?? result.message,
       description: result.description,
@@ -533,6 +541,11 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
       // it by stripping it from `didCtx.result`; in that case this is undefined.
       delivery: coercedResult.delivery,
     };
+    return this.resultTruncation.truncateForModel({
+      toolName: call.toolName,
+      toolCallId: call.toolCall.id,
+      result: finalResult,
+    });
   }
 }
 
@@ -725,10 +738,21 @@ function normalizeToolResult(result: ExecutableToolResult): ToolResult {
       output = textJoined.length > 0 ? textJoined : TOOL_OUTPUT_EMPTY;
     }
   }
+  const base: {
+    output: ToolResult['output'];
+    stopTurn?: boolean;
+    truncated?: true;
+    note?: string;
+  } = { output, stopTurn: result.stopTurn };
+  if (result.truncated === true) base.truncated = true;
+  if (typeof result.note === 'string' && result.note.length > 0) base.note = result.note;
   if (result.isError === true) {
-    return { output, isError: true, stopTurn: result.stopTurn };
+    return {
+      ...base,
+      isError: true,
+    };
   }
-  return { output, stopTurn: result.stopTurn };
+  return base;
 }
 
 function toolTelemetryOutcome(result: ToolResult): 'success' | 'error' | 'cancelled' {

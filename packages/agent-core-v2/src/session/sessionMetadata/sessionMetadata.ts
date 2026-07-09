@@ -15,6 +15,9 @@ import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiatio
 export interface AgentMeta {
   /** Per-agent directory used as the wire-record `homedir` (persistence key). */
   readonly homedir: string;
+  readonly type?: 'main' | 'sub' | 'independent';
+  /** Legacy v1 documents may carry `null`; read-compat. */
+  readonly parentAgentId?: string | null;
   /** Agent this one was forked / derived from (provenance only; not used by business logic). */
   readonly forkedFrom?: string;
   /**

@@ -20,7 +20,6 @@ import {
   type ContextCompactionResult,
 } from '#/agent/contextMemory/contextMemory';
 import { computeUndoCut } from '#/agent/contextMemory/contextOps';
-import { ensureMessageId } from '#/agent/contextMemory/messageId';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import {
   HookDefSchema,
@@ -45,6 +44,8 @@ import { IConfigService } from '#/app/config/config';
 import { IEventBus } from '#/app/event/eventBus';
 import { EventBusService } from '#/app/event/eventBusService';
 import { IPluginService } from '#/app/plugin/plugin';
+import { IHostProcessService } from '#/os/interface/hostProcess';
+import { HostProcessService } from '#/os/backends/node-local/hostProcessService';
 import {
   ISessionLifecycleService,
   type SessionLifecycleHooks,
@@ -97,8 +98,9 @@ function stubContextMemory(): IAgentContextMemoryService & {
     _serviceBrand: undefined,
     get: () => [...messages],
     append: (...inserted) => {
-      messages.push(...inserted.map(ensureMessageId));
+      messages.push(...inserted);
     },
+    appendLoopEvent: () => {},
     clear: () => {
       messages.splice(0);
     },
@@ -115,9 +117,6 @@ function stubContextMemory(): IAgentContextMemoryService & {
       const { messages: _messages, ...result } = shape;
       void _messages;
       return result;
-    },
-    splice: (start, deleteCount, inserted) => {
-      messages.splice(start, deleteCount, ...inserted);
     },
     messages,
   };
@@ -188,6 +187,9 @@ function stubSessionLifecycle(): ISessionLifecycleService {
     close: async () => {},
     archive: async () => {},
     fork: async () => {
+      throw new Error('not implemented');
+    },
+    createChild: async () => {
       throw new Error('not implemented');
     },
   };
@@ -591,6 +593,7 @@ describe('IExternalHooksRunnerService integration', () => {
             IAgentWireService,
             disposables.add(new WireService({ logScope: 'wire', logKey: 'external-hooks' })),
           );
+          reg.define(IHostProcessService, HostProcessService);
         },
       });
       ix.set(IExternalHooksRunnerService, new SyncDescriptor(ExternalHooksRunnerService));
@@ -853,6 +856,7 @@ describe('IExternalHooksRunnerService integration', () => {
             onDidReload: Event.None as IPluginService['onDidReload'],
           });
           reg.defineInstance(IBootstrapService, stubBootstrap());
+          reg.define(IHostProcessService, HostProcessService);
         },
       });
       ix.set(IExternalHooksRunnerService, new SyncDescriptor(ExternalHooksRunnerService));

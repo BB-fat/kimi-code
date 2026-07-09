@@ -217,7 +217,7 @@ describe('kimiModelEnvOverlay', () => {
       KIMI_MODEL_NAME: 'kimi-for-coding',
     });
 
-    expect(changed).toEqual(['models', 'defaultModel']);
+    expect(changed).toEqual(['models', 'providers', 'defaultModel']);
     expect(effective['defaultModel']).toBe(ENV_MODEL_ALIAS_KEY);
     expect(effective['models']).toEqual({
       [ENV_MODEL_ALIAS_KEY]: {
@@ -226,6 +226,21 @@ describe('kimiModelEnvOverlay', () => {
         maxContextSize: 262144,
         capabilities: ['image_in', 'thinking'],
       },
+    });
+    expect(effective['providers']).toEqual({
+      [ENV_MODEL_PROVIDER_KEY]: { type: 'kimi' },
+    });
+  });
+
+  it('keeps an explicit env provider type instead of the kimi default', () => {
+    const { changed, effective } = applyKimiModelEnvOverlay(
+      { KIMI_MODEL_NAME: 'env-model' },
+      { providers: { [ENV_MODEL_PROVIDER_KEY]: { type: 'openai', baseUrl: 'http://x' } } },
+    );
+
+    expect(changed).toEqual(['models', 'defaultModel']);
+    expect(effective['providers']).toEqual({
+      [ENV_MODEL_PROVIDER_KEY]: { type: 'openai', baseUrl: 'http://x' },
     });
   });
 
@@ -258,7 +273,7 @@ describe('kimiModelEnvOverlay', () => {
       KIMI_MODEL_MAX_TOKENS: '2048',
     });
 
-    expect(changed).toEqual(['models', 'defaultModel', 'modelOverrides']);
+    expect(changed).toEqual(['models', 'providers', 'defaultModel', 'modelOverrides']);
     expect(
       (effective['models'] as Record<string, unknown>)[ENV_MODEL_ALIAS_KEY],
     ).toEqual({
@@ -326,5 +341,16 @@ describe('kimiModelEnvOverlay', () => {
       }),
     ).toBe('user');
     expect(kimiModelEnvOverlay.strip?.('modelOverrides', { temperature: 0.3 }, {})).toBeUndefined();
+  });
+
+  it('self-registers into ConfigRegistry without ModelService instantiation', () => {
+    // envOverlay.ts calls registerConfigOverlay(kimiModelEnvOverlay) at module
+    // load, so a freshly constructed ConfigRegistry drains it even though no
+    // Service (notably ModelService) has been instantiated. This guards the
+    // release-e2e wire-llm-request-trace scenario, where KIMI_MODEL_NAME must
+    // synthesize the env model (and its thinking capability) even when nothing
+    // resolves IModelService.
+    const freshRegistry = new ConfigRegistry();
+    expect(freshRegistry.listEffectiveOverlays()).toContain(kimiModelEnvOverlay);
   });
 });

@@ -8,6 +8,29 @@ import { AGENT_WIRE_PROTOCOL_VERSION } from '#/agent/wireRecord/wireRecord';
 import { createTestAgent, type TestAgentContext } from '../harness';
 import { DEFAULT_TEST_SYSTEM_PROMPT } from '../harness/snapshots';
 
+import { SyncDescriptor } from '#/_base/di/descriptors';
+import { DisposableStore } from '#/_base/di/lifecycle';
+import { TestInstantiationService } from '#/_base/di/test';
+import { IBootstrapService } from '#/app/bootstrap/bootstrap';
+import { IConfigRegistry, IConfigService } from '#/app/config/config';
+import { ConfigRegistry, ConfigService } from '#/app/config/configService';
+// Side-effect: registers the `cron` section (with its env bindings) so the
+// live-overlay test below can read `config.get('cron')`.
+import '#/app/cron/configSection';
+import type { CronConfig } from '#/app/cron/configSection';
+import '#/app/skillCatalog/configSection';
+import {
+  EXTRA_SKILL_DIRS_SECTION,
+  MERGE_ALL_AVAILABLE_SKILLS_SECTION,
+} from '#/app/skillCatalog/configSection';
+import { ILogService } from '#/_base/log/log';
+import { InMemoryStorageService } from '#/persistence/backends/memory/inMemoryStorageService';
+import { IFileSystemStorageService } from '#/persistence/interface/storage';
+import { IAtomicTomlDocumentStore } from '#/persistence/interface/atomicDocumentStore';
+import { TomlAtomicDocumentStore } from '#/persistence/backends/node-fs/atomicDocumentStore';
+import { stubBootstrap } from '../bootstrap/stubs';
+import { stubLog } from '../log/stubs';
+
 // Historical `osEnv` shape carried by `useProfile` context — the test only
 // exercises the profile-service pass-through; the exact fields don't matter to
 // the assertions, so we keep a minimal literal instead of importing an
@@ -200,16 +223,20 @@ describe('Agent config', () => {
       input: [{ type: 'text', text: 'Look up before config changes' }],
     });
     expect(await ctx.untilApproval(true)).toMatchInlineSnapshot(`
-      [wire] context.splice         { "start": 0, "deleteCount": 0, "messages": [ { "role": "user", "content": [ { "type": "text", "text": "Look up before config changes" } ], "toolCalls": [], "id": "<msg-1>" } ], "time": "<time>" }
-      [wire] turn.launch            { "turnId": 0, "origin": { "kind": "user" }, "time": "<time>" }
-      [emit] turn.started           { "turnId": 0, "origin": { "kind": "user" } }
-      [emit] turn.step.started      { "turnId": 0, "step": 1, "stepId": "<uuid-1>" }
-      [emit] assistant.delta        { "turnId": 0, "delta": "I will look it up." }
-      [emit] tool.call.delta        { "turnId": 0, "toolCallId": "call_lookup", "name": "Lookup", "argumentsPart": "{\\"query\\":\\"original\\"}" }
-      [wire] usage.record           { "model": "mock-model", "usage": { "inputOther": 9, "output": 17, "inputCacheRead": 0, "inputCacheCreation": 0 }, "context": { "type": "turn", "turnId": 0 }, "time": "<time>" }
-      [emit] agent.status.updated   { "usage": { "byModel": { "mock-model": { "inputOther": 9, "output": 17, "inputCacheRead": 0, "inputCacheCreation": 0 } }, "total": { "inputOther": 9, "output": 17, "inputCacheRead": 0, "inputCacheCreation": 0 }, "currentTurn": { "inputOther": 9, "output": 17, "inputCacheRead": 0, "inputCacheCreation": 0 } } }
-      [wire] context.splice         { "start": 1, "deleteCount": 0, "messages": [ { "id": "<msg-2>", "role": "assistant", "content": [ { "type": "text", "text": "I will look it up." } ], "toolCalls": [] } ], "time": "<time>" }
-      [emit] requestApproval        { "turnId": 0, "toolCallId": "call_lookup", "toolName": "Lookup", "action": "Approve Lookup", "display": { "kind": "generic", "summary": "Approve Lookup", "detail": { "query": "original" } } }
+      [wire] turn.prompt                     { "input": [ { "type": "text", "text": "Look up before config changes" } ], "origin": { "kind": "user" }, "time": "<time>" }
+      [emit] turn.started                    { "turnId": 0, "origin": { "kind": "user" } }
+      [wire] context.append_message          { "message": { "role": "user", "content": [ { "type": "text", "text": "Look up before config changes" } ], "toolCalls": [], "origin": { "kind": "user" } }, "time": "<time>" }
+      [emit] context.spliced                 { "start": 0, "deleteCount": 0, "messages": [ { "role": "user", "content": [ { "type": "text", "text": "Look up before config changes" } ], "toolCalls": [], "origin": { "kind": "user" } } ] }
+      [emit] turn.step.started               { "turnId": 0, "step": 1, "stepId": "<uuid-1>" }
+      [wire] context.append_loop_event       { "event": { "type": "step.begin", "uuid": "<uuid-1>", "turnId": "0", "step": 1 }, "time": "<time>" }
+      [wire] llm.tools_snapshot              { "hash": "3bfeb22e61431247933e79f6ab94e7ca14a127f899bc87e7bbd22594ba9cdb66", "tools": [ { "name": "Lookup", "description": "Look up a short test value.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": [ "query" ], "additionalProperties": false } } ], "time": "<time>" }
+      [wire] llm.request                     { "kind": "loop", "provider": "kimi", "model": "mock-model", "modelAlias": "mock-model", "thinkingEffort": "off", "maxTokens": 1000000, "toolSelect": false, "systemPromptHash": "ec9c34379c88babbc468ef2f3e0e08cd2f422c8c4a910664fb8bb394d703a575", "toolsHash": "3bfeb22e61431247933e79f6ab94e7ca14a127f899bc87e7bbd22594ba9cdb66", "messageCount": 1, "turnStep": "0.1", "time": "<time>" }
+      [emit] assistant.delta                 { "turnId": 0, "delta": "I will look it up." }
+      [emit] tool.call.delta                 { "turnId": 0, "toolCallId": "call_lookup", "name": "Lookup", "argumentsPart": "{\\"query\\":\\"original\\"}" }
+      [emit] agent.status.updated            { "contextTokens": 26 }
+      [wire] context.append_loop_event       { "event": { "type": "content.part", "uuid": "<uuid-2>", "turnId": "0", "step": 1, "stepUuid": "<uuid-1>", "part": { "type": "text", "text": "I will look it up." } }, "time": "<time>" }
+      [emit] permission.approval.requested   { "sessionId": "test-session", "agentId": "main", "turnId": 0, "toolCallId": "call_lookup", "toolName": "Lookup", "action": "Approve Lookup", "display": { "kind": "generic", "summary": "Approve Lookup", "detail": { "query": "original" } }, "toolInput": { "query": "original" } }
+      [emit] requestApproval                 { "turnId": 0, "toolCallId": "call_lookup", "toolName": "Lookup", "action": "Approve Lookup", "display": { "kind": "generic", "summary": "Approve Lookup", "detail": { "query": "original" } } }
     `);
     expect(ctx.lastLlmInput()).toMatchInlineSnapshot(`
       system: <system-prompt>
@@ -233,22 +260,14 @@ describe('Agent config', () => {
     ctx.mockNextResponse({ type: 'text', text: 'Still using the original turn config.' });
     await toolCallEvents;
     expect(await ctx.untilTurnEnd()).toMatchInlineSnapshot(`
-      [wire] context.splice          { "start": 2, "deleteCount": 0, "messages": [ { "role": "tool", "content": [ { "type": "text", "text": "original-result" } ], "toolCalls": [], "toolCallId": "call_lookup", "id": "<msg-3>" } ], "time": "<time>" }
-      [emit] tool.result             { "turnId": 0, "toolCallId": "call_lookup", "output": "original-result" }
-      [wire] context.splice          { "start": 1, "deleteCount": 1, "messages": [ { "id": "<msg-2>", "role": "assistant", "content": [ { "type": "text", "text": "I will look it up." } ], "toolCalls": [ { "type": "function", "id": "call_lookup", "name": "Lookup", "arguments": "{\\"query\\":\\"original\\"}" } ], "providerMessageId": "mock-1" } ], "time": "<time>" }
-      [emit] agent.status.updated    { "contextTokens": 0 }
-      [emit] turn.step.completed     { "turnId": 0, "step": 1, "stepId": "<uuid-1>", "usage": { "inputOther": 9, "output": 17, "inputCacheRead": 0, "inputCacheCreation": 0 }, "finishReason": "tool_calls" }
-      [emit] turn.step.started       { "turnId": 0, "step": 2, "stepId": "<uuid-2>" }
-      [emit] assistant.delta         { "turnId": 0, "delta": "Still using the original turn config." }
-      [wire] usage.record            { "model": "changed-model", "usage": { "inputOther": 31, "output": 13, "inputCacheRead": 0, "inputCacheCreation": 0 }, "context": { "type": "turn", "turnId": 0 }, "time": "<time>" }
-      [emit] agent.status.updated    { "usage": { "byModel": { "mock-model": { "inputOther": 9, "output": 17, "inputCacheRead": 0, "inputCacheCreation": 0 }, "changed-model": { "inputOther": 31, "output": 13, "inputCacheRead": 0, "inputCacheCreation": 0 } }, "total": { "inputOther": 40, "output": 30, "inputCacheRead": 0, "inputCacheCreation": 0 }, "currentTurn": { "inputOther": 40, "output": 30, "inputCacheRead": 0, "inputCacheCreation": 0 } } }
-      [wire] context.splice          { "start": 3, "deleteCount": 0, "messages": [ { "id": "<msg-4>", "role": "assistant", "content": [ { "type": "text", "text": "Still using the original turn config." } ], "toolCalls": [] } ], "time": "<time>" }
-      [wire] context_size.measured   { "length": 4, "tokens": 44, "time": "<time>" }
-      [emit] agent.status.updated    { "contextTokens": 44 }
-      [wire] context.splice          { "start": 3, "deleteCount": 1, "messages": [ { "id": "<msg-4>", "role": "assistant", "content": [ { "type": "text", "text": "Still using the original turn config." } ], "toolCalls": [], "providerMessageId": "mock-2" } ], "time": "<time>" }
-      [emit] agent.status.updated    { "contextTokens": 0 }
-      [emit] turn.step.completed     { "turnId": 0, "step": 2, "stepId": "<uuid-2>", "usage": { "inputOther": 31, "output": 13, "inputCacheRead": 0, "inputCacheCreation": 0 }, "finishReason": "completed" }
-      [emit] turn.ended              { "turnId": 0, "reason": "completed" }
+      [emit] tool.result                 { "turnId": 0, "toolCallId": "call_lookup", "output": "original-result" }
+      [wire] context.append_loop_event   { "event": { "type": "tool.result", "parentUuid": "<uuid-3>", "toolCallId": "call_lookup", "result": { "output": "original-result" } }, "time": "<time>" }
+      [wire] context.append_loop_event   { "event": { "type": "step.end", "uuid": "<uuid-1>", "turnId": "0", "step": 1, "finishReason": "tool_use", "usage": { "inputOther": 9, "output": 17, "inputCacheRead": 0, "inputCacheCreation": 0 }, "messageId": "mock-1" }, "time": "<time>" }
+      [wire] usage.record                { "model": "mock-model", "usage": { "inputOther": 9, "output": 17, "inputCacheRead": 0, "inputCacheCreation": 0 }, "usageScope": "turn", "time": "<time>" }
+      [emit] agent.status.updated        { "usage": { "byModel": { "mock-model": { "inputOther": 9, "output": 17, "inputCacheRead": 0, "inputCacheCreation": 0 } }, "total": { "inputOther": 9, "output": 17, "inputCacheRead": 0, "inputCacheCreation": 0 }, "currentTurn": { "inputOther": 9, "output": 17, "inputCacheRead": 0, "inputCacheCreation": 0 } } }
+      [emit] turn.step.completed         { "turnId": 0, "step": 1, "stepId": "<uuid-1>", "usage": { "inputOther": 9, "output": 17, "inputCacheRead": 0, "inputCacheCreation": 0 }, "finishReason": "tool_calls" }
+      [emit] turn.step.interrupted       { "turnId": 0, "step": 2, "reason": "error", "message": "Model \\"changed-model\\" (via provider \\"test-provider\\") is missing a base URL." }
+      [emit] turn.ended                  { "turnId": 0, "reason": "failed", "error": { "code": "config.invalid", "message": "Model \\"changed-model\\" (via provider \\"test-provider\\") is missing a base URL.", "name": "KimiError", "retryable": false } }
     `);
     expect(ctx.lastLlmInput()).toMatchInlineSnapshot(`
       system: "Changed system prompt."
@@ -273,7 +292,6 @@ describe('Agent config', () => {
       [wire] context_size.measured   { "length": 6, "tokens": 62, "time": "<time>" }
       [emit] agent.status.updated    { "contextTokens": 62 }
       [wire] context.splice          { "start": 5, "deleteCount": 1, "messages": [ { "id": "<msg-6>", "role": "assistant", "content": [ { "type": "text", "text": "Now the changed config is active." } ], "toolCalls": [], "providerMessageId": "mock-3" } ], "time": "<time>" }
-      [emit] agent.status.updated    { "contextTokens": 0 }
       [emit] turn.step.completed     { "turnId": 1, "step": 1, "stepId": "<uuid-3>", "usage": { "inputOther": 50, "output": 12, "inputCacheRead": 0, "inputCacheCreation": 0 }, "finishReason": "completed" }
       [emit] turn.ended              { "turnId": 1, "reason": "completed" }
     `);
@@ -284,6 +302,39 @@ describe('Agent config', () => {
         assistant: text "Still using the original turn config."
         user: text "Start a fresh turn"
     `);
+  });
+});
+
+describe('ConfigService env overlay (live)', () => {
+  it('re-applies env bindings on every get()', async () => {
+    const env: Record<string, string> = { KIMI_DISABLE_CRON: '0' };
+    const disposables = new DisposableStore();
+    const ix = disposables.add(new TestInstantiationService());
+    ix.stub(ILogService, stubLog());
+    ix.stub(IBootstrapService, stubBootstrap('/tmp/kimi-cfg', env));
+    ix.stub(IFileSystemStorageService, new InMemoryStorageService());
+    ix.set(IAtomicTomlDocumentStore, new SyncDescriptor(TomlAtomicDocumentStore));
+    ix.set(IConfigRegistry, new SyncDescriptor(ConfigRegistry));
+    ix.set(IConfigService, new SyncDescriptor(ConfigService));
+    const config = ix.get(IConfigService);
+    await config.ready;
+
+    expect(config.get<CronConfig>('cron').disabled).toBe(false);
+    env['KIMI_DISABLE_CRON'] = '1';
+    expect(config.get<CronConfig>('cron').disabled).toBe(true);
+    env['KIMI_DISABLE_CRON'] = '0';
+    expect(config.get<CronConfig>('cron').disabled).toBe(false);
+
+    disposables.dispose();
+  });
+});
+
+describe('skill config sections', () => {
+  it('registers defaults for extraSkillDirs and mergeAllAvailableSkills', () => {
+    const registry = new ConfigRegistry();
+
+    expect(registry.getSection(EXTRA_SKILL_DIRS_SECTION)?.defaultValue).toEqual([]);
+    expect(registry.getSection(MERGE_ALL_AVAILABLE_SKILLS_SECTION)?.defaultValue).toBe(true);
   });
 });
 

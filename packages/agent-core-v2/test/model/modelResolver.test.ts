@@ -7,8 +7,8 @@
  *     (`requireProviderApiKey`). The resolver's `AuthProvider` must return the
  *     token as `apiKey` (not wrapped in `headers`), so a resolved Model can
  *     authenticate against its endpoint.
- *  2. Default thinking — the resolver reads the `thinking` / `defaultThinking`
- *     config sections and applies the same default effort the production agent
+ *  2. Default thinking — the resolver reads the `thinking` config section and
+ *     applies the same default effort the production agent
  *     path (via `profile`) does, so a plain `model.request()` behaves
  *     identically (some endpoints reject a request that omits thinking).
  */
@@ -21,8 +21,9 @@ import { IOAuthService } from '#/app/auth/auth';
 import { IConfigService } from '#/app/config/config';
 import { APIStatusError } from '#/app/llmProtocol/errors';
 import { type ModelConfig, IModelService } from '#/app/model/model';
+import { HostRequestHeaders, IHostRequestHeaders } from '#/app/model/hostRequestHeaders';
 import { IModelResolver } from '#/app/model/modelResolver';
-import { ModelResolverService } from '#/app/model/modelResolverService';
+import { ModelResolverService, resolveOutboundHeaders } from '#/app/model/modelResolverService';
 import { type PlatformConfig, IPlatformService } from '#/app/platform/platform';
 import { type ProviderConfig, IProviderService } from '#/app/provider/provider';
 import { type ChatProvider } from '#/app/llmProtocol/provider';
@@ -89,6 +90,7 @@ describe('ModelResolverService', () => {
           createChatProvider(input: ProtocolAdapterConfig): ChatProvider;
         });
         reg.define(IModelResolver, ModelResolverService);
+        reg.defineInstance(IHostRequestHeaders, new HostRequestHeaders());
       },
     });
   });
@@ -299,12 +301,12 @@ describe('ModelResolverService', () => {
 
     it('force-refreshes OAuth credentials and replays a request after 401', async () => {
       configureOAuthModel();
-      const tokenCalls: boolean[] = [];
+      const tokenCalls: Array<boolean | undefined> = [];
       const authKeys: string[] = [];
       resolveTokenProvider.mockReturnValue({
-        getAccessToken: async (options: { readonly force: boolean }) => {
-          tokenCalls.push(options.force);
-          return options.force ? 'forced-refresh-token' : 'fresh-token';
+        getAccessToken: async (options?: { readonly force?: boolean }) => {
+          tokenCalls.push(options?.force);
+          return options?.force === true ? 'forced-refresh-token' : 'fresh-token';
         },
       });
       generateImpl = async (_system, _tools, _history, options) => {
@@ -333,7 +335,7 @@ describe('ModelResolverService', () => {
       }
 
       expect(authKeys).toEqual(['fresh-token', 'forced-refresh-token']);
-      expect(tokenCalls).toEqual([false, true]);
+      expect(tokenCalls).toEqual([undefined, true]);
       expect(events).toContainEqual({ type: 'part', part: { type: 'text', text: 'recovered' } });
     });
 
@@ -341,8 +343,8 @@ describe('ModelResolverService', () => {
       configureOAuthModel();
       const authKeys: string[] = [];
       resolveTokenProvider.mockReturnValue({
-        getAccessToken: async (options: { readonly force: boolean }) =>
-          options.force ? 'forced-refresh-token' : 'fresh-token',
+        getAccessToken: async (options?: { readonly force?: boolean }) =>
+          options?.force === true ? 'forced-refresh-token' : 'fresh-token',
       });
       generateImpl = async (_system, _tools, _history, options) => {
         authKeys.push(options?.auth?.apiKey ?? '<missing>');
@@ -393,12 +395,12 @@ describe('ModelResolverService', () => {
 
     it('force-refreshes OAuth credentials and replays video upload after 401', async () => {
       configureOAuthModel();
-      const tokenCalls: boolean[] = [];
+      const tokenCalls: Array<boolean | undefined> = [];
       const authKeys: string[] = [];
       resolveTokenProvider.mockReturnValue({
-        getAccessToken: async (options: { readonly force: boolean }) => {
-          tokenCalls.push(options.force);
-          return options.force ? 'forced-refresh-token' : 'fresh-token';
+        getAccessToken: async (options?: { readonly force?: boolean }) => {
+          tokenCalls.push(options?.force);
+          return options?.force === true ? 'forced-refresh-token' : 'fresh-token';
         },
       });
       uploadVideoImpl = async (_input, options) => {
@@ -416,7 +418,7 @@ describe('ModelResolverService', () => {
         videoUrl: { url: 'https://example.test/video' },
       });
       expect(authKeys).toEqual(['fresh-token', 'forced-refresh-token']);
-      expect(tokenCalls).toEqual([false, true]);
+      expect(tokenCalls).toEqual([undefined, true]);
     });
   });
 
@@ -441,6 +443,65 @@ describe('ModelResolverService', () => {
         defaultHeaders: { 'X-Test': '1' },
       });
       expect(createdProtocolConfigs[0]).not.toHaveProperty('customHeaders');
+    });
+
+    it('merges KIMI_CODE_CUSTOM_HEADERS env headers below provider customHeaders', async () => {
+      process.env['KIMI_CODE_CUSTOM_HEADERS'] = 'X-Env: env-val\nX-Shared: from-env';
+      try {
+        providers['p'] = {
+          type: 'kimi',
+          baseUrl: 'https://example.test/v1',
+          apiKey: 'sk',
+          customHeaders: { 'X-Shared': 'from-provider', 'X-Provider': 'p' },
+        };
+        models['m'] = { provider: 'p', model: 'wire-name', maxContextSize: 1000 };
+
+        const model = ix.get(IModelResolver).resolve('m');
+        for await (const _event of model.request({ systemPrompt: '', tools: [], messages: [] })) {
+          void _event;
+        }
+
+        expect(createdProtocolConfigs).toHaveLength(1);
+        expect(createdProtocolConfigs[0]).toMatchObject({
+          defaultHeaders: {
+            'X-Env': 'env-val',
+            // provider customHeaders override the env header on conflict
+            'X-Shared': 'from-provider',
+            'X-Provider': 'p',
+          },
+        });
+      } finally {
+        delete process.env['KIMI_CODE_CUSTOM_HEADERS'];
+      }
+    });
+
+    it('resolveOutboundHeaders: kimi provider gets full host headers, others get only User-Agent', () => {
+      const saved = process.env['KIMI_CODE_CUSTOM_HEADERS'];
+      delete process.env['KIMI_CODE_CUSTOM_HEADERS'];
+      try {
+        const host = { 'User-Agent': 'kimi-code-cli/1.0', 'X-Msh-Device-Id': 'dev' };
+
+        // kimi provider → full identity (even when routed through anthropic)
+        expect(resolveOutboundHeaders('kimi', undefined, host)).toEqual({
+          'User-Agent': 'kimi-code-cli/1.0',
+          'X-Msh-Device-Id': 'dev',
+        });
+        // non-kimi providers → User-Agent only
+        expect(resolveOutboundHeaders('openai', undefined, host)).toEqual({
+          'User-Agent': 'kimi-code-cli/1.0',
+        });
+        expect(resolveOutboundHeaders('anthropic', undefined, host)).toEqual({
+          'User-Agent': 'kimi-code-cli/1.0',
+        });
+        // provider customHeaders win on conflict
+        expect(resolveOutboundHeaders('kimi', { 'User-Agent': 'custom' }, host)).toEqual({
+          'User-Agent': 'custom',
+          'X-Msh-Device-Id': 'dev',
+        });
+      } finally {
+        if (saved === undefined) delete process.env['KIMI_CODE_CUSTOM_HEADERS'];
+        else process.env['KIMI_CODE_CUSTOM_HEADERS'] = saved;
+      }
     });
   });
 
@@ -679,13 +740,8 @@ describe('ModelResolverService', () => {
       expect(ix.get(IModelResolver).resolve('m').thinkingEffort).toBe('medium');
     });
 
-    it('is off (null) when defaultThinking is false', () => {
-      configValues['defaultThinking'] = false;
-      expect(resolveEffort()).toBeNull();
-    });
-
-    it('is off (null) when thinking.mode is "off"', () => {
-      configValues['thinking'] = { mode: 'off' };
+    it('is off (null) when thinking.enabled is false', () => {
+      configValues['thinking'] = { enabled: false };
       expect(resolveEffort()).toBeNull();
     });
 
@@ -695,7 +751,7 @@ describe('ModelResolverService', () => {
     });
 
     it('clamps an explicit off back to on for always_thinking models', () => {
-      configValues['defaultThinking'] = false;
+      configValues['thinking'] = { enabled: false };
       expect(resolveEffort(['always_thinking'])).toBe('on');
     });
   });

@@ -26,7 +26,6 @@ import { InstantiationType } from '#/_base/di/extensions';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
 import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
-import { ensureMessageId } from '#/agent/contextMemory/messageId';
 import type { ContextMessage, PromptOrigin } from '#/agent/contextMemory/types';
 import { GoalInjection } from '#/agent/goal/injection/goalInjection';
 import {
@@ -40,6 +39,8 @@ import {
 } from '#/agent/loop/loop';
 import { IAgentSystemReminderService } from '#/agent/systemReminder/systemReminder';
 import { IAgentTurnService, type TurnResult } from '#/agent/turn/turn';
+import { IAgentActivityService } from '#/activity/activity';
+import type { ActivityLease } from '#/activity/activity';
 import type { TokenUsage } from '#/app/llmProtocol/usage';
 import type { TelemetryProperties } from '#/app/telemetry/telemetry';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
@@ -84,6 +85,7 @@ declare module '#/agent/wireRecord/wireRecord' {
 }
 
 const MAX_GOAL_OBJECTIVE_LENGTH = 4000;
+const MAX_GOAL_COMPLETION_CRITERION_LENGTH = MAX_GOAL_OBJECTIVE_LENGTH;
 
 const GOAL_CANCELLED_REMINDER = [
   'The user cancelled the current goal.',
@@ -113,13 +115,29 @@ const GOAL_CONTINUATION_PROMPT = [
   'decided. If the objective is simple, already answered, impossible, unsafe, or contradictory,',
   'do not run another goal turn. Explain briefly if useful, then call UpdateGoal with `complete`',
   'or `blocked` in the same turn. Otherwise, weigh the objective and any completion criteria',
-  'against the work done so far. Goal mode is iterative: do one coherent slice of work, then',
-  'reassess. Call UpdateGoal with `complete` only when all required work is done, any stated',
-  'validation has passed, and there is no useful next action. Do not mark complete after only',
-  'producing a plan, summary, first pass, or partial result. If an external condition or required',
-  'user input prevents progress, or the objective cannot be completed as stated, call UpdateGoal',
-  'with `blocked`. Otherwise keep going - use the existing conversation context and your tools,',
-  'and do not ask the user for input unless a real blocker prevents progress.',
+  'against the work done so far, choose one bounded, useful slice of work, and use the existing',
+  'conversation context and your tools. Do not try to finish a broad goal in one turn unless the',
+  'whole goal is genuinely small. Most goal turns should not call UpdateGoal: after completing a',
+  'useful slice, if material work remains, end the turn normally without calling UpdateGoal so',
+  'the runtime can continue the goal in the next turn. Call UpdateGoal with `complete` only when',
+  'all required work is done, any stated validation has passed, and there is no useful next',
+  'action. Completion audit: before calling `complete`, verify the current state against the',
+  'actual objective and every explicit requirement. Treat weak or indirect evidence as not',
+  'complete. Do not mark complete after only producing a plan, summary, first pass, or partial',
+  'result. Do not mark complete merely because a budget is nearly exhausted or you want to stop.',
+  'Blocked audit: do not call UpdateGoal with `blocked` the first time you hit a blocker. Use',
+  '`blocked` only for a genuine impasse: an external condition, required user input, missing',
+  'credentials or permissions, or a persistent technical failure. For those non-terminal',
+  'blockers, the same blocking condition must repeat for at least 3 consecutive goal turns before',
+  'you call `blocked`, counting the original/user-triggered turn and automatic continuations.',
+  'If a previously blocked goal is resumed, treat the resumed run as a fresh blocked audit.',
+  'Exception: if the objective itself is impossible, unsafe, or contradictory, call UpdateGoal',
+  'with `blocked` in the same turn; do not run more goal turns just to satisfy the audit. Do not',
+  'use `blocked` because the work is large, hard, slow, uncertain, incomplete, still needs',
+  'validation, would benefit from clarification, or needs more goal turns. Once the 3-turn',
+  'threshold is met and you cannot make meaningful progress without user input or an',
+  'external-state change, call UpdateGoal with `blocked`; do not keep reporting the blocker while',
+  'leaving the goal active. Do not ask the user for input unless a real blocker prevents progress.',
 ].join(' ');
 
 export class AgentGoalService extends Disposable implements IAgentGoalService {
@@ -138,6 +156,7 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
     @IAgentContextInjectorService dynamicInjector: IAgentContextInjectorService,
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
     @IAgentTurnService private readonly turnService: IAgentTurnService,
+    @IAgentActivityService private readonly activity: IAgentActivityService,
     @IAgentLoopService loopService: IAgentLoopService,
   ) {
     super();
@@ -417,19 +436,27 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
     const state = this.goalState;
     if (state === null || state.status !== 'active') return;
     if (this.blockIfBudgetReached(state) !== null) return;
-    if (this.turnService.getActiveTurn() !== undefined) return;
-    this.launchContinuationTurn();
+    // Atomically acquire the turn lane BEFORE appending the continuation message:
+    // if another activity holds the lane (race lost), `tryBegin` returns
+    // undefined and we skip — no orphan continuation message in context, and the
+    // busy outcome is no longer swallowed by a `.catch(() => undefined)`.
+    const lease = this.activity.tryBegin('turn', { origin: GOAL_CONTINUATION_ORIGIN });
+    if (lease === undefined) return;
+    this.launchContinuationTurn(lease);
   }
 
-  private launchContinuationTurn(): void {
-    const message = ensureMessageId({
+  private launchContinuationTurn(lease: ActivityLease): void {
+    const message: ContextMessage = {
       role: 'user',
       content: [{ type: 'text', text: GOAL_CONTINUATION_PROMPT }],
       toolCalls: [],
       origin: GOAL_CONTINUATION_ORIGIN,
-    });
+    };
     this.context.append(message);
-    this.turnService.launch(GOAL_CONTINUATION_ORIGIN);
+    this.turnService.launchWithLease(lease, {
+      input: message.content,
+      origin: GOAL_CONTINUATION_ORIGIN,
+    });
   }
 
   private normalizeAfterReplay(): void {
@@ -599,12 +626,15 @@ function budgetTelemetryProperties(limits: GoalBudgetLimits): TelemetryPropertie
 }
 
 function tokenUsageTotal(usage: TokenUsage): number {
-  return usage.inputCacheRead + usage.inputCacheCreation + usage.inputOther + usage.output;
+  return usage.output;
 }
 
 function normalizeCompletionCriterion(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
-  return trimmed?.length ? trimmed : undefined;
+  if (!trimmed?.length) return undefined;
+  return trimmed.length > MAX_GOAL_COMPLETION_CRITERION_LENGTH
+    ? trimmed.slice(0, MAX_GOAL_COMPLETION_CRITERION_LENGTH)
+    : trimmed;
 }
 
 function isGoalOutcomeReminder(message: ContextMessage | undefined): boolean {

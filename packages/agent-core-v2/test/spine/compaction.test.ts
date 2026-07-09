@@ -1,18 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { MASTER_ENV } from '#/app/flag/flagService';
-import {
-  IAgentMicroCompactionService,
-  IAgentWireService,
-  SpineModel,
-} from '#/index';
+import { IAgentWireService, SpineModel } from '#/index';
 
 import { testAgent, type TestAgentContext } from '../harness';
 
 const SPINE_ENV = 'KIMI_CODE_SPINE';
-const MICRO_ENV = 'KIMI_CODE_EXPERIMENTAL_MICRO_COMPACTION';
 const MINUTE = 60 * 1000;
-const MICRO_MARKER = '[Old tool result content cleared]';
 
 const CATALOGUED_PROVIDER = {
   type: 'kimi',
@@ -37,36 +31,6 @@ describe('Spine / compaction interaction', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.useRealTimers();
-  });
-
-  it('suppresses micro-compaction truncation while spine is enabled', () => {
-    vi.stubEnv(MICRO_ENV, '1');
-    vi.useFakeTimers();
-    const ctx = testAgent({
-      microCompaction: {
-        config: {
-          keepRecentMessages: 0,
-          minContentTokens: 1,
-          cacheMissedThresholdMs: 60 * MINUTE,
-          minContextUsageRatio: 0,
-        },
-      },
-    });
-
-    vi.setSystemTime(0);
-    ctx.appendExchange(1, 'user one', 'assistant one', 10);
-    ctx.appendExchange(2, 'user two', 'assistant two', 10);
-
-    vi.setSystemTime(61 * MINUTE);
-    const micro = ctx.get(IAgentMicroCompactionService) as unknown as {
-      detect(): void;
-      compact(messages: readonly unknown[]): readonly unknown[];
-    };
-    micro.detect();
-
-    const history = ctx.context.get();
-    expect(micro.compact(history)).toBe(history);
-    expect(ctx.project().some((m) => textOf(m).includes(MICRO_MARKER))).toBe(false);
   });
 
   it('routes full compaction into a spine root epoch instead of rebuilding history', async () => {

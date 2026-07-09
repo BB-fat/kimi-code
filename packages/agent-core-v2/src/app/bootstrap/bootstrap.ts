@@ -147,8 +147,10 @@ export function bootstrap(input: BootstrapInput = {}, extraSeeds: ScopeSeed = []
 
 function storageSeed(options: IBootstrapOptions): ScopeSeed {
   const file = (): SyncDescriptor<IFileSystemStorageService> =>
-    new SyncDescriptor(FileStorageService, [options.homeDir], true);
-  return [[IFileSystemStorageService as ServiceIdentifier<unknown>, file()]];
+    new SyncDescriptor(FileStorageService, [options.homeDir, 0o700, 0o600], true);
+  return [
+    [IFileSystemStorageService as ServiceIdentifier<unknown>, file()],
+  ];
 }
 
 function skillSeed(): ScopeSeed {

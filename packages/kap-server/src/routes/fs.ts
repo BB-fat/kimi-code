@@ -145,6 +145,18 @@ export function registerFsRoutes(app: FsRouteHost, core: Scope): void {
       }
       const fsAction = action as FsAction;
 
+      // Cold-load a persisted-but-not-live session so fs actions (which only
+      // need the work dir) do not 404 on a freshly-opened session. Matches v1,
+      // which reads the persisted cwd. `resume` returns undefined only when the
+      // session is unknown or its workspace is gone.
+      const session = await core.accessor.get(ISessionLifecycleService).resume(session_id);
+      if (session === undefined) {
+        reply.send(
+          errEnvelope(ErrorCode.SESSION_NOT_FOUND, `session ${session_id} does not exist`, req.id),
+        );
+        return;
+      }
+
       try {
         switch (fsAction) {
           case 'list':
@@ -229,6 +241,16 @@ export function registerFsRoutes(app: FsRouteHost, core: Scope): void {
       const relPath = wildcard.slice(0, -DOWNLOAD_SUFFIX.length);
       if (relPath.length === 0) {
         reply.send(errEnvelope(ErrorCode.VALIDATION_FAILED, 'path is empty', req.id));
+        return;
+      }
+
+      // Cold-load so a freshly-opened (persisted but not live) session can still
+      // serve downloads; `resume` only returns undefined for unknown / workspace-gone.
+      const session = await core.accessor.get(ISessionLifecycleService).resume(session_id);
+      if (session === undefined) {
+        reply.send(
+          errEnvelope(ErrorCode.SESSION_NOT_FOUND, `session ${session_id} does not exist`, req.id),
+        );
         return;
       }
 
@@ -461,34 +483,34 @@ function sendMappedError(reply: Reply, requestId: string, err: unknown): void {
   if (isKimiError(err)) {
     switch (err.code) {
       case ErrorCodes.FS_PATH_ESCAPES:
-        reply.send(errEnvelope(ErrorCode.FS_PATH_ESCAPES_SESSION, err.message, requestId));
+        reply.send(errEnvelope(ErrorCode.FS_PATH_ESCAPES_SESSION, err.message, requestId, err.stack));
         return;
       case ErrorCodes.FS_PATH_NOT_FOUND:
-        reply.send(errEnvelope(ErrorCode.FS_PATH_NOT_FOUND, err.message, requestId));
+        reply.send(errEnvelope(ErrorCode.FS_PATH_NOT_FOUND, err.message, requestId, err.stack));
         return;
       case ErrorCodes.FS_IS_DIRECTORY:
-        reply.send(errEnvelope(ErrorCode.FS_IS_DIRECTORY, err.message, requestId));
+        reply.send(errEnvelope(ErrorCode.FS_IS_DIRECTORY, err.message, requestId, err.stack));
         return;
       case ErrorCodes.FS_ALREADY_EXISTS:
-        reply.send(errEnvelope(ErrorCode.FS_ALREADY_EXISTS, err.message, requestId));
+        reply.send(errEnvelope(ErrorCode.FS_ALREADY_EXISTS, err.message, requestId, err.stack));
         return;
       case ErrorCodes.FS_IS_BINARY:
-        reply.send(errEnvelope(ErrorCode.FS_IS_BINARY, err.message, requestId));
+        reply.send(errEnvelope(ErrorCode.FS_IS_BINARY, err.message, requestId, err.stack));
         return;
       case ErrorCodes.FS_TOO_LARGE:
-        reply.send(errEnvelope(ErrorCode.FS_TOO_LARGE, err.message, requestId));
+        reply.send(errEnvelope(ErrorCode.FS_TOO_LARGE, err.message, requestId, err.stack));
         return;
       case ErrorCodes.FS_TOO_MANY_RESULTS:
-        reply.send(errEnvelope(ErrorCode.FS_TOO_MANY_RESULTS, err.message, requestId));
+        reply.send(errEnvelope(ErrorCode.FS_TOO_MANY_RESULTS, err.message, requestId, err.stack));
         return;
       case ErrorCodes.FS_GREP_TIMEOUT:
-        reply.send(errEnvelope(ErrorCode.FS_GREP_TIMEOUT, err.message, requestId));
+        reply.send(errEnvelope(ErrorCode.FS_GREP_TIMEOUT, err.message, requestId, err.stack));
         return;
       case ErrorCodes.FS_GIT_UNAVAILABLE:
-        reply.send(errEnvelope(ErrorCode.FS_GIT_UNAVAILABLE, err.message, requestId));
+        reply.send(errEnvelope(ErrorCode.FS_GIT_UNAVAILABLE, err.message, requestId, err.stack));
         return;
       case ErrorCodes.SESSION_NOT_FOUND:
-        reply.send(errEnvelope(ErrorCode.SESSION_NOT_FOUND, err.message, requestId));
+        reply.send(errEnvelope(ErrorCode.SESSION_NOT_FOUND, err.message, requestId, err.stack));
         return;
     }
   }
@@ -497,6 +519,7 @@ function sendMappedError(reply: Reply, requestId: string, err: unknown): void {
       ErrorCode.INTERNAL_ERROR,
       err instanceof Error ? err.message : String(err),
       requestId,
+      err instanceof Error ? err.stack : undefined,
     ),
   );
 }

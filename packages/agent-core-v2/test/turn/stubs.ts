@@ -8,6 +8,8 @@
 import type { IAgentLoopService } from '#/agent/loop/loop';
 import type { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import type { IAgentTurnService, Turn } from '#/agent/turn/turn';
+import type { ContentPart } from '#/app/llmProtocol/message';
+import type { PromptOrigin } from '#/agent/contextMemory/types';
 import { createHooks } from '#/hooks';
 
 export interface StubTurnOptions {
@@ -26,17 +28,29 @@ export interface StubTurnOptions {
  */
 export type StubTurn = IAgentTurnService & {
   readonly prompts: readonly string[];
-  readonly steered: readonly string[];
+  readonly steered: readonly {
+    readonly input: readonly ContentPart[];
+    readonly origin?: PromptOrigin;
+  }[];
+  readonly cancels: readonly {
+    readonly turnId?: number;
+    readonly reason?: unknown;
+  }[];
   readonly launches: readonly number[];
 };
 
+const turnControllers = new WeakMap<Turn, AbortController>();
+
 function makeTurn(id: number): Turn {
-  return {
+  const controller = new AbortController();
+  const turn: Turn = {
     id,
-    abortController: new AbortController(),
+    signal: controller.signal,
     ready: Promise.resolve(),
     result: Promise.resolve({ reason: 'completed' }),
   };
+  turnControllers.set(turn, controller);
+  return turn;
 }
 
 function makeAgentLoopHookSlots(): IAgentLoopService['hooks'] {
@@ -50,6 +64,14 @@ function makeAgentLoopHookSlots(): IAgentLoopService['hooks'] {
 /** A configurable `IAgentTurnService` stub backed by real `OrderedHookSlot`s. */
 export function stubTurn(options: StubTurnOptions = {}): StubTurn {
   const launches: number[] = [];
+  const steered: {
+    readonly input: readonly ContentPart[];
+    readonly origin?: PromptOrigin;
+  }[] = [];
+  const cancels: {
+    readonly turnId?: number;
+    readonly reason?: unknown;
+  }[] = [];
   let activeTurn: Turn | undefined;
   let nextId = typeof options.currentId === 'number' ? options.currentId : 0;
   return {
@@ -60,11 +82,30 @@ export function stubTurn(options: StubTurnOptions = {}): StubTurn {
       activeTurn = turn;
       return turn;
     },
+    launchWithLease(lease) {
+      const turn = makeTurn(lease.turnId);
+      nextId = lease.turnId + 1;
+      launches.push(turn.id);
+      activeTurn = turn;
+      return turn;
+    },
     getActiveTurn() {
       return options.hasActiveTurn ? activeTurn : undefined;
     },
+    recordSteer(input, origin) {
+      steered.push({ input, origin });
+    },
+    cancel(turnId, reason) {
+      cancels.push({ turnId, reason });
+      const turn = this.getActiveTurn();
+      if (turn === undefined) return false;
+      if (turnId !== undefined && turn.id !== turnId) return false;
+      turnControllers.get(turn)?.abort(reason);
+      return true;
+    },
     prompts: [],
-    steered: [],
+    steered,
+    cancels,
     launches,
   };
 }

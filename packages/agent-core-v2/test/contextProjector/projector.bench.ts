@@ -4,8 +4,8 @@
  *
  * `projectLegacy` below is the previous implementation, copied verbatim so the
  * comparison stays runnable after the old code is gone. The "new" side goes
- * through the real `AgentContextProjectorService` with micro-compaction
- * stubbed to a pass-through, so it measures exactly the projection path.
+ * through the real `AgentContextProjectorService`, so it measures exactly the
+ * projection path.
  *
  * Run:
  *   pnpm --filter @moonshot-ai/agent-core-v2 exec vitest bench test/contextProjector/projector.bench.ts
@@ -16,12 +16,27 @@ import { bench, describe } from 'vitest';
 import { SyncDescriptor } from '#/_base/di/descriptors';
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { TestInstantiationService } from '#/_base/di/test';
+import { ILogService, type ILogger } from '#/_base/log/log';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentContextProjectorService } from '#/agent/contextProjector/contextProjector';
 import { AgentContextProjectorService } from '#/agent/contextProjector/contextProjectorService';
-import { IAgentMicroCompactionService } from '#/agent/microCompaction/microCompaction';
 import { ErrorCodes, KimiError } from '#/errors';
 import type { ContentPart, Message, TextPart, ToolCall } from '#/app/llmProtocol/message';
+
+const noopLogger: ILogger = {
+  error: () => {},
+  warn: () => {},
+  info: () => {},
+  debug: () => {},
+  child: () => noopLogger,
+};
+const noopLogService: ILogService = {
+  ...noopLogger,
+  _serviceBrand: undefined,
+  level: 'off',
+  setLevel: () => {},
+  flush: () => Promise.resolve(),
+};
 
 // ---------------------------------------------------------------------------
 // Legacy implementation (verbatim copy of the pre-rewrite `project`)
@@ -186,8 +201,8 @@ function makeMixedHistory(turns: number): ContextMessage[] {
 
 function createProjector(disposables: DisposableStore): IAgentContextProjectorService {
   const ix = disposables.add(new TestInstantiationService());
+  ix.set(ILogService, noopLogService);
   ix.set(IAgentContextProjectorService, new SyncDescriptor(AgentContextProjectorService));
-  ix.stub(IAgentMicroCompactionService, { compact: (messages) => messages });
   return ix.get(IAgentContextProjectorService);
 }
 

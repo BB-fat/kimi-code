@@ -20,7 +20,6 @@ import {
 } from '../harness';
 
 const SPINE_ENV = 'KIMI_CODE_SPINE';
-const MICRO_ENV = 'KIMI_CODE_EXPERIMENTAL_MICRO_COMPACTION';
 
 const CATALOGUED_PROVIDER = {
   type: 'kimi',
@@ -41,7 +40,6 @@ describe('Spine archive + resume', () => {
   beforeEach(() => {
     vi.stubEnv(MASTER_ENV, '0');
     vi.stubEnv(SPINE_ENV, '1');
-    vi.stubEnv(MICRO_ENV, '0');
   });
   afterEach(() => {
     vi.unstubAllEnvs();

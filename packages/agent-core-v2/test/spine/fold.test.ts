@@ -21,7 +21,6 @@ import {
 } from '../harness';
 
 const SPINE_ENV = 'KIMI_CODE_SPINE';
-const MICRO_ENV = 'KIMI_CODE_EXPERIMENTAL_MICRO_COMPACTION';
 
 const CATALOGUED_PROVIDER = {
   type: 'kimi',
@@ -42,7 +41,6 @@ describe('Spine projection fold', () => {
   beforeEach(() => {
     vi.stubEnv(MASTER_ENV, '0');
     vi.stubEnv(SPINE_ENV, '1');
-    vi.stubEnv(MICRO_ENV, '0');
   });
   afterEach(() => {
     vi.unstubAllEnvs();
@@ -217,7 +215,7 @@ async function configureLoop(ctx: TestAgentContext): Promise<void> {
 
 function append(ctx: TestAgentContext, message: ContextMessage): number {
   const index = ctx.context.get().length;
-  ctx.context.splice(index, 0, [message]);
+  ctx.context.append(message);
   return index;
 }
 

@@ -1,6 +1,7 @@
 import { createDecorator } from "#/_base/di/instantiation";
 
 import type { UndoCut } from './contextOps';
+import type { LoopRecordedEvent } from './loopEventFold';
 import type { ContextMessage } from './types';
 
 export interface ContextCompactionInput {
@@ -33,6 +34,8 @@ export interface IAgentContextMemoryService {
   /** Append one or more already-folded messages (`context.append_message`). */
   append(...messages: readonly ContextMessage[]): void;
 
+  appendLoopEvent(event: LoopRecordedEvent): void;
+
   /** Drop the entire history (`context.clear`). No-op when already empty. */
   clear(): void;
 
@@ -46,18 +49,6 @@ export interface IAgentContextMemoryService {
 
   /** Rewrite the live history into the v1-compatible compaction handoff shape. */
   applyCompaction(input: ContextCompactionInput): ContextCompactionResult;
-
-  /**
-   * Arbitrary splice (`context.splice`). Retained for replay of protocol 1.5
-   * sessions and the few internal single-delete mutations with no 1.4 spelling;
-   * new code should prefer the named primitives above.
-   */
-  splice(
-    start: number,
-    deleteCount: number,
-    messages: readonly ContextMessage[],
-    tokens?: number,
-  ): void;
 }
 
 export const IAgentContextMemoryService = createDecorator<IAgentContextMemoryService>('agentContextMemoryService');

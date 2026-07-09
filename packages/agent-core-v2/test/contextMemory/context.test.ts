@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { estimateTokensForMessages } from '#/_base/utils/tokens';
 import type { ContextMessage } from '#/agent/contextMemory/types';
+import { IAgentWireService } from '#/wire/tokens';
+import type { IWireService } from '#/wire/wireService';
 import {
   IAgentContextMemoryService,
   IAgentContextSizeService,
@@ -16,12 +18,14 @@ describe('Agent context', () => {
   let context: IAgentContextMemoryService;
   let contextSize: IAgentContextSizeService;
   let profile: IAgentProfileService;
+  let wire: IWireService;
 
   beforeEach(() => {
     ctx = createTestAgent();
     context = ctx.get(IAgentContextMemoryService);
     contextSize = ctx.get(IAgentContextSizeService);
     profile = ctx.get(IAgentProfileService);
+    wire = ctx.get(IAgentWireService);
   });
 
   afterEach(async () => {
@@ -35,21 +39,21 @@ describe('Agent context', () => {
   it('stores prompt origins without leaking them to LLM projection', () => {
     ctx.appendUserMessage([{ type: 'text', text: 'hello' }]);
     ctx.appendSystemReminder('Remember this.', { kind: 'injection', variant: 'host' });
-    context.splice(context.get().length, 0, [
+    context.append(
       {
         role: 'assistant',
         content: [],
         toolCalls: [{ type: 'function', id: 'call_origin', name: 'Run', arguments: '{}' }],
       },
-    ]);
-    context.splice(context.get().length, 0, [
+    );
+    context.append(
       {
         role: 'tool',
         content: [{ type: 'text', text: 'tool output' }],
         toolCalls: [],
         toolCallId: 'call_origin',
       },
-    ]);
+    );
 
     expect(context.get().map(({ role, origin }) => ({ role, origin }))).toEqual([
       { role: 'user', origin: { kind: 'user' } },
@@ -61,7 +65,7 @@ describe('Agent context', () => {
   });
 
   it('renders tool error and empty-output status as model-visible text', () => {
-    context.splice(context.get().length, 0, [
+    context.append(
       {
         role: 'assistant',
         content: [],
@@ -70,8 +74,8 @@ describe('Agent context', () => {
           { type: 'function', id: 'call_empty', name: 'Run', arguments: '{}' },
         ],
       },
-    ]);
-    context.splice(context.get().length, 0, [
+    );
+    context.append(
       {
         role: 'tool',
         content: [
@@ -83,15 +87,15 @@ describe('Agent context', () => {
         toolCalls: [],
         toolCallId: 'call_error',
       },
-    ]);
-    context.splice(context.get().length, 0, [
+    );
+    context.append(
       {
         role: 'tool',
         content: [{ type: 'text', text: '<system>Tool output is empty.</system>' }],
         toolCalls: [],
         toolCallId: 'call_empty',
       },
-    ]);
+    );
 
     expect(ctx.project()).toMatchObject([
       { role: 'assistant', toolCalls: [{ id: 'call_error' }, { id: 'call_empty' }] },
@@ -203,7 +207,7 @@ describe('Agent context', () => {
 
   it('projects hook result messages into LLM projection', async () => {
     ctx.appendUserMessage([{ type: 'text', text: 'hooked input' }]);
-    context.splice(context.get().length, 0, [
+    context.append(
       {
         role: 'user',
         content: [
@@ -215,8 +219,8 @@ describe('Agent context', () => {
         toolCalls: [],
         origin: { kind: 'hook_result', event: 'UserPromptSubmit' },
       },
-    ]);
-    context.splice(context.get().length, 0, [
+    );
+    context.append(
       {
         role: 'assistant',
         content: [
@@ -228,15 +232,15 @@ describe('Agent context', () => {
         toolCalls: [],
         origin: { kind: 'hook_result', event: 'UserPromptSubmit', blocked: true },
       },
-    ]);
-    context.splice(context.get().length, 0, [
+    );
+    context.append(
       {
         role: 'user',
         content: [{ type: 'text', text: 'continue from stop hook' }],
         toolCalls: [],
         origin: { kind: 'hook_result', event: 'Stop' },
       },
-    ]);
+    );
 
     expect(context.get()).toHaveLength(4);
     expect(ctx.project()).toEqual([
@@ -275,7 +279,7 @@ describe('Agent context', () => {
 
   it('projects blocked UserPromptSubmit prompts into LLM projection', async () => {
     ctx.appendUserMessage([{ type: 'text', text: 'blocked prompt' }]);
-    context.splice(context.get().length, 0, [
+    context.append(
       {
         role: 'assistant',
         content: [
@@ -287,7 +291,7 @@ describe('Agent context', () => {
         toolCalls: [],
         origin: { kind: 'hook_result', event: 'UserPromptSubmit', blocked: true },
       },
-    ]);
+    );
     ctx.appendUserMessage([{ type: 'text', text: 'safe followup' }]);
 
     expect(context.get()).toHaveLength(3);
@@ -359,7 +363,7 @@ describe('Agent context', () => {
 
   it('defers system reminders until pending tool results are recorded and resumed', async () => {
     ctx.appendUserMessage([{ type: 'text', text: 'load a skill' }]);
-    context.splice(context.get().length, 0, [
+    context.append(
       {
         role: 'assistant',
         content: [],
@@ -368,8 +372,8 @@ describe('Agent context', () => {
           { type: 'function', id: 'call_skill', name: 'Skill', arguments: '{}' },
         ],
       },
-    ]);
-    context.splice(context.get().length, 0, [
+    );
+    context.append(
       {
         role: 'user',
         content: [{ type: 'text', text: '<system-reminder>\nskill body\n</system-reminder>' }],
@@ -381,7 +385,7 @@ describe('Agent context', () => {
           trigger: 'model-tool',
         },
       },
-    ]);
+    );
 
     // Raw history records the reminder in insertion order, behind the open
     // exchange.
@@ -396,14 +400,14 @@ describe('Agent context', () => {
       'user',
     ]);
 
-    context.splice(context.get().length, 0, [
+    context.append(
       {
         role: 'tool',
         content: [{ type: 'text', text: 'wrote file' }],
         toolCalls: [],
         toolCallId: 'call_write',
       },
-    ]);
+    );
     // The real result is pulled up; the still-open call is synthesized.
     expect(ctx.project().map((message) => message.role)).toEqual([
       'user',
@@ -413,14 +417,14 @@ describe('Agent context', () => {
       'user',
     ]);
 
-    context.splice(context.get().length, 0, [
+    context.append(
       {
         role: 'tool',
         content: [{ type: 'text', text: 'skill loaded' }],
         toolCalls: [],
         toolCallId: 'call_skill',
       },
-    ]);
+    );
 
     expect(ctx.project().map((message) => message.role)).toEqual([
       'user',
@@ -431,65 +435,6 @@ describe('Agent context', () => {
     ]);
     expect(ctx.project()[4]?.content).toEqual([
       { type: 'text', text: '<system-reminder>\nskill body\n</system-reminder>' },
-    ]);
-  });
-
-  it('preserves deferred reminders when compaction keeps a pending tool exchange', async () => {
-    ctx.appendUserMessage([{ type: 'text', text: 'old prompt' }]);
-    ctx.appendContextPartiallyResolvedParallelToolExchange();
-
-    ctx.appendSystemReminder('first reminder', {
-      kind: 'injection',
-      variant: 'host',
-    });
-    context.splice(0, 1, [
-      {
-        role: 'assistant',
-        content: [{ type: 'text', text: 'summary of old prompt' }],
-        toolCalls: [],
-        origin: { kind: 'compaction_summary' },
-      },
-    ]);
-    ctx.appendSystemReminder('second reminder', {
-      kind: 'injection',
-      variant: 'host',
-    });
-
-    // The open second call is synthesized; both reminders stay deferred behind
-    // the closed exchange.
-    expect(ctx.project().map((message) => message.role)).toEqual([
-      'assistant',
-      'user',
-      'assistant',
-      'tool',
-      'tool',
-      'user',
-      'user',
-    ]);
-
-    context.splice(context.get().length, 0, [
-      {
-        role: 'tool',
-        content: [{ type: 'text', text: 'two result' }],
-        toolCalls: [],
-        toolCallId: 'call_open_two',
-      },
-    ]);
-
-    expect(ctx.project().map((message) => message.role)).toEqual([
-      'assistant',
-      'user',
-      'assistant',
-      'tool',
-      'tool',
-      'user',
-      'user',
-    ]);
-    expect(ctx.project()[5]?.content).toEqual([
-      { type: 'text', text: '<system-reminder>\nfirst reminder\n</system-reminder>' },
-    ]);
-    expect(ctx.project()[6]?.content).toEqual([
-      { type: 'text', text: '<system-reminder>\nsecond reminder\n</system-reminder>' },
     ]);
   });
 
@@ -510,39 +455,6 @@ describe('Agent context', () => {
     `);
   });
 
-  it('uses compacted summary plus recent messages', async () => {
-    profile.update({ activeToolNames: [] });
-    ctx.appendUserMessage([{ type: 'text', text: 'old user message' }]);
-    ctx.appendUserMessage([{ type: 'text', text: 'recent user message' }]);
-    context.splice(
-      0,
-      1,
-      [
-        {
-          role: 'assistant',
-          content: [{ type: 'text', text: 'summary of old context' }],
-          toolCalls: [],
-          origin: { kind: 'compaction_summary' },
-        },
-      ],
-      20,
-    );
-    expect(context.get()[0]?.origin).toEqual({ kind: 'compaction_summary' });
-
-    ctx.mockNextResponse({ type: 'text', text: 'after compaction' });
-    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'new prompt' }] });
-
-    await ctx.untilTurnEnd();
-    expect(ctx.lastLlmInput()).toMatchInlineSnapshot(`
-      system: <system-prompt>
-      tools: []
-      messages:
-        assistant: text "summary of old context"
-        user: text "recent user message"
-        user: text "new prompt"
-    `);
-  });
-
   it('includes new user messages as pending until the next usage update', () => {
     ctx.appendAssistantTextWithUsage(1, 'previous answer', 1_000);
     expect(contextSize.get().measured).toBe(1_000);
@@ -557,7 +469,7 @@ describe('Agent context', () => {
 
   it('keeps tool results pending when step usage covers only through the assistant message', () => {
     ctx.appendUserMessage([{ type: 'text', text: 'lookup pending tokens' }]);
-    context.splice(context.get().length, 0, [
+    context.append(
       {
         role: 'assistant',
         content: [],
@@ -565,21 +477,21 @@ describe('Agent context', () => {
           { type: 'function', id: 'call_pending_tokens', name: 'Lookup', arguments: '{}' },
         ],
       },
-    ]);
+    );
     contextSize.measured(context.get(), [], {
       inputCacheRead: 0,
       inputCacheCreation: 0,
       inputOther: 1_280,
       output: 0,
     });
-    context.splice(context.get().length, 0, [
+    context.append(
       {
         role: 'tool',
         content: [{ type: 'text', text: 'large tool result '.repeat(50) }],
         toolCalls: [],
         toolCallId: 'call_pending_tokens',
       },
-    ]);
+    );
 
     const pendingMessages = context.get().slice(-1);
     expect(contextSize.get().measured).toBe(1_280);
@@ -702,7 +614,7 @@ describe('Agent context', () => {
     ctx.appendAssistantText(2, 'second response');
 
     // Append a task notification (role: 'user' but not a real prompt)
-    context.splice(context.get().length, 0, [
+    context.append(
       {
         role: 'user',
         content: [{ type: 'text', text: 'background task completed' }],
@@ -714,7 +626,7 @@ describe('Agent context', () => {
           notificationId: 'task:bash-001:completed',
         },
       },
-    ]);
+    );
 
     expect(context.get().map((m) => m.role)).toEqual([
       'user',
@@ -730,147 +642,22 @@ describe('Agent context', () => {
     expect(context.get().map((m) => m.role)).toEqual(['user', 'assistant']);
   });
 
-  it('stops at compaction summary and records the requested undo count', () => {
-    ctx.appendUserMessage([{ type: 'text', text: 'old user message' }]);
-    context.splice(
-      0,
-      1,
-      [
-        {
-          role: 'assistant',
-          content: [{ type: 'text', text: 'summary of compacted context' }],
-          toolCalls: [],
-          origin: { kind: 'compaction_summary' },
-        },
-      ],
-      20,
-    );
-    ctx.appendUserMessage([{ type: 'text', text: 'recent user message' }]);
-    context.splice(context.get().length, 0, [
-      {
-        role: 'assistant',
-        content: [{ type: 'text', text: 'recent answer' }],
-        toolCalls: [],
-        origin: undefined,
-      },
-    ]);
-    ctx.newEvents();
-
-    expect(() => {
-      ctx.undoHistory(2);
-    }).toThrow(
-      'Cannot undo 2 prompts; only 1 prompt can be undone in the active context after the last compaction.',
-    );
-
-    expect(context.get()).toEqual([
-      expect.objectContaining({
-        role: 'assistant',
-        origin: { kind: 'compaction_summary' },
-        content: [{ type: 'text', text: 'summary of compacted context' }],
-      }),
-    ]);
-    expect(ctx.newEvents()).toContainEqual(
-      expect.objectContaining({
-        type: '[wire]',
-        event: 'context.splice',
-        args: expect.objectContaining({ deleteCount: 1, messages: [] }),
-      }),
-    );
-  });
-
-  it('restores a compacted history with later messages removed', async () => {
-    await expect(
-      ctx.restore([
-        {
-          type: 'context.splice',
-          start: 0,
-          deleteCount: 0,
-          messages: [
-            {
-              role: 'user',
-              content: [{ type: 'text', text: 'old user message' }],
-              toolCalls: [],
-              origin: { kind: 'user' },
-            },
-          ],
-          time: 1,
-        },
-        {
-          type: 'context.splice',
-          start: 0,
-          deleteCount: 1,
-          messages: [
-            {
-              role: 'assistant',
-              content: [{ type: 'text', text: 'summary of compacted context' }],
-              toolCalls: [],
-              origin: { kind: 'compaction_summary' },
-            },
-          ],
-          tokens: 20,
-          time: 2,
-        },
-        {
-          type: 'context.splice',
-          start: 1,
-          deleteCount: 0,
-          messages: [
-            {
-              role: 'user',
-              content: [{ type: 'text', text: 'recent user message' }],
-              toolCalls: [],
-              origin: { kind: 'user' },
-            },
-          ],
-          time: 3,
-        },
-        {
-          type: 'context.splice',
-          start: 2,
-          deleteCount: 0,
-          messages: [
-            {
-              role: 'assistant',
-              content: [{ type: 'text', text: 'recent answer' }],
-              toolCalls: [],
-            },
-          ],
-          time: 4,
-        },
-        {
-          type: 'context.splice',
-          start: 1,
-          deleteCount: 2,
-          messages: [],
-          time: 5,
-        },
-      ]),
-    ).resolves.not.toThrow();
-    expect(context.get()).toEqual([
-      expect.objectContaining({
-        role: 'assistant',
-        origin: { kind: 'compaction_summary' },
-        content: [{ type: 'text', text: 'summary of compacted context' }],
-      }),
-    ]);
-  });
-
   it('preserves injection messages when undo removes the surrounding turn', () => {
-    context.splice(context.get().length, 0, [userMessage('do the work', { kind: 'user' })]);
-    context.splice(context.get().length, 0, [
+    context.append(userMessage('do the work', { kind: 'user' }));
+    context.append(
       userMessage('Plan mode is active', {
         kind: 'injection',
         variant: 'plan_mode',
       }),
-    ]);
-    context.splice(context.get().length, 0, [
+    );
+    context.append(
       {
         role: 'assistant',
         content: [{ type: 'text', text: 'work done' }],
         toolCalls: [],
         origin: undefined,
       },
-    ]);
+    );
 
     ctx.undoHistory(1);
 

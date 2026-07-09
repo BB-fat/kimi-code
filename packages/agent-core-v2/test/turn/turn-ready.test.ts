@@ -12,6 +12,10 @@ import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { IAgentTurnService } from '#/agent/turn/turn';
 import { AgentTurnService } from '#/agent/turn/turnService';
 import { TurnModel } from '#/agent/turn/turnOps';
+import { IAgentUsageService } from '#/agent/usage/usage';
+import { IAgentActivityService, ISessionActivityKernel } from '#/activity/activity';
+import { AgentActivityService } from '#/activity/agentActivityService';
+import { IAgentScopeContext, makeAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IConfigService } from '#/app/config/config';
 import { IEventBus } from '#/app/event/eventBus';
 import { emptyUsage } from '#/app/llmProtocol/usage';
@@ -30,6 +34,7 @@ import { WireService } from '#/wire/wireServiceImpl';
 import { stubContextMemory } from '../contextMemory/stubs';
 import { stubLog } from '../log/stubs';
 import { recordingTelemetry } from '../telemetry/stubs';
+import { stubSessionActivityKernel } from '../activity/stubs';
 import { stubLoopWithHooks, stubToolExecutor } from './stubs';
 
 const noopEventBus: IEventBus = {
@@ -61,6 +66,12 @@ describe('AgentTurnService ready', () => {
           disposables.add(new WireService({ logScope: 'wire', logKey: 'turn-ready' })),
         );
         reg.defineInstance(IEventBus, noopEventBus);
+        reg.defineInstance(ISessionActivityKernel, stubSessionActivityKernel());
+        reg.defineInstance(
+          IAgentScopeContext,
+          makeAgentScopeContext({ agentId: 'turn-ready', agentScope: 'turn-ready' }),
+        );
+        reg.define(IAgentActivityService, AgentActivityService);
         reg.define(IAgentTurnService, AgentTurnService);
       },
     });
@@ -154,10 +165,50 @@ describe('AgentTurnService ready', () => {
 
     expect(error).toBeInstanceOf(KimiError);
     expect(error).toMatchObject({
-      code: ErrorCodes.TURN_AGENT_BUSY,
+      code: ErrorCodes.ACTIVITY_AGENT_BUSY,
       details: { turnId: turn.id },
     });
     await expect(turn.result).resolves.toMatchObject({ reason: 'completed', steps: 1 });
+  });
+
+  it('records turn.cancel when cancelling the active turn', async () => {
+    const records: PersistedRecord[] = [];
+    disposables.add(
+      ix.get(IAgentWireService).onEmission((emission) => {
+        records.push(emission.record);
+      }),
+    );
+    loop.run = async ({ signal }) => {
+      await new Promise<void>((resolve) => {
+        signal?.addEventListener('abort', () => resolve(), { once: true });
+      });
+      return { reason: 'cancelled', steps: 0 };
+    };
+
+    const turnService = ix.get(IAgentTurnService);
+    const turn = turnService.launch({
+      input: [{ type: 'text', text: 'cancel me' }],
+      origin: { kind: 'user' },
+    });
+
+    expect(turnService.cancel(turn.id)).toBe(true);
+    await expect(turn.result).resolves.toMatchObject({ reason: 'cancelled', steps: 0 });
+    expect(records.map((record) => record.type)).toEqual(['turn.prompt', 'turn.cancel']);
+    expect(records[1]).toEqual({ type: 'turn.cancel', turnId: turn.id, time: expect.any(Number) });
+  });
+
+  it('records turn.cancel for an idle no-op cancellation', () => {
+    const records: PersistedRecord[] = [];
+    disposables.add(
+      ix.get(IAgentWireService).onEmission((emission) => {
+        records.push(emission.record);
+      }),
+    );
+
+    const turnService = ix.get(IAgentTurnService);
+
+    expect(turnService.cancel(99)).toBe(false);
+    expect(records).toEqual([{ type: 'turn.cancel', turnId: 99, time: expect.any(Number) }]);
   });
 });
 
@@ -171,6 +222,11 @@ describe('AgentLoopService onStarted', () => {
       additionalServices: (reg) => {
         reg.defineInstance(IAgentContextMemoryService, stubContextMemory());
         reg.defineInstance(IAgentToolExecutorService, stubToolExecutor());
+        reg.defineInstance(IAgentUsageService, {
+          _serviceBrand: undefined,
+          record: () => {},
+          status: () => ({}),
+        });
         reg.definePartialInstance(IConfigService, {
           get: <T>() => undefined as T,
         });
@@ -325,6 +381,9 @@ describe('AgentTurnService wire state', () => {
       set: () => {},
     });
     ix.stub(IEventBus, noopEventBus);
+    ix.stub(ISessionActivityKernel, stubSessionActivityKernel());
+    ix.stub(IAgentScopeContext, makeAgentScopeContext({ agentId: 'turn-ready', agentScope: 'turn-ready' }));
+    ix.set(IAgentActivityService, new SyncDescriptor(AgentActivityService));
     ix.set(IAgentTurnService, new SyncDescriptor(AgentTurnService));
     log = ix.get(IAppendLogStore);
     turnService = ix.get(IAgentTurnService);
@@ -346,11 +405,15 @@ describe('AgentTurnService wire state', () => {
     expect(ix.get(IAgentWireService).getModel(TurnModel)).toEqual({ nextTurnId: 1 });
   });
 
-  it('dispatch persists a flat { type, turnId } record (no payload key)', async () => {
+  it('dispatch persists a flat record with the default user origin at the source', async () => {
     turnService.launch();
 
     const records = await readRecords();
-    expect(records).toEqual([{ type: 'turn.prompt', turnId: 0 }]);
+    // `turn.prompt` persists `{ input, origin }` only; no turnId (apply = +1
+    // per record) and the engine stamps `time`.
+    expect(records).toEqual([
+      { type: 'turn.prompt', input: [], origin: { kind: 'user' }, time: expect.any(Number) },
+    ]);
     expect('payload' in records[0]!).toBe(false);
   });
 

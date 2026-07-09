@@ -50,7 +50,7 @@ async function restoreGoalRecords(
 function makeTurn(id: number): Turn {
   return {
     id,
-    abortController: new AbortController(),
+    signal: new AbortController().signal,
     ready: Promise.resolve(),
     result: Promise.resolve({ reason: 'completed' }),
   };
@@ -60,12 +60,12 @@ async function runGoalStep(loopService: IAgentLoopService, turn: Turn): Promise<
   const step = {
     turnId: turn.id,
     step: 1,
-    signal: turn.abortController.signal,
+    signal: turn.signal,
   };
   const afterStep: AfterStepContext = {
     turnId: turn.id,
     step: 1,
-    signal: turn.abortController.signal,
+    signal: turn.signal,
     usage: zeroUsage,
     finishReason: 'completed' as const,
     continue: false,
@@ -84,7 +84,7 @@ async function runStepUsageHooks(
   const afterStep: AfterStepContext = {
     turnId: turn.id,
     step: 1,
-    signal: turn.abortController.signal,
+    signal: turn.signal,
     usage,
     finishReason: 'completed' as const,
     continue: false,
@@ -158,6 +158,15 @@ describe('AgentGoalService', () => {
 
       expect(snapshot.completionCriterion).toBe('tests pass');
       expect(goals.getGoal().goal?.completionCriterion).toBe('tests pass');
+    });
+
+    it('truncates an over-long completion criterion instead of failing', async () => {
+      const snapshot = await goals.createGoal({
+        objective: 'Ship feature X',
+        completionCriterion: 'c'.repeat(4001),
+      });
+
+      expect(snapshot.completionCriterion).toBe('c'.repeat(4000));
     });
 
     it('sets no default work caps when none is provided', async () => {
@@ -609,12 +618,16 @@ describe('AgentGoalService core workflow hooks', () => {
         output: 0,
       }),
     ).toBe(false);
+    expect(goals.getGoal().goal).toMatchObject({
+      status: 'active',
+      tokensUsed: 0,
+    });
     expect(
       await runStepUsageHooks(loopService, goals, turn, {
         inputCacheRead: 0,
         inputCacheCreation: 0,
         inputOther: 0,
-        output: 3,
+        output: 7,
       }),
     ).toBe(true);
 
@@ -666,12 +679,12 @@ describe('AgentGoalService core workflow hooks', () => {
     const step = {
       turnId: turn.id,
       step: 1,
-      signal: turn.abortController.signal,
+      signal: turn.signal,
     };
     const afterStep: AfterStepContext = {
       turnId: turn.id,
       step: 1,
-      signal: turn.abortController.signal,
+      signal: turn.signal,
       usage: zeroUsage,
       finishReason: 'completed' as const,
       continue: false,

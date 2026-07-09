@@ -3,11 +3,44 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { SyncDescriptor } from '#/_base/di/descriptors';
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { TestInstantiationService } from '#/_base/di/test';
+import { ILogService, type ILogger } from '#/_base/log/log';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentContextProjectorService } from '#/agent/contextProjector/contextProjector';
 import { AgentContextProjectorService } from '#/agent/contextProjector/contextProjectorService';
-import { IAgentMicroCompactionService } from '#/agent/microCompaction/microCompaction';
+import { toProtocolMessage } from '#/agent/contextMemory/messageProjection';
 import type { Message } from '#/app/llmProtocol/message';
+
+const REPAIR_WARNING = 'repaired the request to keep it wire-valid';
+
+interface WarningCall {
+  readonly message: string;
+  readonly payload: unknown;
+}
+
+function createCapturingLog(warnings: WarningCall[]): ILogService {
+  const logger: ILogger = {
+    error: () => {},
+    warn: (message, payload) => {
+      warnings.push({ message, payload });
+    },
+    info: () => {},
+    debug: () => {},
+    child: () => logger,
+  };
+  return {
+    ...logger,
+    _serviceBrand: undefined,
+    level: 'warn',
+    setLevel: () => {},
+    flush: () => Promise.resolve(),
+  };
+}
+
+function repairPayloads(warnings: WarningCall[]): Record<string, unknown>[] {
+  return warnings
+    .filter((call) => call.message === REPAIR_WARNING)
+    .map((call) => call.payload as Record<string, unknown>);
+}
 
 // Tests for how the projector normalizes tool exchanges: results are pulled up
 // right after their call, messages that landed between a call and its results
@@ -15,7 +48,7 @@ import type { Message } from '#/app/llmProtocol/message';
 // synthetic error result, stale duplicate results are dropped, and orphan
 // results are dropped in a real projection (but kept in a bare slice).
 
-const INTERRUPTED = 'Tool execution was interrupted before its result was recorded';
+const INTERRUPTED = 'Tool result is not available in the current context';
 
 function user(text: string): ContextMessage {
   return { role: 'user', content: [{ type: 'text', text }], toolCalls: [], origin: { kind: 'user' } };
@@ -45,12 +78,14 @@ function toolResult(toolCallId: string, text: string): ContextMessage {
 describe('projector tool-exchange normalization', () => {
   let disposables: DisposableStore;
   let projector: IAgentContextProjectorService;
+  let warnings: WarningCall[];
 
   beforeEach(() => {
     disposables = new DisposableStore();
+    warnings = [];
     const ix = disposables.add(new TestInstantiationService());
+    ix.set(ILogService, createCapturingLog(warnings));
     ix.set(IAgentContextProjectorService, new SyncDescriptor(AgentContextProjectorService));
-    ix.stub(IAgentMicroCompactionService, { compact: (messages) => messages });
     projector = ix.get(IAgentContextProjectorService);
   });
 
@@ -200,8 +235,7 @@ describe('projector tool-exchange normalization', () => {
   });
 
   it('keeps a bare result slice with no preceding assistant (used for sizing)', () => {
-    // micro-compaction projects single messages to size them — a leading result
-    // is kept rather than treated as an orphan.
+    // A leading result is kept rather than treated as an orphan.
     expect(shape([toolResult('c1', 'partial result')])).toEqual(['tool:c1']);
   });
 
@@ -212,6 +246,59 @@ describe('projector tool-exchange normalization', () => {
       toolCalls: [],
     };
     expect(project([message])).toHaveLength(1);
+  });
+
+  it('renders structured tool-result notes only for the model projection', () => {
+    const note = '<system>Image compressed.</system>';
+    const result: ContextMessage = {
+      role: 'tool',
+      content: [{ type: 'text', text: 'image result' }],
+      toolCalls: [],
+      toolCallId: 'call_image',
+      note,
+    };
+    const history = [assistant('', ['call_image']), result];
+
+    expect(project(history)[1]?.content).toEqual([
+      { type: 'text', text: `image result\n${note}` },
+    ]);
+    expect(result.content).toEqual([{ type: 'text', text: 'image result' }]);
+
+    const protocol = toProtocolMessage('session_1', 0, result, 0);
+    expect(protocol.content).toEqual([
+      { type: 'tool_result', tool_call_id: 'call_image', output: 'image result' },
+    ]);
+  });
+
+  it('renders v1 tool-result status at the model projection boundary', () => {
+    const history = [
+      assistant('', ['call_error', 'call_empty']),
+      {
+        role: 'tool',
+        content: [{ type: 'text', text: '<system>ERROR: remote failed</system>' }],
+        toolCalls: [],
+        toolCallId: 'call_error',
+        isError: true,
+      },
+      {
+        role: 'tool',
+        content: [{ type: 'text', text: '   ' }],
+        toolCalls: [],
+        toolCallId: 'call_empty',
+      },
+    ] satisfies ContextMessage[];
+
+    expect(project(history)[1]?.content).toEqual([
+      {
+        type: 'text',
+        text:
+          '<system>ERROR: Tool execution failed.</system>\n' +
+          '<system>ERROR: remote failed</system>',
+      },
+    ]);
+    expect(project(history)[2]?.content).toEqual([
+      { type: 'text', text: '<system>Tool output is empty.</system>' },
+    ]);
   });
 
   it('strict mode dedupes duplicate assistant tool call ids', () => {
@@ -270,4 +357,68 @@ describe('projector tool-exchange normalization', () => {
     ]);
   });
 
+  describe('surfaces repairs so a mangled history leaves a trace', () => {
+    it('stays silent for a well-formed projection', () => {
+      project([user('go'), assistant('', ['c1']), toolResult('c1', 'one'), user('next')]);
+      expect(repairPayloads(warnings)).toEqual([]);
+    });
+
+    it('reports a result pulled up to its call as reordered', () => {
+      project([
+        assistant('', ['c1', 'c2']),
+        reminder('host note'),
+        toolResult('c1', 'one'),
+        toolResult('c2', 'two'),
+      ]);
+      expect(repairPayloads(warnings)).toEqual([
+        expect.objectContaining({
+          reordered: 2,
+          toolCallIds: expect.arrayContaining(['c1', 'c2']),
+        }),
+      ]);
+    });
+
+    it('reports a mid-history lost result but not a trailing in-flight close', () => {
+      project([user('go'), assistant('', ['c1']), user('keep going'), assistant('All done.')]);
+      expect(repairPayloads(warnings)).toEqual([
+        expect.objectContaining({ synthesized: 1, toolCallIds: ['c1'] }),
+      ]);
+
+      warnings.length = 0;
+      project([user('go'), assistant('', ['c1'])]);
+      expect(repairPayloads(warnings)).toEqual([]);
+    });
+
+    it('reports an orphan result whose call was never recorded', () => {
+      project([user('hi'), assistant('hello'), toolResult('ghost', 'orphaned')]);
+      expect(repairPayloads(warnings)).toEqual([
+        expect.objectContaining({ droppedOrphan: 1, toolCallIds: ['ghost'] }),
+      ]);
+    });
+
+    it('logs a recurring defect once per signature and again after a clean projection', () => {
+      const broken = [user('go'), assistant('', ['c1']), user('keep going'), assistant('x')];
+      project(broken);
+      project(broken);
+      expect(repairPayloads(warnings)).toHaveLength(1);
+
+      project([user('go'), assistant('', ['c1']), toolResult('c1', 'one'), user('next')]);
+      project(broken);
+      expect(repairPayloads(warnings)).toHaveLength(2);
+    });
+
+    it('reports strict-mode leading-drop and orphan', () => {
+      projectStrict([assistant('stale'), toolResult('ghost', 'orphaned'), user('hi')]);
+      expect(repairPayloads(warnings).at(-1)).toEqual(
+        expect.objectContaining({ leadingDropped: 1, droppedOrphan: 1, toolCallIds: ['ghost'] }),
+      );
+    });
+
+    it('reports strict-mode consecutive assistant merge', () => {
+      projectStrict([user('go'), assistant('one'), assistant('two')]);
+      expect(repairPayloads(warnings).at(-1)).toEqual(
+        expect.objectContaining({ assistantsMerged: 1 }),
+      );
+    });
+  });
 });

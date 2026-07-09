@@ -58,13 +58,7 @@ async function readRecords(): Promise<PersistedRecord[]> {
 }
 
 describe('AgentPermissionRulesService (wire-backed)', () => {
-  it('addRules appends rules and fires onChanged with the accumulated rules', () => {
-    const changes: PermissionRule[][] = [];
-    svc.hooks.onChanged.register('test', (ctx, next) => {
-      changes.push([...ctx.rules]);
-      return next();
-    });
-
+  it('addRules appends rules and exposes the accumulated rules', () => {
     expect(svc.rules).toEqual([]);
 
     svc.addRules([allowRule]);
@@ -72,31 +66,20 @@ describe('AgentPermissionRulesService (wire-backed)', () => {
     svc.addRules([denyRule]);
     expect(svc.rules).toEqual([allowRule, denyRule]);
 
-    expect(changes).toEqual([[allowRule], [allowRule, denyRule]]);
-
-    // Empty add is a no-op: it does not dispatch and onChanged does not fire.
+    // Empty add is a no-op: it does not dispatch.
     svc.addRules([]);
-    expect(changes).toEqual([[allowRule], [allowRule, denyRule]]);
+    expect(svc.rules).toEqual([allowRule, denyRule]);
   });
 
-  it('records a session approval pattern and notifies onApprovalRecorded on the live path', () => {
-    const recorded: PermissionApprovalResultRecord[] = [];
-    svc.hooks.onApprovalRecorded.register('test', (ctx, next) => {
-      recorded.push(ctx.record);
-      return next();
-    });
-
+  it('records a session approval pattern', () => {
     const approval = sessionApproval('Bash(rm *)');
     svc.recordApprovalResult(approval);
 
     expect(svc.sessionApprovalRulePatterns).toEqual(['Bash(rm *)']);
-    expect(recorded).toEqual([approval]);
 
-    // Duplicate session approval is deduped by the model (state reference stays
-    // the same); the live notification still fires for the caller.
+    // Duplicate session approval is deduped by the model.
     svc.recordApprovalResult(approval);
     expect(svc.sessionApprovalRulePatterns).toEqual(['Bash(rm *)']);
-    expect(recorded).toEqual([approval, approval]);
   });
 
   it('ignores non-session approvals for the pattern set', () => {
@@ -111,13 +94,12 @@ describe('AgentPermissionRulesService (wire-backed)', () => {
     expect(svc.sessionApprovalRulePatterns).toEqual([]);
   });
 
-  it('dispatch persists flat records (no payload key)', async () => {
+  it('only persists approval records (permission.rules.add is live-only)', async () => {
     svc.addRules([allowRule]);
     svc.recordApprovalResult(sessionApproval('Bash(rm *)'));
 
     const records = await readRecords();
     expect(records).toEqual([
-      { type: 'permission.rules.add', rules: [allowRule] },
       {
         type: 'permission.record_approval_result',
         turnId: 1,
@@ -126,12 +108,13 @@ describe('AgentPermissionRulesService (wire-backed)', () => {
         action: 'Bash(rm -rf /tmp/x)',
         sessionApprovalRule: 'Bash(rm *)',
         result: { decision: 'approved', scope: 'session' },
+        time: expect.any(Number),
       },
     ]);
     expect(records.every((record) => 'payload' in record === false)).toBe(true);
   });
 
-  it('replay rebuilds rules and patterns on a fresh WireService (silent)', async () => {
+  it('replay rebuilds session approval patterns only (rules are not persisted)', async () => {
     svc.addRules([allowRule, denyRule]);
     svc.recordApprovalResult(sessionApproval('Bash(rm *)'));
     const records = await readRecords();
@@ -152,10 +135,11 @@ describe('AgentPermissionRulesService (wire-backed)', () => {
     void fresh.replay(...records);
 
     expect(fresh.getModel(PermissionRulesModel)).toEqual({
-      rules: [allowRule, denyRule],
+      rules: [],
       sessionApprovalRulePatterns: ['Bash(rm *)'],
     });
-    // Replay is silent: no onChange and nothing written back to the wire log.
+    // Replay is silent: no subscriber notification and nothing written back to
+    // the wire log.
     expect(changes).toBe(0);
     const written: PersistedRecord[] = [];
     for await (const record of log2.read<PersistedRecord>(SCOPE, 'permission-rules-replay')) {

@@ -1,21 +1,20 @@
 import { InstantiationType } from '#/_base/di/extensions';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
-import { ErrorCodes, KimiError } from '#/errors';
-
+import { extractImageCompressionCaptions } from '#/_base/tools/support/image-compress';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
-import { ensureMessageId } from '#/agent/contextMemory/messageId';
-import type { ContextMessage, PromptOrigin } from '#/agent/contextMemory/types';
+import { formatUndoUnavailableMessage, precheckUndo } from '#/agent/contextMemory/contextOps';
+import { USER_PROMPT_ORIGIN, type ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentLoopService } from '#/agent/loop/loop';
-import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
-import { IAgentTurnService, type Turn } from '#/agent/turn/turn';
+import { IAgentSystemReminderService } from '#/agent/systemReminder/systemReminder';
 import type { ExecutableToolResult } from '#/agent/tool/toolContract';
 import type { ToolDidExecuteContext } from '#/agent/tool/toolHooks';
+import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
+import { IAgentTurnService, type Turn, type TurnPromptInfo } from '#/agent/turn/turn';
+import type { ContentPart } from '#/app/llmProtocol/message';
+import { ErrorCodes, KimiError } from '#/errors';
 import { OrderedHookSlot } from '#/hooks';
-import {
-  IAgentPromptService,
-  type PromptSubmitContext,
-  type PromptSteerHandle,
-} from './prompt';
+
+import { IAgentPromptService, type PromptSubmitContext, type PromptSteerHandle } from './prompt';
 
 interface QueuedSteer {
   readonly message: ContextMessage;
@@ -35,13 +34,17 @@ export class AgentPromptService implements IAgentPromptService {
   constructor(
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
     @IAgentTurnService private readonly turnService: IAgentTurnService,
+    @IAgentSystemReminderService private readonly reminders: IAgentSystemReminderService,
     @IAgentLoopService loopService: IAgentLoopService,
     @IAgentToolExecutorService toolExecutor: IAgentToolExecutorService,
   ) {
-    loopService.hooks.beforeStep.register('prompt-service-steer-before-step', async (_ctx, next) => {
-      this.flushSteerQueue();
-      await next();
-    });
+    loopService.hooks.beforeStep.register(
+      'prompt-service-steer-before-step',
+      async (_ctx, next) => {
+        this.flushSteerQueue();
+        await next();
+      },
+    );
     loopService.hooks.afterStep.register('prompt-service-steer', async (ctx, next) => {
       if (this.flushSteerQueue()) {
         ctx.continue = true;
@@ -55,10 +58,14 @@ export class AgentPromptService implements IAgentPromptService {
   }
 
   async prompt(message: ContextMessage): Promise<Turn | undefined> {
-    const stamped = ensureMessageId(message);
-    this.append(stamped);
-    if (await this.blockedByHook(stamped, false)) return undefined;
-    return this.launch(stamped.origin);
+    const { message: rerouted, captions } = this.extractCompressionCaptions(message);
+    if (await this.blockedByHook(rerouted, false)) {
+      this.appendPrompt(rerouted, captions);
+      return undefined;
+    }
+    const turn = this.launch({ input: rerouted.content, origin: rerouted.origin });
+    this.appendPrompt(rerouted, captions);
+    return turn;
   }
 
   steer(message: ContextMessage): PromptSteerHandle {
@@ -73,7 +80,7 @@ export class AgentPromptService implements IAgentPromptService {
     }
 
     const entry: QueuedSteer = {
-      message: ensureMessageId(message),
+      message,
       emitted: false,
       removed: false,
     };
@@ -107,28 +114,32 @@ export class AgentPromptService implements IAgentPromptService {
   }
 
   retry(): Turn | undefined {
-    return this.launch({ kind: 'retry' });
+    return this.launch({ input: [], origin: { kind: 'retry' } });
   }
 
   undo(count: number): number {
     if (count <= 0) return 0;
 
-    const { removedCount, stoppedAtCompaction } = this.context.undo(count);
-    if (removedCount < count) {
+    // Precheck on the live history so a request that cannot be fully satisfied
+    // fails with `session.undo_unavailable` (and a structured reason) BEFORE any
+    // state is removed. `context.undo` is a no-op when the cut is short, but
+    // surfacing *why* (`empty` / `compaction_boundary` / `insufficient`) is the
+    // caller's signal — mirrors v1's `canUndoHistory` gate.
+    const precheck = precheckUndo(this.context.get(), count);
+    if (!precheck.ok) {
       throw new KimiError(
-        ErrorCodes.REQUEST_INVALID,
-        formatUndoUnavailableMessage(count, removedCount, stoppedAtCompaction),
+        ErrorCodes.SESSION_UNDO_UNAVAILABLE,
+        formatUndoUnavailableMessage(precheck),
         {
           details: {
-            reason: 'undo_limit',
+            reason: precheck.reason,
             requestedCount: count,
-            undoableCount: removedCount,
-            stoppedAtCompaction,
+            undoableCount: precheck.undoable,
           },
         },
       );
     }
-    return removedCount;
+    return this.context.undo(count).removedCount;
   }
 
   clear(): void {
@@ -140,8 +151,8 @@ export class AgentPromptService implements IAgentPromptService {
     this.context.append(...messages);
   }
 
-  private launch(origin?: PromptOrigin): Turn {
-    const turn = this.turnService.launch(origin);
+  private launch(prompt?: TurnPromptInfo): Turn {
+    const turn = this.turnService.launch(prompt);
     this.observe(turn);
     return turn;
   }
@@ -175,9 +186,52 @@ export class AgentPromptService implements IAgentPromptService {
 
     for (const entry of pending) {
       entry.emitted = true;
+      const { message, captions } = this.extractCompressionCaptions(entry.message);
+      this.turnService.recordSteer(message.content, message.origin);
+      this.appendPrompt(message, captions);
     }
-    this.append(...pending.map((entry) => entry.message));
     return true;
+  }
+
+  /**
+   * Split inline image-compression captions out of a user message so they can
+   * be delivered through the built-in system-reminder injection instead.
+   *
+   * Prompt ingestion (server upload/base64 route, TUI paste, ACP) annotates a
+   * compressed image with an inline `<system>` caption next to the image. Left
+   * inside the user message, that raw markup is user-visible in every history
+   * projection (TUI replay, vis, export). The reminder's `injection` origin is
+   * hidden by every UI, while the model still receives the full note.
+   *
+   * Pure: the reminders are appended by {@link appendPrompt} at append time,
+   * so the launch-before-append wire ordering is preserved and the reminders
+   * stay adjacent to their user message in context.
+   */
+  private extractCompressionCaptions(message: ContextMessage): {
+    message: ContextMessage;
+    captions: readonly string[];
+  } {
+    if ((message.origin ?? USER_PROMPT_ORIGIN).kind !== 'user') {
+      return { message, captions: [] };
+    }
+    const { captions, parts } = splitImageCompressionCaptions(message.content);
+    if (captions.length === 0) return { message, captions };
+    return { message: { ...message, content: parts }, captions };
+  }
+
+  /**
+   * Append a prompt message preceded by its rerouted caption reminders. A
+   * message whose content was caption-only is dropped entirely rather than
+   * appended empty.
+   */
+  private appendPrompt(message: ContextMessage, captions: readonly string[]): void {
+    for (const caption of captions) {
+      this.reminders.appendSystemReminder(caption, {
+        kind: 'injection',
+        variant: 'image_compression',
+      });
+    }
+    if (message.content.length > 0) this.append(message);
   }
 
   private async enqueueSteer(activeTurn: Turn, entry: QueuedSteer): Promise<Turn | undefined> {
@@ -215,17 +269,33 @@ function steerAlreadyEmittedError(): KimiError {
   );
 }
 
-function formatUndoUnavailableMessage(
-  requestedCount: number,
-  undoableCount: number,
-  stoppedAtCompaction: boolean,
-): string {
-  const reason = stoppedAtCompaction ? ' after the last compaction' : '';
-  return `Cannot undo ${formatPromptCount(requestedCount)}; only ${formatPromptCount(undoableCount)} can be undone in the active context${reason}.`;
-}
-
-function formatPromptCount(count: number): string {
-  return `${String(count)} ${count === 1 ? 'prompt' : 'prompts'}`;
+// Split inline image-compression captions (see buildImageCompressionCaption)
+// out of user prompt content. A caption may be a standalone text part (server
+// route, ACP) or merged into an adjacent text segment (TUI paste), so each
+// text part is scanned rather than matched whole. Text left empty once its
+// captions are removed is dropped entirely.
+function splitImageCompressionCaptions(content: readonly ContentPart[]): {
+  captions: readonly string[];
+  parts: ContentPart[];
+} {
+  const captions: string[] = [];
+  const parts: ContentPart[] = [];
+  for (const part of content) {
+    if (part.type !== 'text') {
+      parts.push(part);
+      continue;
+    }
+    const extracted = extractImageCompressionCaptions(part.text);
+    if (extracted.captions.length === 0) {
+      parts.push(part);
+      continue;
+    }
+    captions.push(...extracted.captions);
+    if (extracted.text.trim().length > 0) {
+      parts.push({ type: 'text', text: extracted.text });
+    }
+  }
+  return { captions, parts };
 }
 
 registerScopedService(

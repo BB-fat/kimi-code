@@ -11,7 +11,7 @@ import { InMemoryStorageService } from '#/persistence/backends/memory/inMemorySt
 import { IAppendLogStore } from '#/persistence/interface/appendLogStore';
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
 import { IAgentWireService } from '#/wire/tokens';
-import type { PersistedRecord } from '#/wire/wireService';
+import type { IWireService, PersistedRecord } from '#/wire/wireService';
 import { WireService } from '#/wire/wireServiceImpl';
 import { type DomainEvent, IEventBus } from '#/app/event/eventBus';
 import { EventBusService } from '#/app/event/eventBusService';
@@ -44,6 +44,17 @@ async function readRecords(): Promise<PersistedRecord[]> {
     out.push(record);
   }
   return out;
+}
+
+function createFreshWire(logKey: string): { readonly fresh: IWireService; readonly freshLog: IAppendLogStore } {
+  const freshIx = disposables.add(new TestInstantiationService());
+  freshIx.stub(IFileSystemStorageService, new InMemoryStorageService());
+  freshIx.set(IAppendLogStore, new SyncDescriptor(AppendLogStore));
+  freshIx.set(IAgentWireService, new SyncDescriptor(WireService, [{ logScope: SCOPE, logKey }]));
+  return {
+    fresh: freshIx.get(IAgentWireService),
+    freshLog: freshIx.get(IAppendLogStore),
+  };
 }
 
 const a1 = { inputOther: 1, output: 2, inputCacheRead: 3, inputCacheCreation: 4 };
@@ -102,7 +113,7 @@ describe('AgentUsageService (wire-backed)', () => {
     });
   });
 
-  it('emits agent.status.updated with the usage snapshot via wire.signal', () => {
+  it('emits agent.status.updated with the usage snapshot after each live record', () => {
     const events: DomainEvent[] = [];
     disposables.add(ix.get(IEventBus).subscribe((e) => events.push(e)));
 
@@ -125,12 +136,18 @@ describe('AgentUsageService (wire-backed)', () => {
 
     const records = await readRecords();
     expect(records).toEqual([
-      { type: 'usage.record', model: 'model-a', usage: a1, usageScope: 'session' },
+      {
+        type: 'usage.record',
+        model: 'model-a',
+        usage: a1,
+        usageScope: 'session',
+        time: expect.any(Number),
+      },
     ]);
     expect('payload' in records[0]!).toBe(false);
   });
 
-  it('marks turn-scoped sources with usageScope: turn for v1 wire compatibility', async () => {
+  it('marks turn-scoped sources with usageScope only (no turnId or context persisted)', async () => {
     svc.record('model-a', a1, { type: 'turn', turnId: 7, step: 2 });
 
     const records = await readRecords();
@@ -140,7 +157,7 @@ describe('AgentUsageService (wire-backed)', () => {
         model: 'model-a',
         usage: a1,
         usageScope: 'turn',
-        context: { type: 'turn', turnId: 7, step: 2 },
+        time: expect.any(Number),
       },
     ]);
   });
@@ -150,26 +167,37 @@ describe('AgentUsageService (wire-backed)', () => {
     svc.record('model-a', a2, { type: 'turn', turnId: 1 });
     const records = await readRecords();
 
-    const ix2 = disposables.add(new TestInstantiationService());
-    ix2.stub(IFileSystemStorageService, new InMemoryStorageService());
-    ix2.set(IAppendLogStore, new SyncDescriptor(AppendLogStore));
-    ix2.set(
-      IAgentWireService,
-      new SyncDescriptor(WireService, [{ logScope: SCOPE, logKey: 'usage-replay' }]),
-    );
-    const log2 = ix2.get(IAppendLogStore);
-    const fresh = ix2.get(IAgentWireService);
+    const { fresh, freshLog } = createFreshWire('usage-replay');
 
-    void fresh.replay(...records);
+    await fresh.replay(...records);
 
     expect(fresh.getModel(UsageModel).byModel).toEqual({
       'model-a': { inputOther: 11, output: 22, inputCacheRead: 33, inputCacheCreation: 44 },
     });
 
     const written: PersistedRecord[] = [];
-    for await (const record of log2.read<PersistedRecord>(SCOPE, 'usage-replay')) {
+    for await (const record of freshLog.read<PersistedRecord>(SCOPE, 'usage-replay')) {
       written.push(record);
     }
     expect(written).toEqual([]);
+  });
+
+  it('replays legacy turn context records into byModel totals only (currentTurn is not rebuilt)', async () => {
+    const { fresh } = createFreshWire('usage-legacy-context-replay');
+
+    await fresh.replay({
+      type: 'usage.record',
+      model: 'model-a',
+      usage: a1,
+      usageScope: 'turn',
+      turnId: 1,
+      context: { type: 'turn', turnId: 9, step: 3 },
+    });
+
+    // The model carries only the per-model totals; the per-turn accumulator is
+    // live-only service state and never comes back from replay.
+    expect(fresh.getModel(UsageModel)).toEqual({
+      byModel: { 'model-a': a1 },
+    });
   });
 });
