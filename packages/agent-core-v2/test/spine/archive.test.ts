@@ -85,6 +85,11 @@ describe('Spine archive + resume', () => {
         archivePath: '/ws/spine/main/1-1-1.md',
       }),
     );
+    // Upstream's wire persists through an async persistQueue (blob dehydrate
+    // hop runs even without blobs) that only drains on the wire service's own
+    // flush; the wireRecord service flush no longer covers it, so cloning the
+    // persistence before an `IAgentWireService` flush misses the records.
+    await ctx.get(IAgentWireService).flush();
     await ctx.wireRecord.flush();
 
     const before = readSpine(ctx);
