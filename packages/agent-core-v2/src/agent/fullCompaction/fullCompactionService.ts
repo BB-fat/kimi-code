@@ -649,7 +649,7 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
         epochStartAt,
         epochMemoryAt: summaryAt,
       }),
-      contextSizeMeasured({ length: epochStartAt, tokens: tokensAfter }),
+      contextSizeMeasured({ length: epochStartAt, tokens: tokensAfter, kind: 'estimate' }),
     );
     return {
       summary,

@@ -5,6 +5,7 @@
  * production tree. Import from a relative path (`./stubs` or `../turn/stubs`).
  */
 
+import { toDisposable } from '#/_base/di/lifecycle';
 import type { IAgentLoopService } from '#/agent/loop/loop';
 import type { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import type { IAgentTurnService, Turn } from '#/agent/turn/turn';
@@ -145,6 +146,8 @@ export function stubToolExecutor(): IAgentToolExecutorService {
   return {
     _serviceBrand: undefined,
     execute: async function* () {},
+    registerUnavailableToolDescriber: () => toDisposable(() => {}),
+    registerMissingToolDescriber: () => toDisposable(() => {}),
     hooks: createHooks([
       'onWillExecuteTool',
       'onDidExecuteTool',

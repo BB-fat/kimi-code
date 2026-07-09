@@ -29,9 +29,10 @@ export type ResponseFormat = JsonObjectResponseFormat | JsonSchemaResponseFormat
  */
 export interface MaxCompletionTokensOptions {
   /**
-   * Tokens already consumed by the current context (API-reported input +
-   * output of the latest completed step). Chat-completions providers use it
-   * to size the cap to the remaining context window.
+   * Tokens already consumed by the current context: the measured prefix
+   * (API-reported usage of the latest adopted measurement) plus a per-message
+   * estimate of the tail that arrived after it. Chat-completions providers
+   * use it to size the cap to the remaining context window.
    */
   readonly usedContextTokens?: number;
   /** Model context-window size in tokens (`max_context_size`). */

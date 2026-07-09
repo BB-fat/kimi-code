@@ -1,17 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { SyncDescriptor } from '#/_base/di/descriptors';
+import { InstantiationType } from '#/_base/di/extensions';
 import { DisposableStore } from '#/_base/di/lifecycle';
-import { TestInstantiationService } from '#/_base/di/test';
-import { IEventBus } from '#/app/event/eventBus';
+import {
+  _clearScopedRegistryForTests,
+  LifecycleScope,
+  registerScopedService,
+  type Scope,
+} from '#/_base/di/scope';
+import { createScopedTestHost, TestInstantiationService, type ScopedTestHost } from '#/_base/di/test';
+import { type DomainEvent, IEventBus } from '#/app/event/eventBus';
+import { EventBusService } from '#/app/event/eventBusService';
+import { IAgentInteractionTurnBridge } from '#/agent/interaction/interactionTurnBridge';
+import { InteractionTurnBridgeService } from '#/agent/interaction/interactionTurnBridgeService';
 import { ISessionInteractionService } from '#/session/interaction/interaction';
 import { SessionInteractionService } from '#/session/interaction/interactionService';
-
-const noopEventBus: IEventBus = {
-  _serviceBrand: undefined,
-  publish: () => undefined,
-  subscribe: () => ({ dispose: () => undefined }),
-};
 
 describe('SessionInteractionService', () => {
   let disposables: DisposableStore;
@@ -20,7 +24,6 @@ describe('SessionInteractionService', () => {
   beforeEach(() => {
     disposables = new DisposableStore();
     ix = disposables.add(new TestInstantiationService());
-    ix.stub(IEventBus, noopEventBus);
     ix.set(ISessionInteractionService, new SyncDescriptor(SessionInteractionService));
   });
   afterEach(() => disposables.dispose());
@@ -119,28 +122,111 @@ describe('SessionInteractionService', () => {
     expect(count).toBe(0);
   });
 
-  it('clears pending interactions whose turn has ended (矛盾 c)', () => {
-    const handlers = new Map<string, (e: { turnId: number }) => void>();
-    const capturingBus = {
-      _serviceBrand: undefined,
-      publish: () => undefined,
-      subscribe: (type: string, handler: (e: { turnId: number }) => void) => {
-        handlers.set(type, handler);
-        return { dispose: () => undefined };
-      },
-    } as unknown as IEventBus;
-    const local = disposables.add(new TestInstantiationService());
-    local.stub(IEventBus, capturingBus);
-    local.set(ISessionInteractionService, new SyncDescriptor(SessionInteractionService));
-    const svc = local.get(ISessionInteractionService);
-
-    svc.enqueue({ id: 'a1', kind: 'approval', payload: {}, origin: { agentId: 'main', turnId: 3 } });
-    svc.enqueue({ id: 'a2', kind: 'approval', payload: {}, origin: { agentId: 'main', turnId: 7 } });
+  it('cancelPendingForTurn resolves that turn’s parked requests as cancelled and keeps the rest (矛盾 c)', async () => {
+    const svc = ix.get(ISessionInteractionService);
+    const ended = svc.request({
+      id: 'a1',
+      kind: 'approval',
+      payload: {},
+      origin: { agentId: 'main', turnId: 3 },
+    });
+    const survived = svc.request({
+      id: 'a2',
+      kind: 'approval',
+      payload: {},
+      origin: { agentId: 'main', turnId: 7 },
+    });
     expect(svc.listPending()).toHaveLength(2);
 
-    handlers.get('turn.ended')?.({ turnId: 3 });
+    svc.cancelPendingForTurn(3);
 
     expect(svc.listPending().map((i) => i.id)).toEqual(['a2']);
     expect(svc.isRecentlyResolved('a1')).toBe(true);
+    await expect(ended).resolves.toEqual({ cancelled: true, reason: 'turn_ended' });
+    svc.respond('a2', { decision: 'approved' });
+    await expect(survived).resolves.toEqual({ decision: 'approved' });
+  });
+});
+
+describe('IAgentInteractionTurnBridge (Agent → Session scope wiring)', () => {
+  let disposables: DisposableStore;
+
+  beforeEach(() => {
+    disposables = new DisposableStore();
+  });
+  afterEach(() => disposables.dispose());
+
+  it('turn.ended on the agent bus cancels the Session kernel’s pending entries for that turn', () => {
+    const ix = disposables.add(new TestInstantiationService());
+    ix.set(IEventBus, new SyncDescriptor(EventBusService));
+    ix.set(ISessionInteractionService, new SyncDescriptor(SessionInteractionService));
+    ix.set(IAgentInteractionTurnBridge, new SyncDescriptor(InteractionTurnBridgeService));
+
+    ix.get(IAgentInteractionTurnBridge); // wires the subscription
+    const bus = ix.get(IEventBus);
+    const svc = ix.get(ISessionInteractionService);
+    svc.enqueue({ id: 'a1', kind: 'approval', payload: {}, origin: { agentId: 'main', turnId: 3 } });
+    svc.enqueue({ id: 'a2', kind: 'approval', payload: {}, origin: { agentId: 'main', turnId: 7 } });
+
+    bus.publish({ type: 'turn.ended', turnId: 3, reason: 'completed' } as unknown as DomainEvent);
+
+    expect(svc.listPending().map((i) => i.id)).toEqual(['a2']);
+    expect(svc.isRecentlyResolved('a1')).toBe(true);
+  });
+
+  it('resolves the interaction kernel across the real App > Session > Agent scope tree', () => {
+    // Regression for the startup crash `[createInstance] SessionInteractionService
+    // depends on UNKNOWN service eventBus`: the kernel is Session-scoped while
+    // the bus is Agent-scoped, so the kernel must not inject the bus. Build the
+    // real strict scope tree (createAppScope runs strict, like production);
+    // resolving and *calling* the kernel from the Agent scope used to throw.
+    _clearScopedRegistryForTests();
+    registerScopedService(
+      LifecycleScope.Session,
+      ISessionInteractionService,
+      SessionInteractionService,
+      InstantiationType.Delayed,
+      'interaction',
+    );
+    registerScopedService(
+      LifecycleScope.Agent,
+      IEventBus,
+      EventBusService,
+      InstantiationType.Delayed,
+      'event',
+    );
+    // Eager, matching the production registration: a Delayed proxy would be
+    // returned by accessor.get() and never instantiated (nothing calls a
+    // method on a pure wiring), so the subscription would never exist.
+    registerScopedService(
+      LifecycleScope.Agent,
+      IAgentInteractionTurnBridge,
+      InteractionTurnBridgeService,
+      InstantiationType.Eager,
+      'interaction',
+    );
+
+    const host: ScopedTestHost = createScopedTestHost();
+    disposables.add({ dispose: () => host.dispose() });
+    const session: Scope = host.child(LifecycleScope.Session, 'session-a');
+    const agent: Scope = host.childOf(session, LifecycleScope.Agent, 'main');
+
+    const kernel = agent.accessor.get(ISessionInteractionService);
+    expect(() => kernel.listPending()).not.toThrow();
+
+    // End to end through the scope tree: the agent-scoped bridge observes its
+    // own bus and cancels the session kernel's parked entries.
+    agent.accessor.get(IAgentInteractionTurnBridge);
+    kernel.enqueue({
+      id: 'a1',
+      kind: 'approval',
+      payload: {},
+      origin: { agentId: 'main', turnId: 1 },
+    });
+    expect(kernel.listPending()).toHaveLength(1);
+    agent.accessor
+      .get(IEventBus)
+      .publish({ type: 'turn.ended', turnId: 1, reason: 'completed' } as unknown as DomainEvent);
+    expect(kernel.listPending()).toHaveLength(0);
   });
 });

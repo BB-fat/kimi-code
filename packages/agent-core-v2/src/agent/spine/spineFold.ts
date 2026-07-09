@@ -24,6 +24,15 @@ export interface SpineFoldStatus {
   readonly parentId: string | null;
   readonly cursorContext: number;
   readonly contextLeft: number | undefined;
+  /** Per-message estimate of the whole stored history (pre-fold, messages only). */
+  readonly rawContext: number;
+  /**
+   * Whole-context size the remaining-window clamp sees (measured request
+   * totals + estimated tail), i.e. what the projected view costs overall.
+   */
+  readonly projectedContext: number;
+  /** Whether `projectedContext` is anchored on an LLM-reported usage record. */
+  readonly projectedMeasured: boolean;
 }
 
 export interface SpineFoldInput {
@@ -165,7 +174,12 @@ function statusMessage(status: SpineFoldStatus): ContextMessage {
   const cursorContext = ` cursor_context="~${formatTokens(status.cursorContext)}"`;
   const contextLeft =
     status.contextLeft === undefined ? '' : ` context_left="~${formatTokens(status.contextLeft)}"`;
-  const text = `<spine_status cursor="${status.cursorId}" summary="${escapeAttr(status.summary)}"${parent}${cursorContext}${contextLeft} />`;
+  const rawContext = ` raw_context="~${formatTokens(status.rawContext)}"`;
+  const projectedPrefix = status.projectedMeasured ? '' : '~';
+  const projectedContext = ` projected_context="${projectedPrefix}${formatTokens(
+    status.projectedContext,
+  )}"`;
+  const text = `<spine_status cursor="${status.cursorId}" summary="${escapeAttr(status.summary)}"${parent}${cursorContext}${contextLeft}${rawContext}${projectedContext} />`;
   return {
     role: 'user',
     content: [{ type: 'text', text }],

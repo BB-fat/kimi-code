@@ -278,14 +278,14 @@ describe('FullCompaction', () => {
       event: 'compaction_finished',
       properties: expect.objectContaining({
         source: 'manual',
-        tokens_before: 39,
+        tokens_before: 41,
         tokens_after: expect.any(Number),
         duration_ms: expect.any(Number),
         compacted_count: 6,
         retry_count: 0,
         thinking_effort: 'off',
-        input_other: 1181,
-        output: 8,
+        input_other: 1110,
+        output: 9,
         input_cache_read: 0,
         input_cache_creation: 0,
       }),
@@ -519,7 +519,7 @@ describe('FullCompaction', () => {
       session_id: 'test-session',
       cwd: dir,
       trigger: 'auto',
-      token_count: 39,
+      token_count: 41,
     });
     expect(post).toMatchObject({
       hook_event_name: 'PostCompact',
@@ -605,7 +605,7 @@ describe('FullCompaction', () => {
       event: 'compaction_finished',
       properties: expect.objectContaining({
         source: 'manual',
-        tokens_before: 25,
+        tokens_before: 28,
         retry_count: 1,
       }),
     });
@@ -905,7 +905,7 @@ describe('FullCompaction', () => {
       event: 'compaction_failed',
       properties: expect.objectContaining({
         source: 'manual',
-        tokens_before: 25,
+        tokens_before: 28,
         duration_ms: expect.any(Number),
         round: 1,
         retry_count: 0,
@@ -1036,8 +1036,9 @@ describe('FullCompaction', () => {
       event: 'compaction_failed',
       properties: expect.objectContaining({
         source: 'manual',
-        tokens_before: 25,
+        tokens_before: 28,
         duration_ms: expect.any(Number),
+        round: 1,
         retry_count: 4,
         error_type: 'APIConnectionError',
       }),
@@ -1408,8 +1409,8 @@ describe('FullCompaction', () => {
       event: 'compaction_finished',
       properties: expect.objectContaining({
         source: 'auto',
-        tokens_before: 46,
-        tokens_after: 166,
+        tokens_before: 49,
+        tokens_after: 161,
         compacted_count: 7,
         retry_count: 0,
       }),

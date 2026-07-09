@@ -1,5 +1,6 @@
 import { InstantiationType } from '#/_base/di/extensions';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
+import { toDisposable } from '#/_base/di/lifecycle';
 import type { ContentPart } from '#/app/llmProtocol/message';
 import type {
   ToolCallStartedEvent,
@@ -29,6 +30,7 @@ import { OrderedHookSlot } from '#/hooks';
 import { IAgentToolResultTruncationService } from '#/agent/toolResultTruncation/toolResultTruncation';
 import {
   IAgentToolExecutorService,
+  type ToolCallDescriber,
   type ToolExecutionResult,
   type ToolExecutorExecuteOptions,
 } from './toolExecutor';
@@ -85,6 +87,9 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
     onDidExecuteTool: new OrderedHookSlot<ToolDidExecuteContext>(),
   };
 
+  private readonly unavailableToolDescribers = new Set<ToolCallDescriber>();
+  private readonly missingToolDescribers = new Set<ToolCallDescriber>();
+
   constructor(
     @IAgentToolRegistryService private readonly toolRegistry: IAgentToolRegistryService,
     @IEventBus private readonly eventBus: IEventBus,
@@ -94,13 +99,33 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
     @ILogService private readonly log?: ILogService,
   ) {}
 
+  registerUnavailableToolDescriber(describer: ToolCallDescriber) {
+    this.unavailableToolDescribers.add(describer);
+    return toDisposable(() => {
+      this.unavailableToolDescribers.delete(describer);
+    });
+  }
+
+  registerMissingToolDescriber(describer: ToolCallDescriber) {
+    this.missingToolDescribers.add(describer);
+    return toDisposable(() => {
+      this.missingToolDescribers.delete(describer);
+    });
+  }
+
   async *execute(
     calls: ToolCall[],
     options: ToolExecutorExecuteOptions,
   ): AsyncIterable<ToolExecutionResult> {
     if (calls.length === 0) return;
 
-    const preflighted = calls.map((call) => preflightToolCall(this.toolRegistry, call, this.log));
+    const describers: ToolCallDescribers = {
+      unavailable: this.unavailableToolDescribers,
+      missing: this.missingToolDescribers,
+    };
+    const preflighted = calls.map((call) =>
+      preflightToolCall(this.toolRegistry, call, this.log, describers),
+    );
     const preparedTasks: Array<{
       task: ToolExecutionTask;
       call: PreflightedToolCall;
@@ -594,10 +619,16 @@ function buildWillExecuteContext(
   };
 }
 
+interface ToolCallDescribers {
+  readonly unavailable: ReadonlySet<ToolCallDescriber>;
+  readonly missing: ReadonlySet<ToolCallDescriber>;
+}
+
 function preflightToolCall(
   toolRegistry: IAgentToolRegistryService,
   toolCall: ToolCall,
   log?: ILogService,
+  describers: ToolCallDescribers = { unavailable: new Set(), missing: new Set() },
 ): PreflightedToolCall {
   const toolName = toolCall.name;
   const parsedArgs = parseToolCallArguments(toolCall.arguments);
@@ -616,7 +647,19 @@ function preflightToolCall(
       toolCall,
       toolName,
       args: parsedArgs.data,
-      output: `Tool "${toolName}" not found`,
+      output: firstToolCallDescription(describers.missing, toolName) ?? `Tool "${toolName}" not found`,
+    };
+  }
+  // Availability wording wins over argument validation: a disclosure-hidden
+  // tool called with bad args still hears "load it first", not the schema error.
+  const unavailable = firstToolCallDescription(describers.unavailable, toolName);
+  if (unavailable !== undefined) {
+    return {
+      kind: 'rejected',
+      toolCall,
+      toolName,
+      args: parsedArgs.data,
+      output: unavailable,
     };
   }
   const validationError = validateExecutableToolArgs(tool, parsedArgs.data);
@@ -630,6 +673,17 @@ function preflightToolCall(
     };
   }
   return { kind: 'runnable', toolCall, toolName, tool, args: parsedArgs.data };
+}
+
+function firstToolCallDescription(
+  describers: ReadonlySet<ToolCallDescriber>,
+  name: string,
+): string | undefined {
+  for (const describer of describers) {
+    const description = describer(name);
+    if (description !== undefined) return description;
+  }
+  return undefined;
 }
 
 export function parseToolCallArguments(raw: unknown): {

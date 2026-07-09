@@ -8,18 +8,11 @@ import {
   registerScopedService,
   type Scope,
 } from '#/_base/di/scope';
-import { createScopedTestHost, stubPair, type ScopedTestHost } from '#/_base/di/test';
-import { IEventBus } from '#/app/event/eventBus';
+import { createScopedTestHost, type ScopedTestHost } from '#/_base/di/test';
 import { ISessionInteractionService } from '#/session/interaction/interaction';
 import { SessionInteractionService } from '#/session/interaction/interactionService';
 import { type QuestionRequest, ISessionQuestionService } from '#/session/question/question';
 import { SessionQuestionService } from '#/session/question/questionService';
-
-const noopEventBus: IEventBus = {
-  _serviceBrand: undefined,
-  publish: () => undefined,
-  subscribe: () => ({ dispose: () => undefined }),
-};
 
 function makeRequest(id: string): QuestionRequest {
   return {
@@ -45,7 +38,7 @@ describe('ISessionQuestionService (Session scope facade over the interaction ker
     registerScopedService(LifecycleScope.Session, ISessionQuestionService, SessionQuestionService, InstantiationType.Delayed, 'question');
 
     disposables = new DisposableStore();
-    host = createScopedTestHost([stubPair(IEventBus, noopEventBus)]);
+    host = createScopedTestHost();
     session = host.child(LifecycleScope.Session, 'session-a');
   });
 

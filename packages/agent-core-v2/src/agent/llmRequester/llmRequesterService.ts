@@ -335,9 +335,13 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
       // The remaining-window clamp only applies to requests built from the
       // live context; overridden messages (e.g. compaction) are sized
       // independently and would be squeezed to nothing at high water marks.
+      // `.size` (measured prefix + per-message estimate of the tail that
+      // arrived after the last usage event) keeps the clamp honest between
+      // exchanges; `.measured` alone would ignore that tail and drift
+      // optimistic.
       usedContextTokens:
         overrides.messages === undefined
-          ? this.contextSize.get().measured
+          ? this.contextSize.get().size
           : undefined,
     });
 

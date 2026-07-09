@@ -66,6 +66,7 @@ import { WireService } from '#/wire/wireServiceImpl';
 import { IAgentBlobService } from '#/agent/blob/agentBlobService';
 import { AgentBlobServiceImpl } from '#/agent/blob/agentBlobServiceImpl';
 import { IAgentExternalHooksService } from '#/agent/externalHooks/externalHooks';
+import { IAgentInteractionTurnBridge } from '#/agent/interaction/interactionTurnBridge';
 
 import { createHooks } from '#/hooks';
 import {
@@ -212,6 +213,12 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
     // the agent's domain hooks before the first turn. No business service
     // injects it directly; it observes their hooks instead.
     handle.accessor.get(IAgentExternalHooksService);
+    // Force-instantiate the interaction turn bridge so this agent's
+    // `turn.ended` cancels the session interactions parked by that turn before
+    // the first turn can end. Nothing injects the bridge directly; it observes
+    // the agent's event bus (Agent-scoped, unreachable from the Session kernel
+    // it acts on).
+    handle.accessor.get(IAgentInteractionTurnBridge);
     // Force-instantiate the agent's MCP service so it attaches the (shared)
     // manager's tools and registers the `wait-for-initial-load` hook before the
     // first turn — otherwise plugin/session MCP servers would connect but their

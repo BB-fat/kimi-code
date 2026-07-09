@@ -609,6 +609,76 @@ describe('Agent context', () => {
     expect(contextSize.get()).toEqual({ size: 1_000, measured: 1_000, estimated: 0 });
   });
 
+  it('sizes a sub-range between two measured snapshots by their difference', () => {
+    ctx.appendAssistantTextWithUsage(1, 'a1', 1_000);
+    ctx.appendAssistantTextWithUsage(2, 'a2', 2_400);
+    ctx.appendAssistantTextWithUsage(3, 'a3', 4_000);
+
+    // Both endpoints anchored exactly at usage snapshots: pure measurement
+    // math, no per-message estimate involved.
+    expect(contextSize.get(2, 4)).toEqual({ size: 1_400, measured: 1_400, estimated: 0 });
+    expect(contextSize.get(2, 6)).toEqual({ size: 3_000, measured: 3_000, estimated: 0 });
+
+    // With no snapshot at or before `start`, the sub-range stays estimated.
+    const estimatedSpan = estimateTokensForMessages(context.get().slice(1, 6));
+    expect(contextSize.get(1, 6)).toEqual({
+      size: estimatedSpan,
+      measured: estimatedSpan,
+      estimated: 0,
+    });
+  });
+
+  it('clears the snapshot chain when undo rebases the prefix to an estimate', () => {
+    ctx.appendAssistantTextWithUsage(1, 'a1', 1_000);
+    ctx.appendAssistantTextWithUsage(2, 'a2', 2_400);
+
+    ctx.undoHistory(1);
+    ctx.appendAssistantTextWithUsage(3, 'a3', 1_500);
+
+    // The surviving prefix was rebased to an inline estimate, so the new
+    // measurement diffs against that estimate — not against the pre-undo
+    // snapshot at length 2 (whose 1_000 tokens described replaced content).
+    const surviving = context.get().slice(0, 2);
+    const rebased = 1_500 - estimateTokensForMessages(surviving);
+    expect(contextSize.get(2, 4)).toEqual({ size: rebased, measured: rebased, estimated: 0 });
+  });
+
+  it('drops snapshots beyond the 64-entry window', () => {
+    for (let index = 1; index <= 65; index += 1) {
+      ctx.appendAssistantTextWithUsage(index, `a${index}`, index * 100);
+    }
+
+    // Newest 64 snapshots survive (@130 down to @4); @2 is evicted, so a
+    // range that would need it falls back to the plain estimate…
+    const fallback = estimateTokensForMessages(context.get().slice(2, 4));
+    expect(contextSize.get(2, 4)).toEqual({
+      size: fallback,
+      measured: fallback,
+      estimated: 0,
+    });
+    // …while recent ranges still diff between retained snapshots
+    // (usage grows by 100 per exchange: 6_500 - 6_400).
+    expect(contextSize.get(128, 130)).toEqual({ size: 100, measured: 100, estimated: 0 });
+  });
+
+  it('reports the latest measurement basis for status display', () => {
+    expect(contextSize.latestMeasurement()).toBeUndefined();
+
+    ctx.appendAssistantTextWithUsage(1, 'a1', 1_000);
+    expect(contextSize.latestMeasurement()).toEqual({
+      length: 2,
+      tokens: 1_000,
+      kind: 'measured',
+    });
+
+    ctx.undoHistory(1);
+    expect(contextSize.latestMeasurement()).toEqual({
+      length: 0,
+      tokens: 0,
+      kind: 'estimate',
+    });
+  });
+
   it('undo only counts real user prompts, skipping task notifications', () => {
     ctx.appendAssistantText(1, 'first response');
     ctx.appendAssistantText(2, 'second response');

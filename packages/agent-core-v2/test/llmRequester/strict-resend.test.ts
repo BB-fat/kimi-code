@@ -12,6 +12,7 @@ import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { IAgentUsageService } from '#/agent/usage/usage';
 import { IConfigService } from '#/app/config/config';
 import { APIStatusError } from '#/app/llmProtocol/errors';
+import type { MaxCompletionTokensOptions } from '#/app/llmProtocol/provider';
 import { emptyUsage } from '#/app/llmProtocol/usage';
 import type { Message } from '#/app/llmProtocol/message';
 import type { ModelCapability } from '#/app/llmProtocol/capability';
@@ -35,7 +36,11 @@ const history: Message[] = [
   { role: 'user', content: [{ type: 'text', text: 'hello' }], toolCalls: [] },
 ];
 
-function createModel(calls: { value: number }): Model {
+function createModel(
+  calls: { value: number },
+  capturedBudgetOptions: { value?: MaxCompletionTokensOptions } = {},
+  failFirst = true,
+): Model {
   const build = (): Model => ({
     id: 'm',
     name: 'wire-model',
@@ -50,13 +55,16 @@ function createModel(calls: { value: number }): Model {
     providerName: 'p',
     authProvider: { getAuth: async () => undefined },
     withThinking: () => build(),
-    withMaxCompletionTokens: () => build(),
+    withMaxCompletionTokens: (_maxTokens: number, options?: MaxCompletionTokensOptions) => {
+      capturedBudgetOptions.value = options;
+      return build();
+    },
     withGenerationKwargs: () => build(),
     withProviderOptions: () => build(),
     withThinkingKeep: () => build(),
     request: async function* () {
       calls.value += 1;
-      if (calls.value === 1) {
+      if (failFirst && calls.value === 1) {
         throw new APIStatusError(400, 'messages: `tool_use` ids must be unique');
       }
       yield {
@@ -82,6 +90,10 @@ afterEach(() => disposables.dispose());
 function createService(
   model: Model,
   projector: Pick<IAgentContextProjectorService, 'project' | 'projectStrict'>,
+  contextSize: Pick<IAgentContextSizeService, 'get' | 'measured'> = {
+    get: () => ({ size: 0, measured: 0, estimated: 0 }),
+    measured: () => undefined,
+  },
 ) {
   const ix = disposables.add(new TestInstantiationService());
   const profile: Partial<IAgentProfileService> = {
@@ -104,10 +116,6 @@ function createService(
       systemPrompt: 'system',
     }),
     isToolActive: () => true,
-  };
-  const contextSize = {
-    get: () => ({ size: 0, measured: 0, estimated: 0 }),
-    measured: () => undefined,
   };
   const usage = { record: () => undefined };
   const context = { get: () => history };
@@ -186,5 +194,45 @@ describe('AgentLLMRequesterService strict resend', () => {
       statusCode: 401,
     });
     expect(strictCalls).toBe(0);
+  });
+});
+
+describe('AgentLLMRequesterService completion budget sizing', () => {
+  const contextSizeWithTail: Pick<IAgentContextSizeService, 'get' | 'measured'> = {
+    get: () => ({ size: 600, measured: 100, estimated: 500 }),
+    measured: () => undefined,
+  };
+  const identityProjector: Pick<IAgentContextProjectorService, 'project' | 'projectStrict'> = {
+    project: (messages: readonly ContextMessage[]) => messages,
+    projectStrict: (messages: readonly ContextMessage[]) => messages,
+  };
+
+  it('feeds the full context size (measured prefix + estimated tail) to the budget clamp', async () => {
+    const budget: { value?: MaxCompletionTokensOptions } = {};
+    const service = createService(
+      createModel({ value: 0 }, budget, false),
+      identityProjector,
+      contextSizeWithTail,
+    );
+
+    await service.request({});
+
+    // The tail accumulated since the last usage event must count toward the
+    // remaining-window clamp; `.measured` alone would drift optimistic.
+    expect(budget.value?.usedContextTokens).toBe(600);
+  });
+
+  it('skips the remaining-window clamp for overridden messages', async () => {
+    const budget: { value?: MaxCompletionTokensOptions } = {};
+    const service = createService(
+      createModel({ value: 0 }, budget, false),
+      identityProjector,
+      contextSizeWithTail,
+    );
+
+    await service.request({ messages: [...history] });
+
+    expect(budget.value).toBeDefined();
+    expect(budget.value?.usedContextTokens).toBeUndefined();
   });
 });

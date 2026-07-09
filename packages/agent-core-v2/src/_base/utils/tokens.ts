@@ -7,17 +7,49 @@ import type { Tool } from '#/app/llmProtocol/tool';
 
 const messageTokenEstimateCache = new WeakMap<Message, number>();
 
+/**
+ * Estimate token count from character classes. The previous flat `ascii/4`
+ * systematically under-counted symbol- and digit-dense tool output (`/4`
+ * lands at ~0.6x of real BPE counts for JSON/logs) — the dangerous
+ * direction for the remaining-window clamp, since it promises more free
+ * context than exists. Divisors are calibrated per class against a
+ * representative BPE (cl100k_base, measured 2026-07-09; see the band tests
+ * in `test/_base/utils/tokens.test.ts`):
+ * - letters and `_`: ~4 chars/token (identifiers and prose words; BPE keeps
+ *   whole stems, so this slightly over-counts pure words — tolerated as it
+ *   biases the budget clamp toward safe)
+ * - digits and punctuation: ~2 chars/token (JSON/log/tool-output density)
+ * - whitespace: ~8 chars/token (indentation runs collapse in BPE)
+ * - non-ascii: 1 token/char (unchanged; CJK measures ~1.0 chars/token)
+ */
 export function estimateTokens(text: string): number {
-  let asciiCount = 0;
+  let wordCount = 0;
+  let denseCount = 0;
+  let whitespaceCount = 0;
   let nonAsciiCount = 0;
   for (const char of text) {
-    if (char.codePointAt(0)! <= 127) {
-      asciiCount++;
+    const code = char.codePointAt(0)!;
+    if (code > 127) {
+      nonAsciiCount += 1;
+    } else if (code <= 32 || code === 127) {
+      whitespaceCount += 1;
+    } else if (
+      (code >= 65 && code <= 90) || // A-Z
+      (code >= 97 && code <= 122) || // a-z
+      code === 95 // _
+    ) {
+      wordCount += 1;
     } else {
-      nonAsciiCount++;
+      // digits and punctuation · tokenize denser than words
+      denseCount += 1;
     }
   }
-  return Math.ceil(asciiCount / 4) + nonAsciiCount;
+  return (
+    Math.ceil(wordCount / 4) +
+    Math.ceil(denseCount / 2) +
+    Math.ceil(whitespaceCount / 8) +
+    nonAsciiCount
+  );
 }
 
 export function estimateTokensForMessages(messages: readonly Message[]): number {

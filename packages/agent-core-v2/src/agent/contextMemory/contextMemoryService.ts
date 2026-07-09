@@ -89,7 +89,10 @@ export class AgentContextMemoryService extends Disposable implements IAgentConte
   clear(): void {
     const deleteCount = this.get().length;
     if (deleteCount === 0) return;
-    this.wire.dispatch(contextClear({}), contextSizeMeasured({ length: 0, tokens: 0 }));
+    this.wire.dispatch(
+      contextClear({}),
+      contextSizeMeasured({ length: 0, tokens: 0, kind: 'estimate' }),
+    );
     this.publishSplice({ start: 0, deleteCount, messages: [] });
   }
 
@@ -121,7 +124,11 @@ export class AgentContextMemoryService extends Disposable implements IAgentConte
         keptHeadUserMessageCount: result.keptHeadUserMessageCount,
         droppedCount: result.droppedCount,
       }),
-      contextSizeMeasured({ length: result.messages.length, tokens: result.tokensAfter }),
+      contextSizeMeasured({
+        length: result.messages.length,
+        tokens: result.tokensAfter,
+        kind: 'estimate',
+      }),
     );
     this.publishSplice({
       start: 0,
@@ -157,6 +164,7 @@ export class AgentContextMemoryService extends Disposable implements IAgentConte
       contextSizeMeasured({
         length: cutIndex,
         tokens: estimateTokensForMessages(history.slice(0, cutIndex)),
+        kind: 'estimate',
       }),
     ];
   }

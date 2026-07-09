@@ -238,6 +238,8 @@ export * from '#/app/sessionLegacy/sessionLegacy';
 export * from '#/app/sessionLegacy/sessionLegacyService';
 export * from '#/session/interaction/interaction';
 export * from '#/session/interaction/interactionService';
+export * from '#/agent/interaction/interactionTurnBridge';
+export * from '#/agent/interaction/interactionTurnBridgeService';
 export * from '#/session/sessionContext/sessionContext';
 export * from '#/session/sessionActivity/sessionActivity';
 export * from '#/session/sessionActivity/sessionActivityService';

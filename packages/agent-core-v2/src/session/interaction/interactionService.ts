@@ -2,15 +2,17 @@
  * `interaction` domain (L6) — `ISessionInteractionService` implementation.
  *
  * Owns the pending interaction set and resolves requests when a response
- * arrives; announces add/remove through a typed `onDidChangePending`. Bound at
- * Session scope.
+ * arrives; announces add/remove through a typed `onDidChangePending`. Turn-end
+ * cancellation (`cancelPendingForTurn`) is a plain method, driven from the
+ * Agent scope by `IAgentInteractionTurnBridge` — this Service deliberately
+ * injects no `IEventBus`, which is Agent-scoped and therefore invisible to a
+ * Session container. Bound at Session scope.
  */
 
 import { Emitter, type Event } from '#/_base/event';
 import { InstantiationType } from '#/_base/di/extensions';
 import { Disposable } from '#/_base/di/lifecycle';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
-import { IEventBus } from '#/app/event/eventBus';
 
 import {
   type Interaction,
@@ -44,20 +46,7 @@ export class SessionInteractionService extends Disposable implements ISessionInt
   readonly onDidResolve: Event<InteractionResolution> = this._onDidResolve.event;
   private nextId = 0;
 
-  constructor(@IEventBus eventBus: IEventBus) {
-    super();
-    // When a turn ends (cancelled or otherwise), any pending interaction that
-    // originated from it must not strand in the pending set — otherwise
-    // `sessionActivity` keeps reporting `awaiting_approval` forever (矛盾 c).
-    // The pending origin carries `{ agentId, turnId }`; match by turnId (the
-    // field carried by `turn.ended`), which is unambiguous in practice because
-    // a parent turn waits for its sub-agents before ending.
-    this._register(
-      eventBus.subscribe('turn.ended', (e) => this.onTurnEnded(e.turnId)),
-    );
-  }
-
-  private onTurnEnded(turnId: number): void {
+  cancelPendingForTurn(turnId: number): void {
     let changed = false;
     for (const [id, entry] of this.pending) {
       if (entry.interaction.origin?.turnId !== turnId) continue;

@@ -18,6 +18,7 @@
 import { Disposable } from '#/_base/di/lifecycle';
 import { InstantiationType } from '#/_base/di/extensions';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
+import { estimateTokensForMessages } from '#/_base/utils/tokens';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentContextSizeService } from '#/agent/contextSize/contextSize';
@@ -195,6 +196,9 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
       parentId: parentNodeId(cursorId),
       cursorContext: this.contextSize.get(openedAt).size,
       contextLeft,
+      rawContext: estimateTokensForMessages(this.context.get()),
+      projectedContext: used,
+      projectedMeasured: this.contextSize.latestMeasurement()?.kind === 'measured',
     };
   }
 

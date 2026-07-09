@@ -65,6 +65,11 @@ describe('Spine projection fold', () => {
     expect(textOf(folded[2])).toContain('after');
     expect(textOf(folded[3])).toContain('<spine_status');
     expect(textOf(folded[3])).toContain('cursor="1.1"');
+    // No usage anchor in this harness: the projected whole-context number
+    // carries the estimate marker, and the raw stored history is contrasted
+    // beside it.
+    expect(textOf(folded[3])).toMatch(/ raw_context="~\d/);
+    expect(textOf(folded[3])).toMatch(/ projected_context="~\d/);
   });
 
   it('folds only the outermost closed node (no double folding)', () => {
