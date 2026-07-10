@@ -41,6 +41,10 @@ function formatRelativeTime(ts: number): string {
 }
 
 function homeAlias(path: string): string {
+  // Sessions written before cwd persistence (or served by a host that can't
+  // recover it) reach the picker with no work dir; render a placeholder
+  // instead of crashing the whole TUI for a single bad row.
+  if (typeof path !== 'string' || path.length === 0) return '(unknown)';
   const home = process.env['HOME'] ?? '';
   if (home && path.startsWith(home)) return '~' + path.slice(home.length);
   return path;

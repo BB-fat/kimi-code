@@ -67,6 +67,7 @@ import { IAgentBlobService } from '#/agent/blob/agentBlobService';
 import { AgentBlobServiceImpl } from '#/agent/blob/agentBlobServiceImpl';
 import { IAgentExternalHooksService } from '#/agent/externalHooks/externalHooks';
 import { IAgentInteractionTurnBridge } from '#/agent/interaction/interactionTurnBridge';
+import { IAgentReplayService } from '#/agent/replayBuilder/agentReplayService';
 
 import { createHooks } from '#/hooks';
 import {
@@ -225,6 +226,12 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
     // tools would never register until something explicitly requests the service.
     handle.accessor.get(IAgentMcpService);
     await mcpReady;
+    // Force-instantiate the replay service so it attaches the
+    // `ReplayTimelineModel` derived model before session resume replays this
+    // agent's wire log: derived models only fold ops that pass through after
+    // attach, so a late attach would leave resumed sessions with an empty
+    // replay timeline and the TUI could not rehydrate screen history.
+    handle.accessor.get(IAgentReplayService);
     await this.ensureWireMetadata(handle, agentScope);
     if (opts.binding !== undefined) {
       await handle.accessor.get(IAgentProfileService).bind(opts.binding);

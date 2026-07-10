@@ -391,6 +391,8 @@ export * from '#/agent/promptLegacy/promptLegacyService';
 import '#/app/messageLegacy/errors';
 export * from '#/app/messageLegacy/messageLegacy';
 export * from '#/app/messageLegacy/messageLegacyService';
+export * from '#/agent/replayBuilder/agentReplayService';
+export * from '#/agent/replayBuilder/replayProjection';
 export * from '#/agent/replayBuilder/replayTimelineModel';
 export * from '#/agent/replayBuilder/types';
 export * from '#/agent/shellCommand/shellCommand';

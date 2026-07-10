@@ -14,15 +14,25 @@
  * `plan/agent-core-v2-cli-adapter-p0.md`.
  */
 
-import type { CoreAPI, CoreRPCClient, RPCMethods, SDKAPI } from '@moonshot-ai/agent-core';
+import {
+  ErrorCodes,
+  KimiError,
+  type CoreAPI,
+  type CoreRPCClient,
+  type ResumeSessionResult,
+  type RPCMethods,
+  type SDKAPI,
+} from '@moonshot-ai/agent-core';
 import {
   bootstrap,
   ensureMainAgent,
   IAgentPermissionModeService,
   IAgentRPCService,
+  IBootstrapService,
   IEventBus,
   IEventService,
   IAgentLifecycleService,
+  IAgentReplayService,
   IAgentScopeContext,
   ICliSkillDirs,
   IConfigService,
@@ -33,7 +43,9 @@ import {
   ISessionExportService,
   ISessionIndex,
   ISessionLifecycleService,
+  ISessionMetadata,
   ISessionSkillCatalog,
+  ISessionTodoService,
   ISessionWorkspaceCommandService,
   IWebSearchProviderService,
   IWorkspaceRegistry,
@@ -49,8 +61,9 @@ import {
   type Scope,
   type ServiceIdentifier,
 } from '@moonshot-ai/agent-core-v2';
+import { encodeWorkDirKey } from '@moonshot-ai/agent-core-v2/_base/utils/workdir-slug';
 
-import type { KimiHostIdentity } from '#/types';
+import type { JsonObject, KimiHostIdentity, SessionSummary as WireSessionSummary } from '#/types';
 
 /** v1 AgentAPI method names (the `KimiCore` contract the SDK client calls). */
 const AGENT_API_METHODS: readonly string[] = [
@@ -378,8 +391,100 @@ export class V2Host {
     // child agents, and forwards HITL exactly like a fresh one.
     const disposables = this.attachSessionBridges(handle, sessionId, main);
     this.sessions.set(sessionId, { handle, main, disposables });
-    const now = Date.now();
-    return { id: sessionId, workDir: '', sessionDir: '', createdAt: now, updatedAt: now };
+    return this.buildResumeResult(handle, main);
+  }
+
+  async reloadSession(payload: { sessionId: string }): Promise<unknown> {
+    // v1 parity (`core-impl.ts` `reloadSession`): tear the live session down
+    // and resume it fresh so config/plugin changes take effect, returning the
+    // same full resume-state assembly as `resumeSession`.
+    const slot = this.sessions.get(payload.sessionId);
+    if (slot !== undefined) {
+      slot.disposables?.forEach((d) => {
+        try {
+          d.dispose();
+        } catch {
+          // ignore
+        }
+      });
+      this.sessions.delete(payload.sessionId);
+      await this.app.accessor.get(ISessionLifecycleService).close(payload.sessionId);
+    }
+    return this.resumeSession(payload);
+  }
+
+  /**
+   * Assemble the v1 `ResumeSessionResult` the SDK/TUI hydrates a resumed
+   * session from (`Session.getResumeState()` → `hydrateFromReplay`): the
+   * summary plus `sessionMetadata` and a per-agent state record. Every getter
+   * on the v2 `IAgentRPCService` is already v1-shaped (see the file header),
+   * and the replay records come from the v2 `ReplayTimelineModel` projection,
+   * a JSON-compatible mirror of v1's DTO — hence the single boundary cast on
+   * the agent state and on the metadata (v2 `SessionMeta` uses epoch-ms
+   * timestamps and `cwd`, the v1 wire shape uses ISO strings and `workDir`).
+   */
+  private async buildResumeResult(
+    handle: ISessionScopeHandle,
+    main: IAgentScopeHandle,
+  ): Promise<ResumeSessionResult> {
+    // A successful resume has already resolved the session's cwd (`doResume`
+    // falls back summary.cwd → workspace registry and aborts when neither is
+    // recoverable), so the seeded context always carries the real values.
+    const ctx = handle.accessor.get(ISessionContext);
+    const meta = await handle.accessor.get(ISessionMetadata).read();
+    const rpc = main.accessor.get(IAgentRPCService);
+    const replay = main.accessor.get(IAgentReplayService).getReplayRecords();
+    // v1 parity: `toolStore.todo` carries the session todo list — v1 kept it
+    // on the agent tool store, v2 owns it at session scope.
+    const todos = handle.accessor.get(ISessionTodoService).getTodos();
+    const [config, context, permission, plan, swarmMode, usage, tools, background] =
+      await Promise.all([
+        rpc.getConfig({}),
+        rpc.getContext({}),
+        rpc.getPermission({}),
+        rpc.getPlan({}),
+        rpc.getSwarmMode({}),
+        rpc.getUsage({}),
+        rpc.getTools({}),
+        rpc.getTasks({ activeOnly: false }),
+      ]);
+    const sessionMetadata = {
+      createdAt: new Date(meta.createdAt).toISOString(),
+      updatedAt: new Date(meta.updatedAt).toISOString(),
+      title: meta.title ?? '',
+      isCustomTitle: meta.isCustomTitle ?? false,
+      lastPrompt: meta.lastPrompt,
+      forkedFrom: meta.forkedFrom,
+      workDir: meta.cwd ?? ctx.cwd,
+      agents: { ...meta.agents },
+      custom: { ...meta.custom },
+    } as unknown as ResumeSessionResult['sessionMetadata'];
+    const mainState = {
+      type: 'main',
+      config,
+      context,
+      replay,
+      permission,
+      plan,
+      swarmMode,
+      usage,
+      tools,
+      toolStore: { todo: [...todos] },
+      background,
+    } as unknown as ResumeSessionResult['agents'][string];
+    return {
+      id: ctx.sessionId,
+      title: meta.title,
+      lastPrompt: meta.lastPrompt,
+      workDir: ctx.cwd,
+      sessionDir: ctx.sessionDir,
+      createdAt: meta.createdAt,
+      updatedAt: meta.updatedAt,
+      archived: meta.archived,
+      metadata: meta.custom as JsonObject | undefined,
+      sessionMetadata,
+      agents: { main: mainState },
+    };
   }
 
   async forkSession(payload: {
@@ -401,16 +506,13 @@ export class V2Host {
     });
     const ctx = handle.accessor.get(ISessionContext);
     const sessionId = ctx.sessionId;
-    const workDir =
-      (await this.app.accessor.get(IWorkspaceRegistry).get(ctx.workspaceId))?.root ?? '';
     const main = await ensureMainAgent(handle);
     // Force-instantiate session-scope tool providers (cron registers its tools
     // into the main agent's registry on construction).
     handle.accessor.get(ISessionCronService);
     const disposables = this.attachSessionBridges(handle, sessionId, main);
     this.sessions.set(sessionId, { handle, main, disposables });
-    const now = Date.now();
-    return { id: sessionId, workDir, sessionDir: ctx.sessionDir, createdAt: now, updatedAt: now };
+    return this.buildResumeResult(handle, main);
   }
 
   private attachSessionBridges(
@@ -510,10 +612,54 @@ export class V2Host {
     return disposables;
   }
 
-  async listSessions(): Promise<readonly unknown[]> {
-    const page = await this.app.accessor.get(ISessionIndex).list({});
-    const items = (page as { items?: readonly unknown[] } | undefined)?.items ?? page ?? [];
-    return items as readonly unknown[];
+  async listSessions(
+    payload: {
+      workDir?: string;
+      sessionId?: string;
+      includeArchive?: boolean;
+      childOf?: string;
+      limit?: number;
+    } = {},
+  ): Promise<readonly WireSessionSummary[]> {
+    // v1 parity: `SessionStore.list` scopes the query by workDir bucket
+    // (`encodeWorkDirKey`) and rejects blank workDir outright. v1 returns a
+    // plain array; the v2 index answers a `Page<SessionSummary>` — the edge
+    // unwraps it.
+    if (payload.workDir !== undefined && payload.workDir.trim() === '') {
+      throw new KimiError(ErrorCodes.REQUEST_WORK_DIR_REQUIRED, 'listSessions requires workDir');
+    }
+    const query = {
+      workspaceId:
+        payload.workDir === undefined ? undefined : encodeWorkDirKey(payload.workDir),
+      sessionId: payload.sessionId,
+      includeArchived: payload.includeArchive === true ? true : undefined,
+      childOf: payload.childOf,
+      limit: payload.limit,
+    };
+    const page = await this.app.accessor.get(ISessionIndex).list(query);
+    const registry = this.app.accessor.get(IWorkspaceRegistry);
+    const bootstrapService = this.app.accessor.get(IBootstrapService);
+    const summaries: WireSessionSummary[] = [];
+    for (const item of page.items) {
+      // The wire contract has `workDir` as a required field, and sessions
+      // omit it only for documents predating cwd persistence; mirror the
+      // resume edge's fallback to the workspace registry, then to a fixed
+      // placeholder so old records still round-trip.
+      const workDir =
+        item.cwd ?? (await registry.get(item.workspaceId))?.root ?? '(unknown)';
+      summaries.push({
+        id: item.id,
+        title: item.title,
+        lastPrompt: item.lastPrompt,
+        workDir,
+        sessionDir: bootstrapService.sessionDir(item.workspaceId, item.id),
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt,
+        archived: item.archived,
+        metadata: item.custom as JsonObject | undefined,
+      });
+    }
+    return summaries;
   }
 
   async closeSession(payload: { sessionId: string }): Promise<void> {

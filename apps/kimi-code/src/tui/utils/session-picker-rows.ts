@@ -13,7 +13,9 @@ export function sessionRowsForPicker(
       id: session.id,
       title: session.title ?? null,
       last_prompt: session.lastPrompt ?? null,
-      work_dir: session.workDir,
+      // Wire contract requires workDir, but older/broken backends may omit it —
+      // the picker must survive those rows (see homeAlias guard).
+      work_dir: session.workDir ?? '(unknown)',
       updated_at: session.updatedAt ?? session.createdAt ?? 0,
       metadata: session.metadata,
     }));

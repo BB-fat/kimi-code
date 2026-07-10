@@ -157,6 +157,44 @@ describe('Session plan, compact, usage, and resume APIs', () => {
     }
   });
 
+  it('resume exposes replay state for TUI history hydration', async () => {
+    const homeDir = await makeTempDir(tempDirs, 'kimi-sdk-resume-state-home-');
+    const workDir = await makeTempDir(tempDirs, 'kimi-sdk-resume-state-work-');
+    await writeTestConfig(homeDir);
+    const harness = createKimiHarness({ homeDir, identity: TEST_IDENTITY });
+
+    try {
+      const created = await harness.createSession({
+        id: 'ses_resume_state_runtime',
+        workDir,
+        model: 'test-model',
+      });
+      await created.setPlanMode(true);
+      await created.setPlanMode(false);
+      await created.close();
+
+      const resumed = await harness.resumeSession({ id: created.id });
+      const state = resumed.getResumeState();
+
+      // `hydrateFromReplay` in the TUI gates on `agents['main']`; assert the
+      // full shape it hydrates from so a bare-summary resume regression fails
+      // here instead of as "Session history is unavailable" on screen.
+      expect(state).toBeDefined();
+      const main = state?.agents['main'];
+      expect(main).toBeDefined();
+      expect(main?.type).toBe('main');
+      expect(main?.replay).toContainEqual(
+        expect.objectContaining({ type: 'plan_updated', enabled: true }),
+      );
+      expect(typeof main?.toolStore).toBe('object');
+      expect(Array.isArray(main?.background)).toBe(true);
+      expect(state?.sessionMetadata.workDir).toBe(resumed.workDir);
+      expect(typeof state?.sessionMetadata.createdAt).toBe('string');
+    } finally {
+      await harness.close();
+    }
+  });
+
   it.todo('marks resumed plan mode active when the restored plan has no plan data', async () => {
     const homeDir = await makeTempDir(tempDirs, 'kimi-sdk-resume-legacy-plan-home-');
     const workDir = await makeTempDir(tempDirs, 'kimi-sdk-resume-legacy-plan-work-');

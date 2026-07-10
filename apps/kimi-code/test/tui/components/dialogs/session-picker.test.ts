@@ -101,6 +101,26 @@ describe('SessionPickerComponent', () => {
     expect(output).toContain('please redesign the picker UI');
   });
 
+  it('renders sessions written before cwd persistence with an (unknown) dir', () => {
+    const legacy = {
+      id: 'ses_nocwd',
+      title: 'legacy session',
+      work_dir: undefined as unknown as string,
+      updated_at: 1,
+    };
+    const component = new SessionPickerComponent({
+      sessions: [legacy],
+      loading: false,
+      currentSessionId: 'ses_other',
+      onSelect: vi.fn(),
+      onCancel: vi.fn(),
+    });
+
+    const output = renderPlain(component);
+
+    expect(output).toContain('(unknown)');
+  });
+
   it('omits the last-prompt row when last_prompt is missing', () => {
     const now = new Date('2026-05-11T12:00:00.000Z').getTime();
     vi.spyOn(Date, 'now').mockReturnValue(now);

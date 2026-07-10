@@ -61,4 +61,14 @@ describe('sessionRowsForPicker', () => {
 
     expect(rows.map((row) => row.id)).toEqual(['ses_previous_empty']);
   });
+
+  it('fills a placeholder work_dir when the summary omits workDir', () => {
+    const withoutDir = structuredClone(summary({ id: 'ses_legacy' }));
+    // Old sessions written before cwd persistence skip the field entirely.
+    delete (withoutDir as { workDir?: string }).workDir;
+
+    const rows = sessionRowsForPicker([withoutDir], 'ses_other', false);
+
+    expect(rows[0]?.work_dir).toBe('(unknown)');
+  });
 });
