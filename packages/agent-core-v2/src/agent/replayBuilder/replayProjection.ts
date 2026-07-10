@@ -7,9 +7,20 @@
  * projection mirrors the push decisions v1's `ReplayBuilder` made at restore
  * time (packages/agent-core `agent/replay/index.ts` and its domain push sites):
  *
- * - `context.append_message`           → `message`
+ * - `context.append_message`           → `message`; deferred while a tool
+ *   exchange is open and flushed once it closes (v1 deferral parity)
+ * - `context.append_loop_event`        → folded into `message` records the
+ *   way the live context folds a turn: one assistant `message` per step
+ *   (emitted when the step closes), one tool `message` per `tool.result`.
+ *   A trailing exchange left open by an interrupted session — or a gap
+ *   mid-history — is closed with synthetic interrupted tool results (v1
+ *   `finishResume` / step-boundary parity). Fold semantics mirror
+ *   `reduceContextTranscript` in `contextMemory`.
  * - `context.apply_compaction`         → `compaction` carrying the durable
- *   result (summary + token counts live on this op's payload in v2)
+ *   result (summary + token counts live on this op's payload in v2); also
+ *   resets the loop-event fold bookkeeping the way live `resetFold` does —
+ *   pending calls and deferred messages are forgotten, while the open step's
+ *   assistant keeps buffering (the partial assistant survives in live state)
  * - `full_compaction.begin`            → `compaction` with instruction only
  *   (v1 pushes the same at restore; the TUI skips result-less records)
  * - `full_compaction.cancel`           → `compaction` with result 'cancelled'
@@ -30,7 +41,13 @@
  * `AgentReplayRecord.time`, so every record stamps `0`.
  */
 
+import {
+  createToolMessage,
+  type ContentPart,
+  type ToolCall,
+} from '#/app/llmProtocol/message';
 import type { ContextCompactionPayload } from '#/agent/contextMemory/contextOps';
+import { TOOL_INTERRUPTED_ON_RESUME_OUTPUT } from '#/agent/contextMemory/loopEventFold';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import type { CompactionResult } from '#/agent/fullCompaction/types';
 import type { GoalState, GoalUpdatePayload } from '#/agent/goal/goalOps';
@@ -49,12 +66,99 @@ const NO_TIME = 0;
 export function projectReplayTimeline(timeline: ReplayTimeline): readonly AgentReplayRecord[] {
   const records: AgentReplayRecord[] = [];
   let goal: GoalState | null = null;
+
+  let openAssistant: { content: ContentPart[]; toolCalls: ToolCall[] } | null = null;
+  const pendingToolCallIds = new Set<string>();
+  let deferredMessages: ContextMessage[] = [];
+
+  const pushMessage = (message: ContextMessage): void => {
+    records.push({ time: NO_TIME, type: 'message', message });
+  };
+  const flushDeferred = (): void => {
+    if (pendingToolCallIds.size > 0 || deferredMessages.length === 0) return;
+    for (const message of deferredMessages) pushMessage(message);
+    deferredMessages = [];
+  };
+  const closeOpenAssistant = (): void => {
+    if (openAssistant === null) return;
+    pushMessage({
+      role: 'assistant',
+      content: openAssistant.content,
+      toolCalls: openAssistant.toolCalls,
+    });
+    openAssistant = null;
+  };
+  const closePendingAsInterrupted = (): void => {
+    for (const toolCallId of pendingToolCallIds) {
+      pushMessage({
+        ...createToolMessage(toolCallId, TOOL_INTERRUPTED_ON_RESUME_OUTPUT),
+        isError: true,
+      });
+    }
+    pendingToolCallIds.clear();
+  };
+  const resetLoopFold = (): void => {
+    pendingToolCallIds.clear();
+    deferredMessages = [];
+  };
+
   for (const entry of timeline) {
     switch (entry.type) {
       case 'context.append_message':
-        records.push({ time: NO_TIME, type: 'message', message: entry.payload.message });
+        if (pendingToolCallIds.size > 0) {
+          deferredMessages.push(entry.payload.message);
+        } else {
+          pushMessage(entry.payload.message);
+        }
         break;
+      case 'context.append_loop_event': {
+        const event = entry.payload.event;
+        switch (event.type) {
+          case 'step.begin':
+            closeOpenAssistant();
+            closePendingAsInterrupted();
+            flushDeferred();
+            openAssistant = { content: [], toolCalls: [] };
+            break;
+          case 'content.part':
+            openAssistant?.content.push(event.part);
+            break;
+          case 'tool.call': {
+            const call: ToolCall = {
+              type: 'function',
+              id: event.toolCallId,
+              name: event.name,
+              arguments: event.args === undefined ? null : JSON.stringify(event.args),
+              extras: event.extras,
+            };
+            pendingToolCallIds.add(event.toolCallId);
+            openAssistant?.toolCalls.push(call);
+            break;
+          }
+          case 'tool.result':
+            if (pendingToolCallIds.has(event.toolCallId)) {
+              pendingToolCallIds.delete(event.toolCallId);
+              const output = event.result.output;
+              pushMessage({
+                ...createToolMessage(
+                  event.toolCallId,
+                  typeof output === 'string' ? output : [...output],
+                ),
+                isError: event.result.isError,
+                note: event.result.note,
+              });
+              flushDeferred();
+            }
+            break;
+          case 'step.end':
+            closeOpenAssistant();
+            flushDeferred();
+            break;
+        }
+        break;
+      }
       case 'context.apply_compaction': {
+        resetLoopFold();
         const payload = entry.payload;
         const result: CompactionResult = {
           summary: compactionSummary(payload),
@@ -159,6 +263,9 @@ export function projectReplayTimeline(timeline: ReplayTimeline): readonly AgentR
         break;
     }
   }
+  closeOpenAssistant();
+  closePendingAsInterrupted();
+  flushDeferred();
   return records;
 }
 

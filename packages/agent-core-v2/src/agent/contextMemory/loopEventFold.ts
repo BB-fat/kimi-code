@@ -40,7 +40,7 @@ import type { TokenUsage } from '#/app/llmProtocol/usage';
 
 import type { ContextMessage } from './types';
 
-const TOOL_INTERRUPTED_ON_RESUME_OUTPUT =
+export const TOOL_INTERRUPTED_ON_RESUME_OUTPUT =
   'Tool execution was interrupted before its result was recorded. Do not assume the tool completed successfully.';
 
 export type LoopRecordedEvent =

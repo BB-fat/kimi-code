@@ -14,9 +14,11 @@
  */
 
 import {
+  contextAppendLoopEvent,
   contextAppendMessage,
   contextApplyCompaction,
   type ContextCompactionPayload,
+  type ContextLoopEventPayload,
   type ContextMessagePayload,
 } from '#/agent/contextMemory/contextOps';
 import {
@@ -63,6 +65,9 @@ function defineDerivedTimeline<M extends Record<string, (payload: any) => any>>(
 export const ReplayTimelineModel = defineDerivedTimeline('agent.replayTimeline', {
   [contextAppendMessage.type]: (p: ContextMessagePayload) =>
     ({ type: contextAppendMessage.type, payload: p }) as const,
+
+  [contextAppendLoopEvent.type]: (p: ContextLoopEventPayload) =>
+    ({ type: contextAppendLoopEvent.type, payload: p }) as const,
 
   [contextApplyCompaction.type]: (p: ContextCompactionPayload) =>
     ({ type: contextApplyCompaction.type, payload: p }) as const,
