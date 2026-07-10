@@ -16,8 +16,9 @@ import { toInputJsonSchema } from '#/_base/tools/support/input-schema';
 import type { BuiltinTool, ToolExecution } from '#/agent/tool/toolContract';
 import { registerTool } from '#/agent/toolRegistry/toolContribution';
 
-import { isSpineEnabled } from '#/agent/spine/flag';
+import { SPINE_FLAG_ID } from '#/agent/spine/flag';
 import { IAgentSpineService, SPINE_TOOL_CLOSE } from '#/agent/spine/spine';
+import { IFlagService } from '#/app/flag/flag';
 import { toControlResult } from './controlResult';
 import { SPINE_CLOSE_DESCRIPTION, SPINE_NODE_MEMORY_DESCRIPTION } from './descriptions';
 
@@ -45,4 +46,6 @@ export class SpineCloseTool implements BuiltinTool<SpineCloseInput> {
   }
 }
 
-registerTool(SpineCloseTool, { when: () => isSpineEnabled() });
+registerTool(SpineCloseTool, {
+  when: (accessor) => accessor.get(IFlagService).enabled(SPINE_FLAG_ID),
+});

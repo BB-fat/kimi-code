@@ -59,6 +59,9 @@ describe('Spine archive + resume', () => {
     const node = readSpine(ctx).nodes['1.1.1'];
     expect(node?.archivePath).toBeDefined();
     const archivePath = node?.archivePath as string;
+    // Archives live under the per-agent session homedir, not the project
+    // workDir: `<sessionDir>/agents/<id>/spine/<node-id>.md`.
+    expect(archivePath.endsWith('/agents/main/spine/1-1-1.md')).toBe(true);
     expect(writes.has(archivePath)).toBe(true);
     const content = writes.get(archivePath) ?? '';
     expect(content).toContain('did A');

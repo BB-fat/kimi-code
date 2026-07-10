@@ -93,7 +93,7 @@ describe('Spine / compaction interaction', () => {
     const epochNode = state.nodes[String(state.rootEpoch)];
     expect(epochNode?.archivePath).toBeDefined();
     const archivePath = epochNode?.archivePath as string;
-    expect(archivePath.endsWith('/2.md')).toBe(true);
+    expect(archivePath.endsWith('/agents/main/spine/2.md')).toBe(true);
     expect(writes.has(archivePath)).toBe(true);
     const content = writes.get(archivePath) ?? '';
     expect(content).toContain('# Spine Root Epoch 2');

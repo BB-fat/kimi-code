@@ -22,12 +22,13 @@ import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory'
 import { IAgentContextProjectorService } from '#/agent/contextProjector/contextProjector';
 import { IAgentContextSizeService } from '#/agent/contextSize/contextSize';
 import { IAgentProfileService } from '#/agent/profile/profile';
-import { isSpineEnabled } from '#/agent/spine/flag';
+import { SPINE_FLAG_ID } from '#/agent/spine/flag';
 import { appendSpineView } from '#/agent/spine/instructions';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { IAgentToolSelectService } from '#/agent/toolSelect/toolSelect';
 import { IAgentUsageService } from '#/agent/usage/usage';
 import { IConfigService } from '#/app/config/config';
+import { IFlagService } from '#/app/flag/flag';
 import {
   APIConnectionError,
   APIContextOverflowError,
@@ -122,6 +123,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     @IAgentProfileService private readonly profile: IAgentProfileService,
     @IAgentUsageService private readonly usage: IAgentUsageService,
     @IConfigService private readonly config: IConfigService,
+    @IFlagService private readonly flags: IFlagService,
     @ILogService private readonly log: ILogService,
     @ITelemetryService private readonly telemetry: ITelemetryService,
     @IAgentWireService private readonly wire: IWireService,
@@ -350,7 +352,9 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
 
     const messages = overrides.messages ?? this.context.get();
     const baseSystemPrompt = overrides.systemPrompt ?? this.profile.getSystemPrompt();
-    const systemPrompt = isSpineEnabled() ? appendSpineView(baseSystemPrompt) : baseSystemPrompt;
+    const systemPrompt = this.flags.enabled(SPINE_FLAG_ID)
+      ? appendSpineView(baseSystemPrompt)
+      : baseSystemPrompt;
     return {
       model,
       modelAlias: resolved.modelAlias,

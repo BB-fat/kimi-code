@@ -14,8 +14,9 @@ import { toInputJsonSchema } from '#/_base/tools/support/input-schema';
 import type { BuiltinTool, ToolExecution } from '#/agent/tool/toolContract';
 import { registerTool } from '#/agent/toolRegistry/toolContribution';
 
-import { isSpineEnabled } from '#/agent/spine/flag';
+import { SPINE_FLAG_ID } from '#/agent/spine/flag';
 import { IAgentSpineService, SPINE_TOOL_TREE } from '#/agent/spine/spine';
+import { IFlagService } from '#/app/flag/flag';
 import { SPINE_TREE_DESCRIPTION } from './descriptions';
 
 const SpineTreeInputSchema = z.object({});
@@ -36,4 +37,6 @@ export class SpineTreeTool implements BuiltinTool<Record<string, never>> {
   }
 }
 
-registerTool(SpineTreeTool, { when: () => isSpineEnabled() });
+registerTool(SpineTreeTool, {
+  when: (accessor) => accessor.get(IFlagService).enabled(SPINE_FLAG_ID),
+});

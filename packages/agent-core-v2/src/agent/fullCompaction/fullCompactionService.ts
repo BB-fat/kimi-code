@@ -20,7 +20,7 @@ import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory'
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentContextSizeService } from '#/agent/contextSize/contextSize';
 import { contextSizeMeasured } from '#/agent/contextSize/contextSizeOps';
-import { isSpineEnabled } from '#/agent/spine/flag';
+import { SPINE_FLAG_ID } from '#/agent/spine/flag';
 import { IAgentSpineService } from '#/agent/spine/spine';
 import { SpineModel, spineRootCompact } from '#/agent/spine/spineOps';
 import { IAgentLLMRequesterService, type LLMRequestFinish } from '#/agent/llmRequester/llmRequester';
@@ -49,6 +49,7 @@ import { createUserMessage, type Message } from '#/app/llmProtocol/message';
 import type { Tool } from '#/app/llmProtocol/tool';
 import { type TokenUsage } from '#/app/llmProtocol/usage';
 import { IEventBus } from '#/app/event/eventBus';
+import { IFlagService } from '#/app/flag/flag';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { ErrorCodes, KimiError, isKimiError, toKimiErrorPayload } from "#/errors";
 import { IAgentWireService } from '#/wire/tokens';
@@ -168,6 +169,7 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
     @IAgentTurnService private readonly turn: IAgentTurnService,
     @IAgentActivityService private readonly activity: IAgentActivityService,
     @ILogService private readonly log: ILogService,
+    @IFlagService private readonly flags: IFlagService,
     @IAgentLoopService loopService: IAgentLoopService,
   ) {
     super();
@@ -674,7 +676,7 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
 
       const summary = this.postProcessSummary(attempt.summary);
       const normalizedDroppedCount = droppedCount === 0 ? undefined : droppedCount;
-      const result = isSpineEnabled()
+      const result = this.flags.enabled(SPINE_FLAG_ID)
         ? await this.applyRootCompaction(summary, originalHistory.length, tokensBefore, normalizedDroppedCount)
         : this.context.applyCompaction({
             summary,
@@ -793,7 +795,7 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
     // the TodoList tool is gated off, so anything left here is stale data from
     // before the experiment switched on. The tree itself survives compaction
     // in the wire and needs no re-injection.
-    if (isSpineEnabled()) return [];
+    if (this.flags.enabled(SPINE_FLAG_ID)) return [];
     return this.todo.getTodos();
   }
 

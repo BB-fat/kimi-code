@@ -23,6 +23,7 @@ import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { IAgentToolSelectService } from '#/agent/toolSelect/toolSelect';
 import { IAgentUsageService } from '#/agent/usage/usage';
 import { IConfigService } from '#/app/config/config';
+import { IFlagService } from '#/app/flag/flag';
 import { APIStatusError } from '#/app/llmProtocol/errors';
 import type { MaxCompletionTokensOptions } from '#/app/llmProtocol/provider';
 import { emptyUsage } from '#/app/llmProtocol/usage';
@@ -151,6 +152,7 @@ function createService(
   ix.stub(IAgentProfileService, profile);
   ix.stub(IAgentUsageService, usage);
   ix.stub(IConfigService, config);
+  ix.stub(IFlagService, { enabled: () => false });
   ix.stub(ILogService, log);
   ix.stub(ITelemetryService, telemetry);
   ix.set(

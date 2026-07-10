@@ -136,6 +136,41 @@ describe('FlagService', () => {
     expect(state?.source).toBe('master-env');
   });
 
+  it('does not let the master env switch force an ignoreMaster flag on', async () => {
+    const { config, flags } = makeFlags({ [MASTER_ENV]: '1' });
+    flags.registry.register({
+      ...exampleFlag,
+      id: 'independent_flag',
+      env: 'KIMI_CODE_EXPERIMENTAL_INDEPENDENT_FLAG',
+      default: false,
+      ignoreMaster: true,
+    });
+    const state = flags.explain('independent_flag');
+    expect(state?.enabled).toBe(false);
+    expect(state?.source).toBe('default');
+    // Config still applies when the master switch is ignored.
+    await config.set(EXPERIMENTAL_SECTION, { independent_flag: true });
+    expect(flags.explain('independent_flag')?.enabled).toBe(true);
+    expect(flags.explain('independent_flag')?.source).toBe('config');
+  });
+
+  it('lets the per-flag env enable an ignoreMaster flag under the master switch', () => {
+    const { flags } = makeFlags({
+      [MASTER_ENV]: '1',
+      KIMI_CODE_EXPERIMENTAL_INDEPENDENT_FLAG: '1',
+    });
+    flags.registry.register({
+      ...exampleFlag,
+      id: 'independent_flag',
+      env: 'KIMI_CODE_EXPERIMENTAL_INDEPENDENT_FLAG',
+      default: false,
+      ignoreMaster: true,
+    });
+    const state = flags.explain('independent_flag');
+    expect(state?.enabled).toBe(true);
+    expect(state?.source).toBe('env');
+  });
+
   it('refreshes overrides when the experimental config section changes', async () => {
     const { config, flags } = makeFlags();
     expect(flags.enabled('example_flag')).toBe(true);

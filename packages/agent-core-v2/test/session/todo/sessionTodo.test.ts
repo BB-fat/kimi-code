@@ -21,6 +21,19 @@ import { readTodoItems, type TodoItem } from '#/session/todo/todoItem';
 import { TODO_LIST_REMINDER_VARIANT } from '#/session/todo/todoListReminder';
 import { IAgentWireService } from '#/wire/tokens';
 import type { IWireService, PersistedRecord } from '#/wire/wireService';
+import { parseBooleanEnv } from '#/_base/utils/env';
+import { IFlagService } from '#/app/flag/flag';
+import type { FlagId } from '#/app/flag/flagRegistry';
+import { SPINE_FLAG_ENV, SPINE_FLAG_ID } from '#/agent/spine/flag';
+
+// Mirrors `FlagService` env resolution for the spine flag: the real service
+// reads the env through bootstrap on every `enabled` call, so stubbing the env
+// mid-test flips the gate exactly as in production.
+function makeFlagsStub(): IFlagService {
+  const enabled = (id: FlagId) =>
+    id === SPINE_FLAG_ID && parseBooleanEnv(process.env[SPINE_FLAG_ENV]) === true;
+  return { _serviceBrand: undefined, enabled } as unknown as IFlagService;
+}
 
 interface RecordedTodoSet {
   readonly todos: readonly TodoItem[];
@@ -231,7 +244,7 @@ describe('SessionTodoService', () => {
   it('starts empty and updates the list on setTodos', () => {
     const main = makeFakeAgent('main');
     const lifecycle = makeLifecycleStub([main.handle]);
-    const service = new SessionTodoService(lifecycle.service);
+    const service = new SessionTodoService(lifecycle.service, makeFlagsStub());
 
     expect(service.getTodos()).toEqual([]);
 
@@ -249,7 +262,7 @@ describe('SessionTodoService', () => {
   it('fires onDidChange after each setTodos', () => {
     const main = makeFakeAgent('main');
     const lifecycle = makeLifecycleStub([main.handle]);
-    const service = new SessionTodoService(lifecycle.service);
+    const service = new SessionTodoService(lifecycle.service, makeFlagsStub());
 
     const seen: Array<readonly TodoItem[]> = [];
     const d = service.onDidChange((todos) => seen.push(todos));
@@ -266,7 +279,7 @@ describe('SessionTodoService', () => {
   it('appends a tools.update_store record to the main agent wire on setTodos', () => {
     const main = makeFakeAgent('main');
     const lifecycle = makeLifecycleStub([main.handle]);
-    const service = new SessionTodoService(lifecycle.service);
+    const service = new SessionTodoService(lifecycle.service, makeFlagsStub());
 
     service.setTodos([{ title: 'persist me', status: 'in_progress' }]);
 
@@ -281,7 +294,7 @@ describe('SessionTodoService', () => {
 
   it('does not append to the wire when the main agent is absent', () => {
     const lifecycle = makeLifecycleStub();
-    const service = new SessionTodoService(lifecycle.service);
+    const service = new SessionTodoService(lifecycle.service, makeFlagsStub());
     // Should not throw even without a main agent. With no main wire there is
     // no source of truth to read from, so the list stays empty.
     expect(() => service.setTodos([{ title: 'x', status: 'pending' }])).not.toThrow();
@@ -290,7 +303,7 @@ describe('SessionTodoService', () => {
 
   it('binds the stale-todo reminder into every created agent', () => {
     const lifecycle = makeLifecycleStub();
-    const service = new SessionTodoService(lifecycle.service);
+    const service = new SessionTodoService(lifecycle.service, makeFlagsStub());
     void service;
 
     const main = makeFakeAgent('main');
@@ -309,7 +322,7 @@ describe('SessionTodoService', () => {
     const main = makeFakeAgent('main');
     const sub = makeFakeAgent('agent-1');
     const lifecycle = makeLifecycleStub([main.handle, sub.handle]);
-    const service = new SessionTodoService(lifecycle.service);
+    const service = new SessionTodoService(lifecycle.service, makeFlagsStub());
     void service;
 
     expect(main.subscribed()).toBe(1);
@@ -319,7 +332,7 @@ describe('SessionTodoService', () => {
   it('rebuilds the list when a todo tools.update_store record is replayed', async () => {
     const main = makeFakeAgent('main');
     const lifecycle = makeLifecycleStub([main.handle]);
-    const service = new SessionTodoService(lifecycle.service);
+    const service = new SessionTodoService(lifecycle.service, makeFlagsStub());
 
     await main.replay([
       { type: 'tools.update_store', key: 'todo', value: [{ title: 'restored', status: 'done' }] },
@@ -330,7 +343,7 @@ describe('SessionTodoService', () => {
 
   it('disposes per-agent bindings when the agent is disposed', () => {
     const lifecycle = makeLifecycleStub();
-    const service = new SessionTodoService(lifecycle.service);
+    const service = new SessionTodoService(lifecycle.service, makeFlagsStub());
     const main = makeFakeAgent('main');
     lifecycle.fireCreate(main.handle);
 
@@ -342,7 +355,7 @@ describe('SessionTodoService', () => {
 
   it('satisfies the ISessionTodoService contract', () => {
     const lifecycle = makeLifecycleStub();
-    const service: ISessionTodoService = new SessionTodoService(lifecycle.service);
+    const service: ISessionTodoService = new SessionTodoService(lifecycle.service, makeFlagsStub());
     expect(typeof service.getTodos).toBe('function');
     expect(typeof service.setTodos).toBe('function');
     expect(typeof service.clear).toBe('function');
@@ -359,24 +372,25 @@ describe('SessionTodoService', () => {
     })) as unknown as ContextMessage[];
     const main = makeFakeAgent('main', { toolActive: true, history });
     const lifecycle = makeLifecycleStub([main.handle]);
-    const service = new SessionTodoService(lifecycle.service);
+    const service = new SessionTodoService(lifecycle.service, makeFlagsStub());
     service.setTodos([{ title: 'still open', status: 'in_progress' }]);
     const reminder = main.reminderProviders.get(TODO_LIST_REMINDER_VARIANT);
     expect(reminder).toBeDefined();
 
     // Baseline: with the flat list tool active, the nudge fires.
+    vi.stubEnv(SPINE_FLAG_ENV, '0');
     expect(reminder!()).toBeDefined();
 
     // With spine on the tool is gone, so the nudge must stay silent instead of
     // prodding the model toward a tracker it can no longer see.
-    vi.stubEnv('KIMI_CODE_SPINE', '1');
+    vi.stubEnv(SPINE_FLAG_ENV, '1');
     expect(reminder!()).toBeUndefined();
   });
 
   it('cleans malformed items from a replayed todo tools.update_store record', async () => {
     const main = makeFakeAgent('main');
     const lifecycle = makeLifecycleStub([main.handle]);
-    const service = new SessionTodoService(lifecycle.service);
+    const service = new SessionTodoService(lifecycle.service, makeFlagsStub());
 
     await main.replay([
       {
@@ -398,7 +412,7 @@ describe('SessionTodoService', () => {
   it('treats a non-array todo tools.update_store value as an empty list on replay', async () => {
     const main = makeFakeAgent('main');
     const lifecycle = makeLifecycleStub([main.handle]);
-    const service = new SessionTodoService(lifecycle.service);
+    const service = new SessionTodoService(lifecycle.service, makeFlagsStub());
 
     await main.replay([
       { type: 'tools.update_store', key: 'todo', value: 'not-an-array' } as unknown as PersistedRecord,

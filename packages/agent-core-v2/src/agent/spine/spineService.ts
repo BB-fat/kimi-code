@@ -15,14 +15,16 @@
  * `wire.getModel(SpineModel)`, writes through `wire.dispatch(spineOpen(...))`
  * etc., records each node's provider-token baseline via `contextSize`,
  * assembles continuation memory with `spineTree.assembleMemoryBody`, archives
- * each closed node's trajectory to disk, and — for root compactions — archives
- * the history the new epoch boundary folds away (`archiveEpochRoot`), with the
- * path published back onto the new epoch node so the folded context stays one
- * `Read` away. Renders the read-only `spine_tree` view across every root epoch
- * (current first by numeric order), so a superseded epoch's closed-node
- * archives stay discoverable after a root compaction. Hooks self-check the
- * `KIMI_CODE_SPINE` gate so a disabled spine never observes history. Bound at
- * Agent scope.
+ * each closed node's trajectory under the bootstrap-issued per-agent session
+ * homedir (`<sessionDir>/agents/<id>/spine/`), and — for root compactions —
+ * archives the history the new epoch boundary folds away (`archiveEpochRoot`),
+ * with the path published back onto the new epoch node so the folded context
+ * stays one `Read` away. Renders the read-only `spine_tree` view across every
+ * root epoch (current first by numeric order), so a superseded epoch's
+ * closed-node archives stay discoverable after a root compaction. Registers
+ * its history fold into `contextProjector` (spine → projector, never the
+ * reverse) and self-checks the `KIMI_CODE_SPINE` gate at construction, so a
+ * disabled spine never observes history. Bound at Agent scope.
  */
 
 import { Disposable } from '#/_base/di/lifecycle';
@@ -31,17 +33,20 @@ import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
 import { estimateTokensForMessages } from '#/_base/utils/tokens';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import type { ContextMessage } from '#/agent/contextMemory/types';
+import { IAgentContextProjectorService } from '#/agent/contextProjector/contextProjector';
 import { IAgentContextSizeService } from '#/agent/contextSize/contextSize';
 import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import { IBootstrapService } from '#/app/bootstrap/bootstrap';
+import { IFlagService } from '#/app/flag/flag';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
-import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
+import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { IAgentWireService } from '#/wire/tokens';
 import type { IWireService } from '#/wire/wireService';
 
-import { isSpineEnabled } from './flag';
+import { SPINE_FLAG_ID } from './flag';
 import { loadSpineViewOverride } from './instructions';
 import {
   IAgentSpineService,
@@ -112,14 +117,21 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     @IAgentProfileService private readonly profile: IAgentProfileService,
     @IHostFileSystem private readonly hostFs: IHostFileSystem,
     @IHostEnvironment private readonly hostEnv: IHostEnvironment,
-    @ISessionWorkspaceContext private readonly workspace: ISessionWorkspaceContext,
+    @IBootstrapService private readonly bootstrap: IBootstrapService,
+    @IFlagService private readonly flags: IFlagService,
+    @ISessionContext private readonly sessionCtx: ISessionContext,
     @IAgentScopeContext private readonly agentScope: IAgentScopeContext,
     @IAgentWireService private readonly wire: IWireService,
     @IAgentLoopService loop: IAgentLoopService,
+    @IAgentContextProjectorService projector: IAgentContextProjectorService,
   ) {
     super();
     if (this.enabled) {
       void loadSpineViewOverride(this.hostFs, this.hostEnv.homeDir);
+      // Fold registration is the only thing the projector ever learns about
+      // spine; gated on the flag so a disabled spine never touches the
+      // projection. Construction is Eager, so this lands before the first send.
+      this._register(projector.registerContextFold('spine', (messages) => this.fold(messages)));
     }
     this._register(
       loop.hooks.beforeStep.register('spine', async (_ctx, next) => {
@@ -142,7 +154,7 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
   }
 
   get enabled(): boolean {
-    return isSpineEnabled();
+    return this.flags.enabled(SPINE_FLAG_ID);
   }
 
   acceptOpen(summary: string, toolCallId: string): SpineTransitionResult {
@@ -366,7 +378,7 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
 
   async archiveEpochRoot(input: SpineEpochArchiveInput): Promise<string | undefined> {
     if (!this.enabled) return undefined;
-    const path = spineArchivePath(this.workspace.workDir, this.agentScope.agentId, String(input.epoch));
+    const path = this.archivePath(String(input.epoch));
     const content = buildEpochArchiveContent(input);
     try {
       await writeNodeArchive(this.hostFs, path, content);
@@ -377,7 +389,7 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
   }
 
   private async archiveNode(node: SpineNode): Promise<string | undefined> {
-    const path = spineArchivePath(this.workspace.workDir, this.agentScope.agentId, node.id);
+    const path = this.archivePath(node.id);
     const openedAt = Math.max(0, node.openedAt);
     const closedAt = node.closedAt ?? node.openedAt;
     const messages = this.context.get().slice(openedAt, closedAt + 1);
@@ -388,6 +400,19 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     } catch {
       return undefined;
     }
+  }
+
+  // `<sessionDir>/agents/<id>` is assembled by bootstrap alone (business code
+  // never builds it); spine only appends its `spine/` suffix underneath.
+  private archivePath(nodeId: string): string {
+    return spineArchivePath(
+      this.bootstrap.agentHomedir(
+        this.sessionCtx.workspaceId,
+        this.sessionCtx.sessionId,
+        this.agentScope.agentId,
+      ),
+      nodeId,
+    );
   }
 }
 

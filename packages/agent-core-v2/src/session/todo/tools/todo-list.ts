@@ -24,7 +24,8 @@ import type { BuiltinTool, ToolExecution } from '#/agent/tool/toolContract';
 import { registerTool } from '#/agent/toolRegistry/toolContribution';
 import { toInputJsonSchema } from '#/_base/tools/support/input-schema';
 
-import { isSpineEnabled } from '#/agent/spine/flag';
+import { SPINE_FLAG_ID } from '#/agent/spine/flag';
+import { IFlagService } from '#/app/flag/flag';
 import { ISessionTodoService } from '#/session/todo/sessionTodo';
 import {
   TODO_LIST_TOOL_NAME,
@@ -98,4 +99,6 @@ export class TodoListTool implements BuiltinTool<TodoListInput> {
 // model. `when` is evaluated per Agent registry construction (see
 // `toolContribution`), which happens after the CLI `main()` process env is
 // settled, so `KIMI_CODE_SPINE` toggles take effect for every new agent.
-registerTool(TodoListTool, { when: () => !isSpineEnabled() });
+registerTool(TodoListTool, {
+  when: (accessor) => !accessor.get(IFlagService).enabled(SPINE_FLAG_ID),
+});

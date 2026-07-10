@@ -113,6 +113,38 @@ describe('Spine projection fold', () => {
     expect(folded.some((m) => textOf(m).includes('<spine_status'))).toBe(false);
   });
 
+  it('folds the projection through the context projector hook', () => {
+    const ctx = testAgent();
+    const idx = buildClosedNodeHistory(ctx);
+    wireNode(ctx, {
+      id: '1.1.1',
+      openedAt: idx.openCall,
+      closedAt: idx.closeResult,
+      memory: 'did A',
+    });
+
+    const projected = ctx.project();
+    expect(projected.some((m) => textOf(m).includes('<spine_memory>'))).toBe(true);
+    expect(projected.some((m) => textOf(m).includes('did A'))).toBe(true);
+    expect(projected.some((m) => textOf(m).includes('working'))).toBe(false);
+  });
+
+  it('leaves the projection untouched when spine is disabled', () => {
+    vi.stubEnv(SPINE_ENV, '0');
+    const ctx = testAgent();
+    const idx = buildClosedNodeHistory(ctx);
+    wireNode(ctx, {
+      id: '1.1.1',
+      openedAt: idx.openCall,
+      closedAt: idx.closeResult,
+      memory: 'did A',
+    });
+
+    const projected = ctx.project();
+    expect(projected.some((m) => textOf(m).includes('<spine_memory>'))).toBe(false);
+    expect(projected.some((m) => textOf(m).includes('working'))).toBe(true);
+  });
+
   it('drops messages before the current epoch after a root compact', () => {
     const ctx = testAgent();
     const idx = buildClosedNodeHistory(ctx);
@@ -420,7 +452,7 @@ function toolResult(toolCallId: string): ContextMessage {
   };
 }
 
-function textOf(message: ContextMessage | undefined): string {
+function textOf(message: { content?: readonly { type: string; text?: string }[] } | undefined): string {
   return (
     message?.content?.map((part) => (part.type === 'text' ? (part.text ?? '') : '')).join('') ?? ''
   );

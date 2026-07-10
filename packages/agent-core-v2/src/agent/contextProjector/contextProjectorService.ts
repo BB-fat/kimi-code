@@ -9,19 +9,21 @@
  * non-user messages dropped, consecutive assistants merged, blank text
  * dropped) are reported through an optional sink and surfaced once here as a
  * single deduped warning, so a silently-mangled history always leaves a trace.
+ *
+ * History-collapsing features plug in through `registerContextFold` rather
+ * than being imported here: the projector applies the registered folds (in
+ * registration order) before every projection and knows nothing about spine.
  */
 
 import { InstantiationType } from '#/_base/di/extensions';
-import { IInstantiationService } from '#/_base/di/instantiation';
+import { toDisposable, type IDisposable } from '#/_base/di/lifecycle';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
 import { ILogService } from '#/_base/log/log';
 import { renderToolResultForModel } from '#/agent/contextMemory/toolResultRender';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { ErrorCodes, KimiError } from '#/errors';
-import { isSpineEnabled } from '#/agent/spine/flag';
-import { IAgentSpineService } from '#/agent/spine/spine';
 import type { ContentPart, Message } from '#/app/llmProtocol/message';
-import { IAgentContextProjectorService } from './contextProjector';
+import { IAgentContextProjectorService, type ContextFold } from './contextProjector';
 
 export class AgentContextProjectorService implements IAgentContextProjectorService {
   declare readonly _serviceBrand: undefined;
@@ -32,21 +34,34 @@ export class AgentContextProjectorService implements IAgentContextProjectorServi
   // later recurrence after a healthy stretch is surfaced again.
   private lastRepairSignature: string | null = null;
 
+  // Folds registered by history-collapsing features, keyed by registrant id so
+  // a re-registration replaces and disposal removes; Map order is registration
+  // order, which is the composition order.
+  private readonly folds = new Map<string, ContextFold>();
+
   constructor(
-    @IInstantiationService private readonly instantiation: IInstantiationService,
     @ILogService private readonly log: ILogService,
   ) {}
 
+  registerContextFold(id: string, fold: ContextFold): IDisposable {
+    this.folds.set(id, fold);
+    return toDisposable(() => {
+      this.folds.delete(id);
+    });
+  }
+
   project(messages: readonly ContextMessage[]): readonly Message[] {
-    return this.projectWithTrace(this.foldSpine(messages), project);
+    return this.projectWithTrace(this.foldHistory(messages), project);
   }
 
   projectStrict(messages: readonly ContextMessage[]): readonly Message[] {
-    return this.projectWithTrace(this.foldSpine(messages), projectStrict);
+    return this.projectWithTrace(this.foldHistory(messages), projectStrict);
   }
 
-  private foldSpine(messages: readonly ContextMessage[]): readonly ContextMessage[] {
-    return isSpineEnabled() ? this.spine().fold(messages) : messages;
+  private foldHistory(messages: readonly ContextMessage[]): readonly ContextMessage[] {
+    let folded = messages;
+    for (const fold of this.folds.values()) folded = fold(folded);
+    return folded;
   }
 
   private projectWithTrace(
@@ -113,10 +128,6 @@ export class AgentContextProjectorService implements IAgentContextProjectorServi
       whitespaceDropped,
       toolCallIds,
     });
-  }
-
-  private spine(): IAgentSpineService {
-    return this.instantiation.invokeFunction((accessor) => accessor.get(IAgentSpineService));
   }
 }
 

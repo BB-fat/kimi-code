@@ -1,20 +1,33 @@
 /**
- * `spine` domain (L4) — independent environment gate for the spine experiment.
+ * `spine` domain (L4) — registers the `spine` experimental flag into `flag`.
  *
- * Reads `KIMI_CODE_SPINE` directly from the environment rather than the `flag`
- * registry: the registry's master switch (`KIMI_CODE_EXPERIMENTAL_FLAG`, which
- * also enables the v2 engine itself) is force-on with no opt-out, so routing
- * spine through it would turn spine on for every v2 user. An independent env
- * keeps "using v2" and "using spine" as separate choices. Pure configuration,
- * no IO.
+ * Gates the Spine tree-of-work experiment: the spine_open / spine_close /
+ * spine_next / spine_tree tools, the projector fold hook, the spine system
+ * prompt view, and session archiving. Off by default; enable via
+ * `KIMI_CODE_SPINE` or the `[experimental]` config section (`spine = true`).
+ *
+ * `ignoreMaster: true` keeps spine off the master
+ * `KIMI_CODE_EXPERIMENTAL_FLAG` switch: the CLI force-enables that switch for
+ * every v2 user (apps/kimi-code/src/main.ts), so following it would turn spine
+ * on for everyone — "using v2" and "using spine" stay separate choices.
+ * Imported for its side effect (registers the definition) from the package
+ * barrel.
  */
 
-export const SPINE_ENV = 'KIMI_CODE_SPINE';
+import { type FlagDefinitionInput, registerFlagDefinition } from '#/app/flag/flagRegistry';
 
-const TRUTHY_VALUES = new Set(['1', 'true', 'yes', 'on']);
+export const SPINE_FLAG_ID = 'spine';
+export const SPINE_FLAG_ENV = 'KIMI_CODE_SPINE';
 
-export function isSpineEnabled(
-  env: Readonly<Record<string, string | undefined>> = process.env,
-): boolean {
-  return TRUTHY_VALUES.has((env[SPINE_ENV] ?? '').trim().toLowerCase());
-}
+export const spineFlag: FlagDefinitionInput = {
+  id: SPINE_FLAG_ID,
+  title: 'Spine (tree-of-work)',
+  description:
+    'Replace the flat todo list with a model-driven Spine tree of work nodes (spine_open / spine_close / spine_next); folds history around the tree and archives closed nodes under the session directory.',
+  env: SPINE_FLAG_ENV,
+  default: false,
+  surface: 'core',
+  ignoreMaster: true,
+};
+
+registerFlagDefinition(spineFlag);

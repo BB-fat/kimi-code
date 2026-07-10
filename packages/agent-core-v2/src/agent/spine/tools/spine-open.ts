@@ -16,8 +16,9 @@ import { toInputJsonSchema } from '#/_base/tools/support/input-schema';
 import type { BuiltinTool, ToolExecution } from '#/agent/tool/toolContract';
 import { registerTool } from '#/agent/toolRegistry/toolContribution';
 
-import { isSpineEnabled } from '#/agent/spine/flag';
+import { SPINE_FLAG_ID } from '#/agent/spine/flag';
 import { IAgentSpineService, SPINE_TOOL_OPEN } from '#/agent/spine/spine';
+import { IFlagService } from '#/app/flag/flag';
 import { toControlResult } from './controlResult';
 import { SPINE_OPEN_DESCRIPTION, SPINE_OPEN_SUMMARY_DESCRIPTION } from './descriptions';
 
@@ -45,4 +46,6 @@ export class SpineOpenTool implements BuiltinTool<SpineOpenInput> {
   }
 }
 
-registerTool(SpineOpenTool, { when: () => isSpineEnabled() });
+registerTool(SpineOpenTool, {
+  when: (accessor) => accessor.get(IFlagService).enabled(SPINE_FLAG_ID),
+});
