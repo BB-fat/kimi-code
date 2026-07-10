@@ -32,6 +32,7 @@ const DEFAULT_APPROVE_TOOLS = new Set([
   'spine_close',
   'spine_next',
   'spine_tree',
+  'select_tools',
 ]);
 
 export class DefaultToolApprovePermissionPolicyService implements PermissionPolicy {

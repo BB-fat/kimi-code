@@ -12,7 +12,7 @@
  *     `Turn.result` for authoritative completion,
  *   - drains background tasks (config-driven) before exiting.
  *
- * Selected by `runPrompt` when `KIMI_CODE_EXPERIMENTAL_FLAG` is set.
+ * Selected by `runPrompt` when `KIMI_MODEL_EXPERIMENT_FLAG` is set.
  */
 
 import {
@@ -40,6 +40,7 @@ import {
   type DomainEvent,
   type IAgentScopeHandle,
   type ISessionScopeHandle,
+  type LoopRunResult,
   type Scope,
 } from '@moonshot-ai/agent-core-v2';
 import { createKimiDefaultHeaders, createKimiDeviceId } from '@moonshot-ai/kimi-code-oauth';
@@ -67,6 +68,7 @@ import {
 } from '../run-prompt';
 import { createKimiCodeHostIdentity } from '../version';
 
+import { resolveOutputFormat } from '../options';
 import type { CLIOptions, PromptOutputFormat } from '../options';
 import {
   type PromptOutput,
@@ -95,7 +97,7 @@ export async function runV2Print(
   const stdout = io.stdout ?? process.stdout;
   const stderr = io.stderr ?? process.stderr;
   const promptProcess = io.process ?? process;
-  const outputFormat = opts.outputFormat ?? 'text';
+  const outputFormat = resolveOutputFormat(opts);
   const workDir = process.cwd();
 
   writeExperimentalVersion(version, outputFormat, stdout, stderr);
@@ -353,7 +355,7 @@ async function runNativeTurn(
     // spawned has drained (config-bounded). Flush the buffered assistant
     // message first so a long drain does not withhold the final message.
     writer.flushAssistant();
-    if (result.reason === 'completed') {
+    if (result.type === 'completed') {
       try {
         await drainBackgroundTasks(app, session);
       } catch {
@@ -492,22 +494,24 @@ async function drainBackgroundTasks(app: Scope, session: ISessionScopeHandle): P
   if (allWaiters.length > 0) await Promise.all(allWaiters);
 }
 
-function formatNativeTurnFailure(result: {
-  readonly reason: string;
-  readonly error?: unknown;
-}): string {
-  const error = result.error as { readonly code?: string; readonly message?: string } | undefined;
-  if (error?.code === 'provider.filtered') {
-    return 'Provider safety policy blocked the response.';
-  }
-  if (error?.code !== undefined) {
-    return `${error.code}: ${error.message ?? ''}`.trimEnd();
-  }
-  if (result.error instanceof Error) {
-    return result.error.message;
+function formatNativeTurnFailure(
+  result: Exclude<LoopRunResult, { readonly type: 'completed' }>,
+): string {
+  if (result.type === 'failed') {
+    const error = result.error as { readonly code?: string; readonly message?: string } | undefined;
+    if (error?.code === 'provider.filtered') {
+      return 'Provider safety policy blocked the response.';
+    }
+    if (error?.code !== undefined) {
+      return `${error.code}: ${error.message ?? ''}`.trimEnd();
+    }
+    if (result.error instanceof Error) {
+      return result.error.message;
+    }
+    return 'Prompt turn ended with reason: failed';
   }
   if (result.reason === 'blocked') {
     return 'Prompt hook blocked the request.';
   }
-  return `Prompt turn ended with reason: ${result.reason}`;
+  return `Prompt turn ended with reason: ${String(result.reason)}`;
 }

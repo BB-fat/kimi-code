@@ -5,6 +5,26 @@
  * Exposes pure helpers for recognizing injected tool-schema messages,
  * folding loadable-tool announcements, rendering announcement text, and
  * stripping dynamic-tool protocol context from an outgoing history view.
+ *
+ * Two kinds of messages carry the protocol state in the history:
+ *   - dynamic tool schema messages: `role: 'system'` messages whose `tools`
+ *     field holds full tool definitions (origin
+ *     `{kind: 'injection', variant: 'dynamic_tool_schema'}`) — tool loading is
+ *     protocol context, not conversation. v2's undo cuts histories at the
+ *     first real user prompt it finds regardless of origin: schema messages
+ *     survive only when the cut lands before them, otherwise
+ *     `toolSelectService` reconciles its pending ledger from the surviving
+ *     history on the `context.spliced` event so the model can re-select.
+ *   - loadable-tools announcements: `<tools_added>/<tools_removed>` system
+ *     reminders (origin `{kind: 'system_trigger', name: 'loadable-tools'}`) —
+ *     undo removes them (they are not `injection`-origin), and the next
+ *     turn-boundary diff self-heals by re-announcing the folded delta.
+ *
+ * The loaded-tool ledger is the history itself: there is deliberately no
+ * separate persisted ledger, so undo/compaction/resume all self-heal by
+ * re-folding. Everything here anchors on `origin` or the `tools` field, so
+ * callers that need to filter MUST run before `project()` — projection
+ * strips `origin`.
  */
 
 import type { ContextMessage } from '#/agent/contextMemory/types';

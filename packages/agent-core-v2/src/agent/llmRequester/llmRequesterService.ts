@@ -3,7 +3,8 @@
  *
  * Thin shell over the god-object `Model` (App scope). Assembles per-turn
  * `LLMRequestInput` from `profile` (system prompt), `contextMemory` +
- * `contextProjector` (history), and `toolRegistry` (tools), applies the
+ * `contextProjector` (history), `toolRegistry` (tools), and `toolSelect`
+ * (progressive-disclosure shaping of the tool and history views), applies the
  * completion-token budget, then drives `model.request(input, signal)` with
  * bounded retry. Forwards streamed `part` events to the caller's `onPart`
  * handler, records `usage` through `IAgentUsageService`, resolves to an
@@ -24,6 +25,7 @@ import { IAgentProfileService } from '#/agent/profile/profile';
 import { isSpineEnabled } from '#/agent/spine/flag';
 import { appendSpineView } from '#/agent/spine/instructions';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
+import { IAgentToolSelectService } from '#/agent/toolSelect/toolSelect';
 import { IAgentUsageService } from '#/agent/usage/usage';
 import { IConfigService } from '#/app/config/config';
 import {
@@ -116,6 +118,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     @IAgentContextProjectorService private readonly projector: IAgentContextProjectorService,
     @IAgentContextSizeService private readonly contextSize: IAgentContextSizeService,
     @IAgentToolRegistryService private readonly tools: IAgentToolRegistryService,
+    @IAgentToolSelectService private readonly toolSelect: IAgentToolSelectService,
     @IAgentProfileService private readonly profile: IAgentProfileService,
     @IAgentUsageService private readonly usage: IAgentUsageService,
     @IConfigService private readonly config: IConfigService,
@@ -234,8 +237,8 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
       systemPrompt: request.systemPrompt,
       tools: request.tools,
       messages: strict
-        ? this.projector.projectStrict(request.messages)
-        : this.projector.project(request.messages),
+        ? this.projector.projectStrict(this.toolSelect.shapeHistory(request.messages))
+        : this.projector.project(this.toolSelect.shapeHistory(request.messages)),
     });
 
     const run = async (strict: boolean): Promise<LLMRequestFinish> => {
@@ -419,7 +422,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
       topP: input.protocol === 'kimi' ? overrides?.topP : undefined,
       maxTokens: input.maxTokens,
       betaApi: modelConfig?.betaApi,
-      toolSelect: input.tools.some((tool) => tool.deferred === true),
+      toolSelect: this.toolSelect.enabled(),
       systemPromptHash,
       systemPrompt:
         input.systemPrompt === this.profile.data().systemPrompt
@@ -457,13 +460,13 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
   }
 
   private defaultTools(): readonly Tool[] {
-    return this.tools
-      .list()
-      .filter((tool) => this.profile.isToolActive(tool.name, tool.source))
+    return this.toolSelect
+      .shapeTools(this.tools.list())
       .map((tool) => ({
         name: tool.name,
         description: tool.description,
         parameters: tool.parameters ?? EMPTY_TOOL_PARAMETERS,
+        deferred: tool.deferred,
       }));
   }
 }

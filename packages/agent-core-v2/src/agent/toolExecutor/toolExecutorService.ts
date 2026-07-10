@@ -1,6 +1,15 @@
+/**
+ * `toolExecutor` domain (L3) — `IAgentToolExecutorService` implementation.
+ *
+ * Resolves executable tools through `toolRegistry`, runs ordered tool hooks,
+ * publishes tool lifecycle events through `event`, records telemetry through
+ * `telemetry`, truncates oversized outputs through `toolResultTruncation`,
+ * and logs parse diagnostics through `log`. Bound at Agent scope.
+ */
+
 import { InstantiationType } from '#/_base/di/extensions';
-import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
 import { toDisposable } from '#/_base/di/lifecycle';
+import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
 import type { ContentPart } from '#/app/llmProtocol/message';
 import type {
   ToolCallStartedEvent,
@@ -30,9 +39,10 @@ import { OrderedHookSlot } from '#/hooks';
 import { IAgentToolResultTruncationService } from '#/agent/toolResultTruncation/toolResultTruncation';
 import {
   IAgentToolExecutorService,
-  type ToolCallDescriber,
+  type MissingToolDescriber,
   type ToolExecutionResult,
   type ToolExecutorExecuteOptions,
+  type UnavailableToolDescriber,
 } from './toolExecutor';
 import { ToolScheduler } from './toolScheduler';
 
@@ -87,8 +97,22 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
     onDidExecuteTool: new OrderedHookSlot<ToolDidExecuteContext>(),
   };
 
-  private readonly unavailableToolDescribers = new Set<ToolCallDescriber>();
-  private readonly missingToolDescribers = new Set<ToolCallDescriber>();
+  private missingToolDescriber: MissingToolDescriber | undefined;
+  private unavailableToolDescriber: UnavailableToolDescriber | undefined;
+
+  registerUnavailableToolDescriber(describer: UnavailableToolDescriber) {
+    this.unavailableToolDescriber = describer;
+    return toDisposable(() => {
+      if (this.unavailableToolDescriber === describer) this.unavailableToolDescriber = undefined;
+    });
+  }
+
+  registerMissingToolDescriber(describer: MissingToolDescriber) {
+    this.missingToolDescriber = describer;
+    return toDisposable(() => {
+      if (this.missingToolDescriber === describer) this.missingToolDescriber = undefined;
+    });
+  }
 
   constructor(
     @IAgentToolRegistryService private readonly toolRegistry: IAgentToolRegistryService,
@@ -99,32 +123,20 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
     @ILogService private readonly log?: ILogService,
   ) {}
 
-  registerUnavailableToolDescriber(describer: ToolCallDescriber) {
-    this.unavailableToolDescribers.add(describer);
-    return toDisposable(() => {
-      this.unavailableToolDescribers.delete(describer);
-    });
-  }
-
-  registerMissingToolDescriber(describer: ToolCallDescriber) {
-    this.missingToolDescribers.add(describer);
-    return toDisposable(() => {
-      this.missingToolDescribers.delete(describer);
-    });
-  }
-
   async *execute(
     calls: ToolCall[],
     options: ToolExecutorExecuteOptions,
   ): AsyncIterable<ToolExecutionResult> {
     if (calls.length === 0) return;
 
-    const describers: ToolCallDescribers = {
-      unavailable: this.unavailableToolDescribers,
-      missing: this.missingToolDescribers,
-    };
     const preflighted = calls.map((call) =>
-      preflightToolCall(this.toolRegistry, call, this.log, describers),
+      preflightToolCall(
+        this.toolRegistry,
+        call,
+        this.unavailableToolDescriber,
+        this.missingToolDescriber,
+        this.log,
+      ),
     );
     const preparedTasks: Array<{
       task: ToolExecutionTask;
@@ -619,16 +631,12 @@ function buildWillExecuteContext(
   };
 }
 
-interface ToolCallDescribers {
-  readonly unavailable: ReadonlySet<ToolCallDescriber>;
-  readonly missing: ReadonlySet<ToolCallDescriber>;
-}
-
 function preflightToolCall(
   toolRegistry: IAgentToolRegistryService,
   toolCall: ToolCall,
+  describeUnavailableTool: UnavailableToolDescriber | undefined,
+  describeMissingTool: MissingToolDescriber | undefined,
   log?: ILogService,
-  describers: ToolCallDescribers = { unavailable: new Set(), missing: new Set() },
 ): PreflightedToolCall {
   const toolName = toolCall.name;
   const parsedArgs = parseToolCallArguments(toolCall.arguments);
@@ -640,19 +648,7 @@ function preflightToolCall(
       error: parsedArgs.error,
     });
   }
-  const tool = toolRegistry.resolve(toolName);
-  if (tool === undefined) {
-    return {
-      kind: 'rejected',
-      toolCall,
-      toolName,
-      args: parsedArgs.data,
-      output: firstToolCallDescription(describers.missing, toolName) ?? `Tool "${toolName}" not found`,
-    };
-  }
-  // Availability wording wins over argument validation: a disclosure-hidden
-  // tool called with bad args still hears "load it first", not the schema error.
-  const unavailable = firstToolCallDescription(describers.unavailable, toolName);
+  const unavailable = describeUnavailableTool?.(toolName);
   if (unavailable !== undefined) {
     return {
       kind: 'rejected',
@@ -660,6 +656,16 @@ function preflightToolCall(
       toolName,
       args: parsedArgs.data,
       output: unavailable,
+    };
+  }
+  const tool = toolRegistry.resolve(toolName);
+  if (tool === undefined) {
+    return {
+      kind: 'rejected',
+      toolCall,
+      toolName,
+      args: parsedArgs.data,
+      output: describeMissingTool?.(toolName) ?? `Tool "${toolName}" not found`,
     };
   }
   const validationError = validateExecutableToolArgs(tool, parsedArgs.data);
@@ -673,17 +679,6 @@ function preflightToolCall(
     };
   }
   return { kind: 'runnable', toolCall, toolName, tool, args: parsedArgs.data };
-}
-
-function firstToolCallDescription(
-  describers: ReadonlySet<ToolCallDescriber>,
-  name: string,
-): string | undefined {
-  for (const describer of describers) {
-    const description = describer(name);
-    if (description !== undefined) return description;
-  }
-  return undefined;
 }
 
 export function parseToolCallArguments(raw: unknown): {

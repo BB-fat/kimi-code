@@ -1702,6 +1702,13 @@ export class AgentTestContext {
         pending.delete(id);
         this.resolvePendingRpc('toolCall', id, response);
       },
+      cancelPendingForTurn: (turnId) => {
+        for (const [id, interaction] of pending) {
+          if (interaction.origin?.turnId !== turnId) continue;
+          pending.delete(id);
+          this.resolvePendingRpc('toolCall', id, { cancelled: true, reason: 'turn_ended' });
+        }
+      },
       listPending: (kind) => {
         const interactions = [...pending.values()];
         return kind === undefined
@@ -2252,6 +2259,7 @@ function capabilityNames(capabilities: ModelCapability | undefined): string[] {
     capabilities.audio_in ? 'audio_in' : undefined,
     capabilities.thinking ? 'thinking' : undefined,
     capabilities.tool_use ? 'tool_use' : undefined,
+    capabilities.select_tools ? 'select_tools' : undefined,
   ].filter((capability): capability is string => capability !== undefined);
 }
 

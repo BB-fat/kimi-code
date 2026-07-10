@@ -4,8 +4,9 @@
  *
  * Appends v1-compatible loadable-tools diff announcements at turn boundaries
  * through `systemReminder`, hooks into `loop` before each step, reads
- * announcement text from `IAgentToolSelectService`, and observes turn /
- * compaction boundaries from `event`. Bound at Agent scope.
+ * announcement text from `IAgentToolSelectService`, and observes compaction
+ * boundaries from `event`. Turn boundaries need no state: every turn starts
+ * at loop step 1, which always evaluates injection. Bound at Agent scope.
  */
 
 import { InstantiationType } from '#/_base/di/extensions';
@@ -30,11 +31,6 @@ export class AgentToolSelectAnnouncementsService extends Disposable implements I
     @IAgentLoopService loopService: IAgentLoopService,
   ) {
     super();
-    this._register(
-      eventBus.subscribe('turn.started', () => {
-        this.needsBoundaryInjection = true;
-      }),
-    );
     this._register(
       eventBus.subscribe('compaction.completed', () => {
         this.needsBoundaryInjection = true;

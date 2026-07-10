@@ -1,5 +1,6 @@
 import { Disposable, type IDisposable } from "#/_base/di/lifecycle";
 import { InstantiationType } from '#/_base/di/extensions';
+import { IInstantiationService } from '#/_base/di/instantiation';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
 import { ILogService } from '#/_base/log/log';
 import { renderPrompt } from "#/_base/utils/render-prompt";
@@ -14,6 +15,7 @@ import {
   createCompactionSummaryMessage,
   isRealUserInput,
 } from '#/agent/contextMemory/compactionHandoff';
+import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentContextSizeService } from '#/agent/contextSize/contextSize';
@@ -31,6 +33,8 @@ import {
   type WillSetModelContext,
 } from '#/agent/profile/profile';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
+import { stripDynamicToolContext } from '#/agent/toolSelect/dynamicTools';
+import { IAgentToolSelectService } from '#/agent/toolSelect/toolSelect';
 import { IAgentTurnService } from '#/agent/turn/turn';
 import { IAgentActivityService } from '#/activity/activity';
 import { ISessionTodoService } from '#/session/todo/sessionTodo';
@@ -129,6 +133,7 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
   declare readonly _serviceBrand: undefined;
   readonly hooks: IAgentFullCompactionService['hooks'] = {
     onWillCompact: new OrderedHookSlot<FullCompactionTask>(),
+    onDidFinishCompaction: new OrderedHookSlot<FullCompactionTask>(),
   };
 
   private readonly strategy: CompactionStrategy;
@@ -145,6 +150,7 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
   // stop an overflow -> compact -> overflow loop when compaction can no
   // longer shrink the request below the model window.
   private consecutiveOverflowCompactions = 0;
+  private contextInjectorService: IAgentContextInjectorService | undefined;
 
   constructor(
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
@@ -153,6 +159,8 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
     @IAgentProfileService private readonly profile: IAgentProfileService,
     @IAgentSpineService private readonly spine: IAgentSpineService,
     @IAgentToolRegistryService private readonly toolRegistry: IAgentToolRegistryService,
+    @IAgentToolSelectService private readonly toolSelect: IAgentToolSelectService,
+    @IInstantiationService private readonly instantiation: IInstantiationService,
     @ISessionTodoService private readonly todo: ISessionTodoService,
     @ITelemetryService private readonly telemetry: ITelemetryService,
     @IAgentWireService private readonly wire: IWireService,
@@ -231,13 +239,13 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
   }
 
   private defaultTools(): readonly Tool[] {
-    return this.toolRegistry
-      .list()
-      .filter((tool) => this.profile.isToolActive(tool.name, tool.source))
+    return this.toolSelect
+      .shapeTools(this.toolRegistry.list())
       .map((tool) => ({
         name: tool.name,
         description: tool.description,
         parameters: tool.parameters ?? EMPTY_TOOL_PARAMETERS,
+        deferred: tool.deferred,
       }));
   }
 
@@ -500,7 +508,19 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
       } catch (error) {
         this.log.error('failed to refresh system prompt after compaction', { error });
       }
+      // Fallback floor when reinjection throws; raised below once the per-turn
+      // reminders are back.
       this.lastCompactedTokenCount = result.tokensAfter;
+      // Re-arm the per-turn injectors while the compaction still holds the
+      // context (before markCompleted), so the first post-compaction request —
+      // including a replayed deferred prompt's — already carries the goal
+      // reminder the compaction folded away.
+      await this.contextInjector.injectAfterCompaction();
+      // The reinjected reminders are part of the post-compaction floor: a
+      // baseline captured before this point would leave them outside the
+      // "nothing new since compaction" guard and checkAutoCompaction could
+      // re-trigger against a shape that cannot shrink.
+      this.lastCompactedTokenCount = this.tokenCountWithPending();
       if (!this.markCompleted(active)) {
         throw compactionCancelledReason(active);
       }
@@ -525,6 +545,12 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
         ...toKimiErrorPayload(error),
       });
       throw error;
+    } finally {
+      // Fires on completion, cancellation, AND failure so input deferred while
+      // the compaction held the context is never lost. `_compacting` is already
+      // null on every path, so a replayed launch starts a turn instead of
+      // re-buffering.
+      await this.hooks.onDidFinishCompaction.run(active);
     }
   }
 
@@ -774,6 +800,21 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
   private tokenCountWithPending(): number {
     return this.contextSize.get().size;
   }
+
+  /**
+   * Resolved lazily (not constructor-injected): materializing the injector
+   * from this constructor would reorder loop-hook registration across the
+   * dependency cascade (see AgentPromptService.fullCompaction for the same
+   * hazard).
+   */
+  private get contextInjector(): IAgentContextInjectorService {
+    if (this.contextInjectorService === undefined) {
+      this.contextInjectorService = this.instantiation.invokeFunction((accessor) =>
+        accessor.get(IAgentContextInjectorService),
+      );
+    }
+    return this.contextInjectorService;
+  }
 }
 
 function findAPIStatusError(error: unknown): APIStatusError | undefined {
@@ -813,39 +854,6 @@ function historySafeToCompact(
   if (current.length < original.length) return false;
   if (!original.every((message, index) => message === current[index])) return false;
   return current.slice(original.length).every(isRealUserInput);
-}
-
-const LOADABLE_TOOLS_TRIGGER = 'loadable-tools';
-
-function stripDynamicToolContext(
-  history: readonly ContextMessage[],
-): readonly ContextMessage[] {
-  if (!history.some((message) => hasDynamicToolSchema(message) || isLoadableToolsAnnouncement(message))) {
-    return history;
-  }
-  const out: ContextMessage[] = [];
-  for (const message of history) {
-    if (isLoadableToolsAnnouncement(message)) continue;
-    if (hasDynamicToolSchema(message)) {
-      const { tools: _tools, ...rest } = message;
-      void _tools;
-      if (rest.content.length === 0 && rest.toolCalls.length === 0) continue;
-      out.push(rest);
-      continue;
-    }
-    out.push(message);
-  }
-  return out;
-}
-
-function hasDynamicToolSchema(message: ContextMessage): boolean {
-  return message.tools !== undefined && message.tools.length > 0;
-}
-
-function isLoadableToolsAnnouncement(message: ContextMessage): boolean {
-  return (
-    message.origin?.kind === 'system_trigger' && message.origin.name === LOADABLE_TOOLS_TRIGGER
-  );
 }
 
 function shrinkCompactionHistoryAfterOverflow<T extends Message>(

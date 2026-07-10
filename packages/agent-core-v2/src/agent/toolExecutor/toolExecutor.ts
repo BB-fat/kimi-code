@@ -1,3 +1,11 @@
+/**
+ * `toolExecutor` domain (L3) — Agent-scope tool execution contract.
+ *
+ * Defines the public execution surface for provider tool calls, will/did
+ * execution hooks, tool-call result settlement, and preflight description
+ * extension points. Bound at Agent scope.
+ */
+
 import { createDecorator } from '#/_base/di/instantiation';
 import type { IDisposable } from '#/_base/di/lifecycle';
 import type { ToolResult } from '#/agent/tool/toolContract';
@@ -23,39 +31,30 @@ export interface ToolExecutionResult {
   readonly result: ToolResult;
 }
 
-/**
- * Wording hook for a tool call the executor will not run: it maps the tool
- * name to substitute result text; returning `undefined` declines so the
- * executor asks the next registered describer, then falls back to its
- * default wording.
- */
-export type ToolCallDescriber = (name: string) => string | undefined;
+export type MissingToolDescriber = (toolName: string) => string | undefined;
+export type UnavailableToolDescriber = (toolName: string) => string | undefined;
 
 export interface IAgentToolExecutorService {
   readonly _serviceBrand: undefined;
 
   execute(calls: ToolCall[], options: ToolExecutorExecuteOptions): AsyncIterable<ToolExecutionResult>;
 
-  /**
-   * Register a describer for calls whose tool name still resolves but must
-   * not execute right now (e.g. a progressive-disclosure tool that is
-   * visible but not loaded). Describers run in registration order *before*
-   * argument validation; the first non-undefined wording wins.
-   */
-  registerUnavailableToolDescriber(describer: ToolCallDescriber): IDisposable;
-
-  /**
-   * Register a describer for calls whose tool name resolves to no registered
-   * tool (e.g. a loaded MCP tool whose server disconnected). Runs at the
-   * not-found reject; the first non-undefined wording wins, keeping the
-   * default `Tool "<name>" not found` for plain unknown names.
-   */
-  registerMissingToolDescriber(describer: ToolCallDescriber): IDisposable;
-
   readonly hooks: {
     readonly onWillExecuteTool: OrderedHookSlot<ToolWillExecuteContext>;
     readonly onDidExecuteTool: OrderedHookSlot<ToolDidExecuteContext>;
   };
+
+  /**
+   * Single-slot hook for the "registered but currently unavailable" preflight
+   * message. A second registration overwrites the first; disposing the returned
+   * handle clears the slot only when the same describer still occupies it.
+   */
+  registerUnavailableToolDescriber(describer: UnavailableToolDescriber): IDisposable;
+  /**
+   * Single-slot hook for the tool-miss preflight message (e.g. a loaded tool
+   * whose server dropped). Same single-slot semantics as above.
+   */
+  registerMissingToolDescriber(describer: MissingToolDescriber): IDisposable;
 }
 
 export const IAgentToolExecutorService =

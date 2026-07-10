@@ -51,21 +51,6 @@ export class AgentToolSelectService extends Disposable implements IAgentToolSele
   ) {
     super();
     this._register(
-      toolExecutor.hooks.onWillExecuteTool.register('toolSelect', async (ctx, next) => {
-        if (!this.shouldIntercept(ctx.toolCall.name)) {
-          await next();
-          return;
-        }
-        const name = ctx.toolCall.name;
-        ctx.decision = {
-          syntheticResult: {
-            output: notLoadedToolOutput(name),
-            isError: true,
-          },
-        };
-      }),
-    );
-    this._register(
       toolExecutor.registerUnavailableToolDescriber((name) => this.describeUnavailableTool(name)),
     );
     this._register(
@@ -78,8 +63,16 @@ export class AgentToolSelectService extends Disposable implements IAgentToolSele
     );
     this._register(
       eventBus.subscribe('context.spliced', (splice) => {
-        if (splice.start === 0 && splice.deleteCount > 0) {
-          this.pendingLoaded.clear();
+        if (splice.deleteCount === 0 || this.pendingLoaded.size === 0) return;
+        // The pending set is only a defer-window lead over the history-backed
+        // ledger, so any deletion splice can falsify it: v2's undo slices the
+        // tail wholesale (v1 keeps `injection`-origin schema messages in place),
+        // which makes full-prefix detection insufficient. Re-fold the pending
+        // set against the surviving history — the event is published after the
+        // memory service has rewritten it.
+        const landed = collectLoadedDynamicToolNames(this.context.get());
+        for (const name of this.pendingLoaded) {
+          if (!landed.has(name)) this.pendingLoaded.delete(name);
         }
       }),
     );
@@ -116,13 +109,13 @@ export class AgentToolSelectService extends Disposable implements IAgentToolSele
   }
 
   shapeHistory(messages: readonly ContextMessage[]): readonly ContextMessage[] {
-    if (this.enabled()) return messages;
+    if (this.enabled()) return this.shapeActiveHistory(messages);
     return stripDynamicToolContext(messages);
   }
 
   load(names: readonly string[]): LoadToolsResult {
     const loadable = new Set(this.loadableToolNames());
-    const loaded = this.loadedToolNames();
+    const loaded = this.activeLoadedToolNames();
     const toLoad: string[] = [];
     const alreadyAvailable: string[] = [];
     const unknown: string[] = [];
@@ -170,10 +163,11 @@ export class AgentToolSelectService extends Disposable implements IAgentToolSele
     const source = this.toolRegistry.list().find((info) => info.name === name)?.source;
     if (source !== 'mcp') return false;
     if (!this.loadableToolNames().includes(name)) return false;
-    return !this.loadedToolNames().has(name);
+    return !this.activeLoadedToolNames().has(name);
   }
 
   private describeUnavailableTool(name: string): string | undefined {
+    if (this.isInactiveLoadedTool(name)) return inactiveLoadedToolOutput(name);
     if (!this.shouldIntercept(name)) return undefined;
     return notLoadedToolOutput(name);
   }
@@ -200,6 +194,60 @@ export class AgentToolSelectService extends Disposable implements IAgentToolSele
     const names = collectLoadedDynamicToolNames(this.context.get());
     for (const name of this.pendingLoaded) names.add(name);
     return names;
+  }
+
+  private activeLoadedToolNames(): Set<string> {
+    const names = this.loadedToolNames();
+    for (const name of names) {
+      if (!this.isLoadedToolActive(name)) names.delete(name);
+    }
+    return names;
+  }
+
+  private isInactiveLoadedTool(name: string): boolean {
+    if (!this.enabled()) return false;
+    return this.loadedToolNames().has(name) && !this.isLoadedToolActive(name);
+  }
+
+  private isLoadedToolActive(name: string): boolean {
+    return this.profile.isToolActive(name, 'mcp');
+  }
+
+  private shapeActiveHistory(messages: readonly ContextMessage[]): readonly ContextMessage[] {
+    let shaped: ContextMessage[] | undefined;
+    for (let i = 0; i < messages.length; i += 1) {
+      const message = messages[i]!;
+      const next = this.shapeActiveMessage(message);
+      if (next === message) {
+        if (shaped !== undefined) shaped.push(message);
+        continue;
+      }
+      if (shaped === undefined) shaped = messages.slice(0, i);
+      if (next !== undefined) shaped.push(next);
+    }
+    return shaped ?? messages;
+  }
+
+  private shapeActiveMessage(message: ContextMessage): ContextMessage | undefined {
+    const tools = message.tools;
+    if (tools === undefined || tools.length === 0) return message;
+
+    let kept: Tool[] | undefined;
+    for (let i = 0; i < tools.length; i += 1) {
+      const tool = tools[i]!;
+      if (this.isLoadedToolActive(tool.name)) {
+        if (kept !== undefined) kept.push(tool);
+        continue;
+      }
+      if (kept === undefined) kept = tools.slice(0, i);
+    }
+    if (kept === undefined) return message;
+    if (kept.length > 0) return { ...message, tools: kept };
+
+    const { tools: _tools, ...rest } = message;
+    void _tools;
+    if (rest.content.length === 0 && rest.toolCalls.length === 0) return undefined;
+    return rest;
   }
 
   private schemaOf(name: string): Tool | undefined {
@@ -234,6 +282,13 @@ function notLoadedToolOutput(name: string): string {
   return (
     `Tool "${name}" is available but not loaded. ` +
     `Call select_tools with ["${name}"] first, then call the tool.`
+  );
+}
+
+function inactiveLoadedToolOutput(name: string): string {
+  return (
+    `Tool "${name}" was loaded but is no longer active. ` +
+    'Ask the user to enable it before calling it again.'
   );
 }
 

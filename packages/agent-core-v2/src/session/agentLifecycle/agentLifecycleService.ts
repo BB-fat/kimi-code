@@ -47,6 +47,8 @@ import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceCo
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentActivityService, ISessionActivityKernel } from '#/activity/activity';
 import { IAgentProfileService } from '#/agent/profile/profile';
+import { IAgentToolSelectService } from '#/agent/toolSelect/toolSelect';
+import { IAgentToolSelectAnnouncementsService } from '#/agent/toolSelect/toolSelectAnnouncements';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import { IAgentBuiltinToolsRegistrar } from '#/agent/toolRegistry/builtinToolsRegistrar';
@@ -225,6 +227,8 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
     // first turn — otherwise plugin/session MCP servers would connect but their
     // tools would never register until something explicitly requests the service.
     handle.accessor.get(IAgentMcpService);
+    handle.accessor.get(IAgentToolSelectService);
+    handle.accessor.get(IAgentToolSelectAnnouncementsService);
     await mcpReady;
     // Force-instantiate the replay service so it attaches the
     // `ReplayTimelineModel` derived model before session resume replays this
