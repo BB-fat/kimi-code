@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { MASTER_ENV } from '#/app/flag/flagService';
 import type { ContextMessage } from '#/agent/contextMemory/types';
+import { MASTER_ENV } from '#/app/flag/flagService';
 import {
   _resetSpineViewOverrideForTests,
   appendSpineView,
@@ -9,6 +9,7 @@ import {
   IAgentWireService,
   loadSpineViewOverride,
   spineClose,
+  spineNext,
   spineOpen,
   spineRootCompact,
 } from '#/index';
@@ -50,7 +51,12 @@ describe('Spine projection fold', () => {
   it('replaces a closed node span with one memory message without mutating storage', () => {
     const ctx = testAgent();
     const idx = buildClosedNodeHistory(ctx);
-    wireNode(ctx, { id: '1.1.1', openedAt: idx.openCall, closedAt: idx.closeResult, memory: 'did A' });
+    wireNode(ctx, {
+      id: '1.1.1',
+      openedAt: idx.openCall,
+      closedAt: idx.closeResult,
+      memory: 'did A',
+    });
 
     const stored = ctx.context.get();
     const folded = fold(ctx);
@@ -76,7 +82,9 @@ describe('Spine projection fold', () => {
     const ctx = testAgent();
     const idx = buildNestedClosedHistory(ctx);
     const wire = ctx.get(IAgentWireService);
-    wire.dispatch(spineOpen({ id: '1.1.1', summary: 'parent', parentId: '1.1', openedAt: idx.parentOpen }));
+    wire.dispatch(
+      spineOpen({ id: '1.1.1', summary: 'parent', parentId: '1.1', openedAt: idx.parentOpen }),
+    );
     wire.dispatch(
       spineOpen({ id: '1.1.1.1', summary: 'child', parentId: '1.1.1', openedAt: idx.childOpen }),
     );
@@ -93,7 +101,12 @@ describe('Spine projection fold', () => {
     vi.stubEnv(SPINE_ENV, '0');
     const ctx = testAgent();
     const idx = buildClosedNodeHistory(ctx);
-    wireNode(ctx, { id: '1.1.1', openedAt: idx.openCall, closedAt: idx.closeResult, memory: 'did A' });
+    wireNode(ctx, {
+      id: '1.1.1',
+      openedAt: idx.openCall,
+      closedAt: idx.closeResult,
+      memory: 'did A',
+    });
 
     const folded = fold(ctx);
     expect(folded.some((m) => textOf(m).includes('<spine_memory>'))).toBe(false);
@@ -103,7 +116,12 @@ describe('Spine projection fold', () => {
   it('drops messages before the current epoch after a root compact', () => {
     const ctx = testAgent();
     const idx = buildClosedNodeHistory(ctx);
-    wireNode(ctx, { id: '1.1.1', openedAt: idx.openCall, closedAt: idx.closeResult, memory: 'did A' });
+    wireNode(ctx, {
+      id: '1.1.1',
+      openedAt: idx.openCall,
+      closedAt: idx.closeResult,
+      memory: 'did A',
+    });
     const summaryAt = append(ctx, userMessage('epoch summary'));
     const boundaryAt = ctx.context.get().length;
     append(ctx, userMessage('new epoch work'));
@@ -161,6 +179,149 @@ describe('Spine projection fold', () => {
     expect(spliced).not.toContain('Spine-managed');
     expect(spliced.startsWith('BASE SYSTEM')).toBe(true);
   });
+
+  it('replaces each sibling of a next-chain with its own memory', () => {
+    // `spine.next` gives the new sibling `openedAt == closedAt` of the node it
+    // replaces — the very index the fold jumps past after firing the previous
+    // span. Regression: only the first sibling folded; every later sibling
+    // stayed raw and its memory was never injected.
+    const ctx = testAgent();
+    append(ctx, userMessage('start'));
+    append(ctx, assistantText('A body 1'));
+    append(ctx, toolResult('a_2'));
+    append(ctx, assistantText('B body 1'));
+    append(ctx, toolResult('b_2'));
+    append(ctx, assistantText('C body 1'));
+    append(ctx, toolResult('c_2'));
+    append(ctx, assistantText('C body 3'));
+    append(ctx, userMessage('finished'));
+
+    const wire = ctx.get(IAgentWireService);
+    wire.dispatch(spineOpen({ id: '1.1.1', summary: 'task A', parentId: '1.1', openedAt: 1 }));
+    wire.dispatch(
+      spineNext({
+        closedId: '1.1.1',
+        closedAt: 3,
+        memory: 'mem A',
+        openedId: '1.1.2',
+        summary: 'task B',
+      }),
+    );
+    wire.dispatch(
+      spineNext({
+        closedId: '1.1.2',
+        closedAt: 5,
+        memory: 'mem B',
+        openedId: '1.1.3',
+        summary: 'task C',
+      }),
+    );
+    wire.dispatch(spineClose({ id: '1.1.3', closedAt: 7, memory: 'mem C' }));
+
+    const folded = fold(ctx);
+    const memories = folded.filter((m) => textOf(m).includes('<spine_memory>'));
+    expect(memories).toHaveLength(3);
+    expect(textOf(memories[0])).toContain('mem A');
+    expect(textOf(memories[1])).toContain('mem B');
+    expect(textOf(memories[2])).toContain('mem C');
+    for (const body of ['A body', 'B body', 'C body']) {
+      expect(folded.some((m) => textOf(m).includes(body))).toBe(false);
+    }
+    expect(textOf(folded[0])).toContain('[U1] start');
+    expect(textOf(folded[4])).toContain('[U2] finished');
+  });
+
+  it('folds a closed subtree once at the outermost closed node', () => {
+    // Guards the drain change: re-firing nested closed spans would corrupt the
+    // projection (double memory injection, wrong [U#] anchors).
+    const ctx = testAgent();
+    append(ctx, userMessage('start'));
+    append(ctx, assistantText('A body 1'));
+    append(ctx, toolResult('a_2'));
+    append(ctx, assistantText('B body 1'));
+    append(ctx, toolResult('b_2'));
+    append(ctx, assistantText('C body 1'));
+    append(ctx, toolResult('c_2'));
+    append(ctx, assistantText('C body 3'));
+    append(ctx, assistantText('parent tail 1'));
+    append(ctx, toolResult('p_2'));
+    append(ctx, userMessage('final'));
+
+    const wire = ctx.get(IAgentWireService);
+    wire.dispatch(spineOpen({ id: '1.1.1', summary: 'parent', parentId: '1.1', openedAt: 1 }));
+    wire.dispatch(spineOpen({ id: '1.1.1.1', summary: 'task A', parentId: '1.1.1', openedAt: 1 }));
+    wire.dispatch(
+      spineNext({
+        closedId: '1.1.1.1',
+        closedAt: 3,
+        memory: 'mem A',
+        openedId: '1.1.1.2',
+        summary: 'task B',
+      }),
+    );
+    wire.dispatch(
+      spineNext({
+        closedId: '1.1.1.2',
+        closedAt: 5,
+        memory: 'mem B',
+        openedId: '1.1.1.3',
+        summary: 'task C',
+      }),
+    );
+    wire.dispatch(spineClose({ id: '1.1.1.3', closedAt: 7, memory: 'mem C' }));
+    wire.dispatch(spineClose({ id: '1.1.1', closedAt: 9, memory: 'mem parent' }));
+
+    const folded = fold(ctx);
+    const memories = folded.filter((m) => textOf(m).includes('<spine_memory>'));
+    expect(memories).toHaveLength(1);
+    expect(textOf(memories[0])).toContain('mem parent');
+    for (const body of ['A body', 'B body', 'C body', 'parent tail']) {
+      expect(folded.some((m) => textOf(m).includes(body))).toBe(false);
+    }
+    expect(textOf(folded[0])).toContain('[U1] start');
+    expect(textOf(folded[2])).toContain('[U2] final');
+  });
+
+  it('skips nodes closed before the epoch boundary and still folds post-epoch nodes', () => {
+    // A node closed before the root compact belongs to the epoch summary: its
+    // memory must not resurface past the boundary, and its span must not pin
+    // the fold queue — the post-epoch node behind it must still fold. Both
+    // failed when spans only fired on an exact `openedAt` match.
+    const ctx = testAgent();
+    const epochOne = buildClosedNodeHistory(ctx);
+    wireNode(ctx, {
+      id: '1.1.1.1',
+      openedAt: epochOne.openCall,
+      closedAt: epochOne.closeResult,
+      memory: 'did A',
+    });
+    const summaryAt = append(ctx, userMessage('epoch summary'));
+    const boundaryAt = ctx.context.get().length;
+    append(ctx, userMessage('new epoch work'));
+    const bOpen = append(ctx, assistantToolCall('b_open', 'spine_open'));
+    append(ctx, toolResult('b_open'));
+    append(ctx, assistantText('B working'));
+    append(ctx, assistantToolCall('b_close', 'spine_close'));
+    const bClose = append(ctx, toolResult('b_close'));
+    append(ctx, userMessage('tail'));
+
+    const wire = ctx.get(IAgentWireService);
+    wire.dispatch(
+      spineRootCompact({ epoch: 2, epochStartAt: boundaryAt, epochMemoryAt: summaryAt }),
+    );
+    wire.dispatch(spineOpen({ id: '2.1.2', summary: 'task B', parentId: '2.1', openedAt: bOpen }));
+    wire.dispatch(spineClose({ id: '2.1.2', closedAt: bClose, memory: 'did B' }));
+
+    const folded = fold(ctx);
+    expect(textOf(folded[0])).toBe('epoch summary');
+    expect(folded.some((m) => textOf(m).includes('did A'))).toBe(false);
+    const memories = folded.filter((m) => textOf(m).includes('<spine_memory>'));
+    expect(memories).toHaveLength(1);
+    expect(textOf(memories[0])).toContain('did B');
+    expect(folded.some((m) => textOf(m).includes('B working'))).toBe(false);
+    expect(folded.some((m) => textOf(m).includes('new epoch work'))).toBe(true);
+    expect(folded.some((m) => textOf(m).includes('tail'))).toBe(true);
+  });
 });
 
 function fold(ctx: TestAgentContext): readonly ContextMessage[] {
@@ -172,7 +333,9 @@ function wireNode(
   input: { id: string; openedAt: number; closedAt: number; memory: string },
 ): void {
   const wire = ctx.get(IAgentWireService);
-  wire.dispatch(spineOpen({ id: input.id, summary: 'task A', parentId: '1.1', openedAt: input.openedAt }));
+  wire.dispatch(
+    spineOpen({ id: input.id, summary: 'task A', parentId: '1.1', openedAt: input.openedAt }),
+  );
   wire.dispatch(spineClose({ id: input.id, closedAt: input.closedAt, memory: input.memory }));
 }
 
@@ -214,7 +377,10 @@ function buildNestedClosedHistory(ctx: TestAgentContext): NestedClosedIndices {
 }
 
 async function configureLoop(ctx: TestAgentContext): Promise<void> {
-  ctx.configure({ provider: CATALOGUED_PROVIDER, modelCapabilities: CATALOGUED_MODEL_CAPABILITIES });
+  ctx.configure({
+    provider: CATALOGUED_PROVIDER,
+    modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+  });
   await ctx.rpc.setPermission({ mode: 'yolo' });
 }
 

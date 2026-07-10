@@ -5,9 +5,13 @@
  * Folding a node out of the projected view must not mean losing its work: every
  * closed node is serialized to `<workDir>/spine/<agentId>/<node-id>.md` through
  * the `hostFs` bridge, and the absolute path is published back into the tree so
- * the model can `Read` the original trace on demand. Writes go through the host
- * filesystem bridge (no direct `node:fs`); content rendering is a pure function.
- * Consumed by the `spine` service's close / next commit path.
+ * the model can `Read` the original trace on demand. A root compaction gets the
+ * same treatment at epoch granularity: the history the new epoch boundary folds
+ * out of the projection is serialized to `<workDir>/spine/<agentId>/<epoch>.md`
+ * with the epoch summary on top, so details the summary dropped stay one `Read`
+ * away. Writes go through the host filesystem bridge (no direct `node:fs`);
+ * content rendering is a pure function. Consumed by the `spine` service's
+ * close / next commit path and its root-compact archive path.
  */
 
 import { dirname, resolve } from 'pathe';
@@ -24,6 +28,34 @@ export function spineArchivePath(workDir: string, agentId: string, nodeId: strin
 export interface SpineArchiveContentInput {
   readonly node: SpineNode;
   readonly messages: readonly ContextMessage[];
+}
+
+export interface SpineEpochArchiveInput {
+  readonly epoch: number;
+  readonly epochStartAt: number;
+  readonly epochMemoryAt: number;
+  readonly summary: string;
+  readonly messages: readonly ContextMessage[];
+}
+
+export function buildEpochArchiveContent(input: SpineEpochArchiveInput): string {
+  const lines: string[] = [
+    `# Spine Root Epoch ${String(input.epoch)}`,
+    '',
+    `- epoch_start_at: ${String(input.epochStartAt)}`,
+    `- epoch_memory_at: ${String(input.epochMemoryAt)}`,
+    '',
+    '## Epoch Summary',
+    '',
+    input.summary,
+    '',
+    '## Trajectory',
+    '',
+  ];
+  for (const message of input.messages) {
+    lines.push(...renderMessage(message));
+  }
+  return lines.join('\n');
 }
 
 export function buildArchiveContent(input: SpineArchiveContentInput): string {

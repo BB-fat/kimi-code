@@ -10,10 +10,26 @@
  * synthetic `<spine_status>` orientation line. The stored history is never
  * mutated; token numbers for the status line are precomputed by the `spine`
  * service and passed in. Consumed by `spineService.fold`.
+ *
+ * Span-firing invariants: a span closed entirely before the current root
+ * epoch is owned by the epoch summary and is skipped silently — left queued,
+ * it would pin the span scan and keep every post-epoch span raw forever.
+ * `spine.next` siblings share one boundary index (the closing node's
+ * `closedAt` is the new sibling's `openedAt`), so a span fires once the scan
+ * has reached or passed its `openedAt`; otherwise every sibling after the
+ * first in a next-chain would stay raw and its memory never injected. A span
+ * fully behind the scan is late-drained: its memory is emitted, but the
+ * current message still goes through normal handling instead of being
+ * skipped.
+ *
+ * `countUserAnchors` counts the real user requests in a (projected) message
+ * list — i.e. the highest `[U#]` anchor a model looking at that view can
+ * legitimately cite, since the fold numbers surviving user requests
+ * `[U1]..[Un]` in order.
  */
 
-import type { ContentPart } from '#/app/llmProtocol/message';
 import type { ContextMessage } from '#/agent/contextMemory/types';
+import type { ContentPart } from '#/app/llmProtocol/message';
 
 import type { SpineNode, SpineState } from './spineOps';
 import { parentNodeId } from './spineTree';
@@ -71,13 +87,19 @@ export function foldSpine(
       continue;
     }
 
-    const span = spans[spanIndex];
-    if (span !== undefined && i === span.openedAt) {
+    let span = spans[spanIndex];
+    while (span !== undefined && span.closedAt < input.state.epochStartAt) {
+      spanIndex += 1;
+      span = spans[spanIndex];
+    }
+    if (span !== undefined && span.openedAt <= i) {
       const memoryMessage = spineMemoryMessage(span.node);
       if (memoryMessage !== undefined) out.push(memoryMessage);
-      i = span.closedAt;
       spanIndex += 1;
-      continue;
+      if (span.closedAt >= i) {
+        i = span.closedAt;
+        continue;
+      }
     }
 
     if (isUserRequest(message)) {
@@ -98,11 +120,7 @@ export function foldSpine(
 function outermostClosedSpans(state: SpineState): readonly ClosedSpan[] {
   const closed = new Map<string, SpineNode>();
   for (const node of Object.values(state.nodes)) {
-    if (
-      node.closedAt !== undefined &&
-      node.openedAt >= 0 &&
-      node.memory !== undefined
-    ) {
+    if (node.closedAt !== undefined && node.openedAt >= 0 && node.memory !== undefined) {
       closed.set(node.id, node);
     }
   }
@@ -142,24 +160,22 @@ function spineMemoryMessage(node: SpineNode): ContextMessage | undefined {
   };
 }
 
-function isUserRequest(message: ContextMessage): boolean {
+export function isUserRequest(message: ContextMessage): boolean {
   return message.role === 'user' && message.origin?.kind === 'user';
 }
 
-function annotateUserRequest(
-  message: ContextMessage,
-  anchorNumber: number,
-): ContextMessage {
+export function countUserAnchors(messages: readonly ContextMessage[]): number {
+  return messages.filter(isUserRequest).length;
+}
+
+function annotateUserRequest(message: ContextMessage, anchorNumber: number): ContextMessage {
   const anchor = `[U${String(anchorNumber)}] `;
   const content = prefixFirstText(message.content, anchor);
   if (content === message.content) return message;
   return { ...message, content };
 }
 
-function prefixFirstText(
-  content: readonly ContentPart[],
-  anchor: string,
-): ContentPart[] {
+function prefixFirstText(content: readonly ContentPart[], anchor: string): ContentPart[] {
   const index = content.findIndex((part) => part.type === 'text');
   if (index < 0) {
     return [{ type: 'text', text: anchor.trimEnd() }, ...content];

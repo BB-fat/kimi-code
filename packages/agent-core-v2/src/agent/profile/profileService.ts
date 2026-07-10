@@ -17,7 +17,9 @@
  * / `warning` events now ride `IEventBus` (`agent.status.updated` canonical in
  * `usageOps`). `chdir` and
  * `emitStatusUpdated` run live-only after the dispatch, so `wire.replay`
- * rebuilds the Models silently.
+ * rebuilds the Models silently. `setModel` awaits the `onWillSetModel` hook
+ * slot between resolving the target model and switching the alias, giving
+ * consumers a window where the outgoing model is still the active provider.
  * Bound at Agent scope.
  */
 
@@ -33,6 +35,7 @@ import { IModelResolver } from '#/app/model/modelResolver';
 import picomatch from 'picomatch';
 
 import { ErrorCodes, KimiError } from "#/errors";
+import { createHooks } from '#/hooks';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
 import { resolveThinkingEffort, resolveThinkingKeep } from './thinking';
@@ -93,6 +96,8 @@ declare module '#/app/event/eventBus' {
 
 export class AgentProfileService implements IAgentProfileService {
   declare readonly _serviceBrand: undefined;
+
+  readonly hooks: IAgentProfileService['hooks'] = createHooks(['onWillSetModel']);
 
   private optionsValue: ProfileServiceOptions = {};
   // Live overlay of ephemeral per-tool deltas (`addActiveTool` /
@@ -192,6 +197,11 @@ export class AgentProfileService implements IAgentProfileService {
       await this.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: alias });
       this.telemetry.track('model_switch', { model: alias });
     } else if (this.modelAlias !== alias) {
+      await this.hooks.onWillSetModel.run({
+        currentAlias: this.modelAlias,
+        nextAlias: alias,
+        nextMaxContextTokens: model.capabilities.max_context_tokens,
+      });
       this.update({ modelAlias: alias });
       this.telemetry.track('model_switch', { model: alias });
     }

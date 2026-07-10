@@ -7,12 +7,22 @@
  * transition; the `loop.afterStep` hook then commits it (`spine.open` /
  * `spine.close` / `spine.next`) once the matching assistant tool-call and tool
  * result have both landed in `contextMemory`, so the tree moves only on
- * observed evidence. Reads the cursor and node layout through
+ * observed evidence. Acceptance validates non-empty bodies, the cursor
+ * position, and — as the minimal provenance check — that every `[U#]`
+ * citation in a close / next memory resolves to a real user request in the
+ * current projected view, so a fabricated or folded-away anchor can never
+ * enter the tree. Reads the cursor and node layout through
  * `wire.getModel(SpineModel)`, writes through `wire.dispatch(spineOpen(...))`
  * etc., records each node's provider-token baseline via `contextSize`,
- * assembles continuation memory with `spineTree.assembleMemoryBody`, and
- * renders the read-only `spine_tree` view. Hooks self-check the `KIMI_CODE_SPINE`
- * gate so a disabled spine never observes history. Bound at Agent scope.
+ * assembles continuation memory with `spineTree.assembleMemoryBody`, archives
+ * each closed node's trajectory to disk, and — for root compactions — archives
+ * the history the new epoch boundary folds away (`archiveEpochRoot`), with the
+ * path published back onto the new epoch node so the folded context stays one
+ * `Read` away. Renders the read-only `spine_tree` view across every root epoch
+ * (current first by numeric order), so a superseded epoch's closed-node
+ * archives stay discoverable after a root compaction. Hooks self-check the
+ * `KIMI_CODE_SPINE` gate so a disabled spine never observes history. Bound at
+ * Agent scope.
  */
 
 import { Disposable } from '#/_base/di/lifecycle';
@@ -37,8 +47,14 @@ import {
   IAgentSpineService,
   type SpineTransitionResult,
 } from './spine';
-import { buildArchiveContent, spineArchivePath, writeNodeArchive } from './spineArchive';
-import { foldSpine, type SpineFoldStatus } from './spineFold';
+import {
+  buildArchiveContent,
+  buildEpochArchiveContent,
+  spineArchivePath,
+  writeNodeArchive,
+  type SpineEpochArchiveInput,
+} from './spineArchive';
+import { countUserAnchors, foldSpine, type SpineFoldStatus } from './spineFold';
 import {
   SpineModel,
   spineClose,
@@ -144,6 +160,8 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     const trimmed = memory.trim();
     if (trimmed.length === 0) return reject('close memory must not be empty.');
     if (isRootEpoch(this.cursorId())) return REJECT_ROOT_EPOCH;
+    const anchorGuard = this.anchorReferenceGuard('close', trimmed);
+    if (anchorGuard !== null) return anchorGuard;
     this.pending = { kind: 'close', toolCallId, memory: trimmed };
     return { accepted: true };
   }
@@ -156,16 +174,17 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     if (trimmedSummary.length === 0) return reject('next summary must not be empty.');
     if (trimmedMemory.length === 0) return reject('next memory must not be empty.');
     if (isRootEpoch(this.cursorId())) return REJECT_ROOT_EPOCH;
+    const anchorGuard = this.anchorReferenceGuard('next', trimmedMemory);
+    if (anchorGuard !== null) return anchorGuard;
     this.pending = { kind: 'next', toolCallId, summary: trimmedSummary, memory: trimmedMemory };
     return { accepted: true };
   }
 
   renderTree(): string {
     const state = this.state();
-    const rootId = String(state.rootEpoch);
     return renderTree({
       cursorId: this.cursorId(),
-      rootIds: state.nodes[rootId] === undefined ? [] : [rootId],
+      rootIds: epochRootIds(state),
       resolve: (id) => this.nodeView(state, id),
     });
   }
@@ -208,6 +227,30 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     return null;
   }
 
+  /**
+   * Provenance check for `[U#]` citations in a continuation memory: the fold
+   * numbers surviving real user requests in the projected view, so a citation
+   * is only resolvable (for the model now and for whatever reads the memory
+   * later) if it points at an anchor that exists in the current projection.
+   * Counting happens over the folded view, not the raw history — user requests
+   * already folded into a `<spine_memory>` or a previous epoch carry no anchor.
+   */
+  private anchorReferenceGuard(kind: 'close' | 'next', memory: string): SpineTransitionResult | null {
+    const maxAnchor = countUserAnchors(this.fold(this.context.get()));
+    const invalid = invalidAnchorReferences(memory, maxAnchor);
+    if (invalid.length === 0) return null;
+    const refs = invalid.map((n) => `[U${String(n)}]`).join(', ');
+    const available =
+      maxAnchor === 0
+        ? 'no numbered user requests'
+        : `only [U1] through [U${String(maxAnchor)}]`;
+    return reject(
+      `${kind} memory references ${refs}, but the current view contains ${available}. ` +
+        `[U#] references must point at user requests visible in the current projection; ` +
+        `describe folded-away context by content or via the node's archive path instead.`,
+    );
+  }
+
   private state(): SpineState {
     return this.wire.getModel(SpineModel);
   }
@@ -224,10 +267,11 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
   private nodeView(state: SpineState, id: string): SpineTreeNodeView | undefined {
     const node = state.nodes[id];
     if (node === undefined) return undefined;
+    const supersededEpoch = isRootEpoch(id) && id !== String(state.rootEpoch);
     return {
       id: node.id,
       summary: node.summary,
-      closed: node.closedAt !== undefined,
+      closed: node.closedAt !== undefined || supersededEpoch,
       archivePath: node.archivePath,
       tokenCost: undefined,
       children: node.children
@@ -320,6 +364,18 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     );
   }
 
+  async archiveEpochRoot(input: SpineEpochArchiveInput): Promise<string | undefined> {
+    if (!this.enabled) return undefined;
+    const path = spineArchivePath(this.workspace.workDir, this.agentScope.agentId, String(input.epoch));
+    const content = buildEpochArchiveContent(input);
+    try {
+      await writeNodeArchive(this.hostFs, path, content);
+      return path;
+    } catch {
+      return undefined;
+    }
+  }
+
   private async archiveNode(node: SpineNode): Promise<string | undefined> {
     const path = spineArchivePath(this.workspace.workDir, this.agentScope.agentId, node.id);
     const openedAt = Math.max(0, node.openedAt);
@@ -333,6 +389,12 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
       return undefined;
     }
   }
+}
+
+function epochRootIds(state: SpineState): readonly string[] {
+  return Object.keys(state.nodes)
+    .filter((id) => isRootEpoch(id))
+    .sort((a, b) => Number(a) - Number(b));
 }
 
 function topOf(state: SpineState): string {
@@ -380,6 +442,15 @@ function findEvidence(
     }
   }
   return null;
+}
+
+function invalidAnchorReferences(memory: string, maxAnchor: number): readonly number[] {
+  const invalid = new Set<number>();
+  for (const match of memory.matchAll(/\[U(\d+)\]/g)) {
+    const n = Number.parseInt(match[1] ?? '', 10);
+    if (!Number.isFinite(n) || n < 1 || n > maxAnchor) invalid.add(n);
+  }
+  return [...invalid].sort((a, b) => a - b);
 }
 
 function reject(reason: string): SpineTransitionResult {

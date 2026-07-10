@@ -19,12 +19,17 @@ import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentContextSizeService } from '#/agent/contextSize/contextSize';
 import { contextSizeMeasured } from '#/agent/contextSize/contextSizeOps';
 import { isSpineEnabled } from '#/agent/spine/flag';
+import { IAgentSpineService } from '#/agent/spine/spine';
 import { SpineModel, spineRootCompact } from '#/agent/spine/spineOps';
 import { IAgentLLMRequesterService, type LLMRequestFinish } from '#/agent/llmRequester/llmRequester';
 import { retryBackoffDelays, sleepForRetry } from '#/agent/llmRequester/retry';
-import { IAgentLoopService, type LoopErrorContext } from '#/agent/loop/loop';
+import { IAgentLoopService, type AfterStepContext, type LoopErrorContext } from '#/agent/loop/loop';
 import { isAbortError, isContextOverflowError } from '#/agent/loop/errors';
-import { IAgentProfileService, type ProfileModelContext } from '#/agent/profile/profile';
+import {
+  IAgentProfileService,
+  type ProfileModelContext,
+  type WillSetModelContext,
+} from '#/agent/profile/profile';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { IAgentTurnService } from '#/agent/turn/turn';
 import { IAgentActivityService } from '#/activity/activity';
@@ -93,10 +98,19 @@ const EMPTY_TOOL_PARAMETERS: Record<string, unknown> = {
 
 type CompactionTelemetryProperties = Record<string, string | number | boolean | undefined>;
 
+/**
+ * Why a compaction was cancelled: `'abort'` for user / lane aborts,
+ * `'history_changed'` when the context moved under the in-flight summary
+ * request (the race guard in `compactionRound`). First writer wins — whichever
+ * trigger actually landed first owns the attribution.
+ */
+type CompactionCancelReason = 'abort' | 'history_changed';
+
 interface ActiveCompaction extends FullCompactionTask {
   blockedByTurn: boolean;
   /** Background-activity registration with the activity kernel (I2 visibility). */
   bgRegistration?: IDisposable;
+  cancelReason?: CompactionCancelReason;
 }
 
 interface CompactionAttemptResult {
@@ -137,6 +151,7 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
     @IAgentContextSizeService private readonly contextSize: IAgentContextSizeService,
     @IAgentLLMRequesterService private readonly llmRequester: IAgentLLMRequesterService,
     @IAgentProfileService private readonly profile: IAgentProfileService,
+    @IAgentSpineService private readonly spine: IAgentSpineService,
     @IAgentToolRegistryService private readonly toolRegistry: IAgentToolRegistryService,
     @ISessionTodoService private readonly todo: ISessionTodoService,
     @ITelemetryService private readonly telemetry: ITelemetryService,
@@ -154,14 +169,20 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
       this.eventBus.subscribe('turn.started', () => this.resetForTurn()),
     );
     this._register(
+      this.profile.hooks.onWillSetModel.register('full-compaction', async (ctx, next) => {
+        await this.preCompactForModelDownshift(ctx);
+        await next();
+      }),
+    );
+    this._register(
       loopService.hooks.beforeStep.register('full-compaction', async (ctx, next) => {
         await this.beforeStep(ctx.signal, ctx.turnId);
         await next();
       }),
     );
     this._register(
-      loopService.hooks.afterStep.register('full-compaction', async (_ctx, next) => {
-        await this.afterStep();
+      loopService.hooks.afterStep.register('full-compaction', async (ctx, next) => {
+        await this.afterStep(ctx);
         await next();
       }),
     );
@@ -300,8 +321,9 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
     return true;
   }
 
-  private cancelActive(active: ActiveCompaction): boolean {
+  private cancelActive(active: ActiveCompaction, reason: CompactionCancelReason = 'abort'): boolean {
     if (this._compacting !== active) return false;
+    active.cancelReason ??= reason;
     this.wire.dispatch(fullCompactionCancel({}));
     this._compacting = null;
     active.bgRegistration?.dispose();
@@ -374,12 +396,48 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
     }
   }
 
-  private async afterStep(): Promise<void> {
+  /**
+   * `profile.onWillSetModel` handler: switching to a model whose window is
+   * smaller than the live context would make the next step overflow and force
+   * the compaction summary request itself through the overflow-shrink ladder
+   * against the smaller window. Compact instead while the outgoing
+   * (larger-window) model is still the active provider, so the summary covers
+   * the full history in one shot. Failures here must not veto the switch —
+   * the next step's overflow recovery remains as the fallback.
+   */
+  private async preCompactForModelDownshift(context: WillSetModelContext): Promise<void> {
+    if (this._compacting !== null) return;
+    // Mid-turn switches can't block here; the running turn's overflow path
+    // handles the smaller window.
+    if (this.turn.getActiveTurn() !== undefined) return;
+    if (this.context.get().length === 0) return;
+    const nextMax = context.nextMaxContextTokens;
+    if (nextMax === undefined || nextMax <= 0) return;
+    if (nextMax >= this.getEffectiveMaxContextTokens()) return;
+    if (!this.strategy.shouldCompactForWindow(this.tokenCountWithPending(), nextMax)) return;
+    this.begin({ source: 'auto' });
+    try {
+      await this.block();
+    } catch (error) {
+      this.log.warn('Pre-compaction before model downshift failed; switching model anyway.', {
+        error,
+      });
+    }
+  }
+
+  private async afterStep(context: AfterStepContext): Promise<void> {
     // A completed step means a request succeeded, so any prior
     // overflow -> compact cycle produced a request that now fits; clear the
     // loop guard.
     this.consecutiveOverflowCompactions = 0;
-    if (this.strategy.checkAfterStep) {
+    // Only compact mid-turn when the turn will actually continue. A step whose
+    // response carries no tool calls ends the turn; compacting there spends a
+    // summary request on a finished turn and swaps still-fresh context for a
+    // lossy summary moments before the user reads it. Deferring is safe: the
+    // next turn's beforeStep re-evaluates the same thresholds pre-turn (and
+    // blocks if the hard limit is reached), mirroring the loop's own
+    // `stopReason === 'tool_calls'` continuation rule.
+    if (this.strategy.checkAfterStep && context.finishReason === 'tool_calls') {
       this.checkAutoCompaction(false);
     }
   }
@@ -583,7 +641,7 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
       if (!historySafeToCompact(this.context.get(), originalHistory)) {
         const active = this._compacting;
         if (active !== null) {
-          this.cancelActive(active);
+          this.cancelActive(active, 'history_changed');
         }
         throw compactionCancelledReason(active);
       }
@@ -591,7 +649,7 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
       const summary = this.postProcessSummary(attempt.summary);
       const normalizedDroppedCount = droppedCount === 0 ? undefined : droppedCount;
       const result = isSpineEnabled()
-        ? this.applyRootCompaction(summary, originalHistory.length, tokensBefore, normalizedDroppedCount)
+        ? await this.applyRootCompaction(summary, originalHistory.length, tokensBefore, normalizedDroppedCount)
         : this.context.applyCompaction({
             summary,
             contextSummary: buildCompactionSummaryText(summary),
@@ -615,8 +673,7 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
       });
       return result;
     } catch (error) {
-      if (isAbortError(error)) throw error;
-      this.telemetry.track('compaction_failed', {
+      const failedTelemetry = (category: string): CompactionTelemetryProperties => ({
         source: data.source,
         tokens_before: tokensBefore,
         duration_ms: Date.now() - startedAt,
@@ -624,30 +681,65 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
         retry_count: retryCount,
         thinking_effort: this.profile.data().thinkingLevel,
         error_type: error instanceof Error ? error.name : 'Unknown',
+        error_category: category,
       });
+      if (isAbortError(error)) {
+        // Race cancels (history changed under the in-flight summary request)
+        // ride the abort path but are not user aborts: record them as their
+        // own failure category instead of letting them vanish silently. User
+        // aborts stay untracked, as before.
+        if (active.cancelReason === 'history_changed') {
+          this.telemetry.track('compaction_failed', failedTelemetry('history_changed'));
+        }
+        throw error;
+      }
+      this.telemetry.track('compaction_failed', failedTelemetry('summary_generation'));
       if (isKimiError(error) && error.code === ErrorCodes.AUTH_LOGIN_REQUIRED) throw error;
       throw new KimiError(ErrorCodes.COMPACTION_FAILED, String(error), { cause: error });
     }
   }
 
-  private applyRootCompaction(
+  private async applyRootCompaction(
     summary: string,
     compactedCount: number,
     tokensBefore: number,
     droppedCount: number | undefined,
-  ): CompactionResult {
+  ): Promise<CompactionResult> {
     const contextSummary = buildCompactionSummaryText(summary);
     const summaryMessage = createCompactionSummaryMessage(contextSummary);
     const summaryAt = this.context.get().length;
+    // The epoch boundary folds everything before `epochStartAt` out of the
+    // projection except the summary message itself — snapshot that span before
+    // appending so the epoch archive records exactly what the model stops
+    // seeing.
+    const foldedMessages = this.context.get().slice(0, summaryAt);
     this.context.append(summaryMessage);
     const epochStartAt = this.context.get().length;
     const tokensAfter = estimateTokensForMessages([summaryMessage]);
     const spineState = this.wire.getModel(SpineModel);
+    const epoch = spineState.rootEpoch + 1;
+    const archivePath = await this.spine.archiveEpochRoot({
+      epoch,
+      epochStartAt,
+      epochMemoryAt: summaryAt,
+      summary,
+      messages: foldedMessages,
+    });
+    if (archivePath === undefined) {
+      // `archiveEpochRoot` only declines when spine is disabled (impossible on
+      // this path) or the hostFs write failed — surface the latter so a
+      // missing epoch archive is diagnosable instead of silently absent.
+      this.log.warn(
+        'Spine epoch archive could not be written; root compaction proceeds without an archive path.',
+        { epoch },
+      );
+    }
     this.wire.dispatch(
       spineRootCompact({
-        epoch: spineState.rootEpoch + 1,
+        epoch,
         epochStartAt,
         epochMemoryAt: summaryAt,
+        archivePath,
       }),
       contextSizeMeasured({ length: epochStartAt, tokens: tokensAfter, kind: 'estimate' }),
     );

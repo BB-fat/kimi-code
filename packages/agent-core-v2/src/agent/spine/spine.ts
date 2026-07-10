@@ -6,12 +6,16 @@
  * control tools and the tree state machine: the tools hand validated intent to
  * the service (which registers a per-step pending transition) and read the
  * rendered tree back; the service commits those transitions after each step
- * once the matching tool result has landed in `contextMemory`. Bound at Agent
- * scope.
+ * once the matching tool result has landed in `contextMemory`. It also owns
+ * archive publication: node archives on close / next, and the epoch archive
+ * the full-compaction flow publishes before dispatching `spine.root_compact`.
+ * Bound at Agent scope.
  */
 
 import { createDecorator } from '#/_base/di/instantiation';
 import type { ContextMessage } from '#/agent/contextMemory/types';
+
+import type { SpineEpochArchiveInput } from './spineArchive';
 
 export const SPINE_TOOL_OPEN = 'spine_open';
 export const SPINE_TOOL_CLOSE = 'spine_close';
@@ -42,6 +46,8 @@ export interface IAgentSpineService {
   acceptOpen(summary: string, toolCallId: string): SpineTransitionResult;
   acceptClose(memory: string, toolCallId: string): SpineTransitionResult;
   acceptNext(summary: string, memory: string, toolCallId: string): SpineTransitionResult;
+
+  archiveEpochRoot(input: SpineEpochArchiveInput): Promise<string | undefined>;
 
   renderTree(): string;
 

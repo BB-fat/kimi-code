@@ -30,6 +30,8 @@ export const DEFAULT_COMPACTION_CONFIG: CompactionConfig = {
 export interface CompactionStrategy {
   shouldCompact(usedSize: number): boolean;
   shouldBlock(usedSize: number): boolean;
+  /** Would `usedSize` trigger compaction against an arbitrary context window? */
+  shouldCompactForWindow(usedSize: number, maxContextTokens: number): boolean;
   computeCompactCount(messages: readonly Message[], source: CompactionSource): number;
   reduceCompactOnOverflow(messages: readonly Message[]): number;
   readonly checkAfterStep: boolean;
@@ -46,6 +48,10 @@ export class RuntimeCompactionStrategy implements CompactionStrategy {
 
   shouldBlock(usedSize: number): boolean {
     return this.delegate().shouldBlock(usedSize);
+  }
+
+  shouldCompactForWindow(usedSize: number, maxContextTokens: number): boolean {
+    return new DefaultCompactionStrategy(() => maxContextTokens, this.config()).shouldCompact(usedSize);
   }
 
   computeCompactCount(messages: readonly Message[], source: CompactionSource): number {
@@ -113,6 +119,10 @@ export class DefaultCompactionStrategy implements CompactionStrategy {
       usedSize >= this.maxSize * this.config.triggerRatio ||
       this.shouldUseReservedContext(usedSize)
     );
+  }
+
+  shouldCompactForWindow(usedSize: number, maxContextTokens: number): boolean {
+    return new DefaultCompactionStrategy(() => maxContextTokens, this.config).shouldCompact(usedSize);
   }
 
   shouldBlock(usedSize: number): boolean {

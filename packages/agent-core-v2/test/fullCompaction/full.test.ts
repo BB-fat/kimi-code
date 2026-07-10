@@ -2,6 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'pathe';
 
+import { DEFAULT_AGENT_PROFILE_NAME } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import { UNKNOWN_CAPABILITY } from '#/app/llmProtocol/capability';
 import { APIConnectionError, APIContextOverflowError, APIStatusError } from '#/app/llmProtocol/errors';
 import { type Message, type StreamedMessagePart, type ToolCall } from '#/app/llmProtocol/message';
@@ -38,6 +39,8 @@ const CATALOGUED_PROVIDER = {
   baseUrl: 'https://api.example/v1',
   model: 'kimi-code',
 } as const;
+const BIG_WINDOW_PROVIDER = { ...CATALOGUED_PROVIDER, model: 'big-model' } as const;
+const SMALL_WINDOW_PROVIDER = { ...CATALOGUED_PROVIDER, model: 'small-model' } as const;
 const CATALOGUED_MODEL_CAPABILITIES = {
   image_in: true,
   video_in: true,
@@ -1319,6 +1322,7 @@ describe('FullCompaction', () => {
 
   it('cancels when a droppable user-role tail is appended during the summary request', async () => {
     let ctx!: TestAgentContext;
+    const telemetryRecords: TelemetryRecord[] = [];
     const generate: GenerateFn = async () => {
       ctx.appendSystemReminder('RACE-NOTIFY-OUTPUT', {
         kind: 'injection',
@@ -1326,7 +1330,7 @@ describe('FullCompaction', () => {
       });
       return textResult('Stale compacted summary.');
     };
-    ctx = testAgent({ generate });
+    ctx = testAgent({ generate, telemetry: recordingTelemetry(telemetryRecords) });
     ctx.configure({
       provider: CATALOGUED_PROVIDER,
       modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
@@ -1342,7 +1346,42 @@ describe('FullCompaction', () => {
       'RACE-NOTIFY-OUTPUT',
     );
     expect(countEvents(ctx.newEvents(), 'full_compaction.complete')).toBe(0);
+    // A history-changed race cancel is not a user abort: it must be visible in
+    // telemetry as its own failure category instead of vanishing down the
+    // abort path.
+    expect(telemetryRecords).toContainEqual({
+      event: 'compaction_failed',
+      properties: expect.objectContaining({ error_category: 'history_changed' }),
+    });
     await ctx.expectResumeMatches();
+  });
+
+  it('classifies summary generation failures in compaction telemetry', async () => {
+    const telemetryRecords: TelemetryRecord[] = [];
+    const generate: GenerateFn = async () => {
+      throw new Error('summary backend exploded');
+    };
+    const ctx = testAgent({ generate, telemetry: recordingTelemetry(telemetryRecords) });
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+    });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+
+    // beginCompaction resolves once the worker starts; the generation failure
+    // surfaces asynchronously, with telemetry recorded before the worker
+    // cancels the compaction.
+    const failed = ctx.once('full_compaction.cancel');
+    await ctx.rpc.beginCompaction({});
+    await failed;
+
+    expect(telemetryRecords).toContainEqual({
+      event: 'compaction_failed',
+      properties: expect.objectContaining({
+        error_category: 'summary_generation',
+        error_type: 'Error',
+      }),
+    });
   });
 
   it('blocks the turn until auto compaction finishes', async () => {
@@ -1691,6 +1730,154 @@ describe('FullCompaction', () => {
       answerCall?.history.map(messageText).some((text) => text.includes('Reserved compacted summary.')),
     ).toBe(true);
     await ctx.expectResumeMatches();
+  });
+
+  it('skips after-step auto compaction when the turn ends without follow-up tool calls', async () => {
+    const ctx = testAgent({
+      initialConfig: {
+        providers: {},
+        loopControl: { compactionTriggerRatio: 0.5 },
+      },
+    });
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: {
+        ...CATALOGUED_MODEL_CAPABILITIES,
+        max_context_tokens: 2_000,
+      },
+    });
+    // ~1.1K tokens of history: over the 0.5 trigger once measured, under the
+    // 0.85 block, so only the after-step path could ever fire.
+    ctx.appendExchange(1, 'old user one', `old assistant one ${'x'.repeat(4_400)}`, 10);
+
+    ctx.mockNextResponse({ type: 'text', text: 'Final answer, no tools needed.' });
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'start' }] });
+    const events = await ctx.untilTurnEnd();
+
+    expect(eventIndex(events, 'full_compaction.begin')).toBe(-1);
+    expect(ctx.llmCalls).toHaveLength(1);
+  });
+
+  it('auto compacts after a step when the turn still has tool calls to follow up', async () => {
+    const ctx = testAgent({
+      initialConfig: {
+        providers: {},
+        loopControl: { compactionTriggerRatio: 0.5 },
+      },
+    });
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: {
+        ...CATALOGUED_MODEL_CAPABILITIES,
+        max_context_tokens: 2_000,
+      },
+      tools: ['Bash'],
+    });
+    // ~1.8K tokens of history: over the 0.85 block too, so the next step waits
+    // for the compaction that after-step kicks off — strict request ordering.
+    ctx.appendExchange(1, 'old user one', `old assistant one ${'x'.repeat(7_200)}`, 10);
+
+    ctx.mockNextResponse({ type: 'text', text: 'I need to run a command.' }, bashCall());
+    ctx.mockNextResponse({ type: 'text', text: 'Follow-up summary.' });
+    ctx.mockNextResponse({ type: 'text', text: 'Command rejected; wrapping up.' });
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'start' }] });
+    const approval = await ctx.takeApprovalRequest();
+    approval.respond({ decision: 'rejected', selectedLabel: 'reject' });
+    const events = await ctx.untilTurnEnd();
+
+    expect(eventIndex(events, 'full_compaction.begin')).toBeGreaterThanOrEqual(0);
+    expect(eventIndex(events, 'full_compaction.begin')).toBeLessThan(
+      eventIndex(events, 'turn.ended'),
+    );
+  });
+
+  it('pre-compacts with the current model before switching to a smaller-window model', async () => {
+    const ctx = testAgent();
+    ctx.configure({
+      provider: SMALL_WINDOW_PROVIDER,
+      modelCapabilities: {
+        ...CATALOGUED_MODEL_CAPABILITIES,
+        max_context_tokens: 2_000,
+      },
+    });
+    // Registers the big model and selects it without going through setModel
+    // (harness update path + bind), so the setModel below is the only switch
+    // that could trigger a pre-compaction.
+    ctx.configureRuntimeModel(BIG_WINDOW_PROVIDER, {
+      ...CATALOGUED_MODEL_CAPABILITIES,
+      max_context_tokens: 256_000,
+    });
+    await ctx.get(IAgentProfileService).bind({
+      profile: DEFAULT_AGENT_PROFILE_NAME,
+      model: 'big-model',
+    });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 100_000);
+
+    ctx.mockNextResponse({ type: 'text', text: 'Downshift summary.' });
+    await ctx.get(IAgentProfileService).setModel('small-model');
+
+    const records = ctx.recordHistory;
+    const beginIndex = records.findIndex((record) => record.type === 'full_compaction.begin');
+    const completeIndex = records.findIndex((record) => record.type === 'full_compaction.complete');
+    // findLastIndex: the setup configure() also writes a small-model alias;
+    // the setModel switch is the last one.
+    const switchIndex = records.findLastIndex(
+      (record) => record.type === 'config.update' && record['modelAlias'] === 'small-model',
+    );
+    expect(beginIndex).toBeGreaterThanOrEqual(0);
+    expect(completeIndex).toBeGreaterThan(beginIndex);
+    expect(switchIndex).toBeGreaterThan(completeIndex);
+    expect(ctx.llmCalls).toHaveLength(1);
+  });
+
+  it('does not compact when switching to a larger-window model', async () => {
+    const ctx = testAgent();
+    ctx.configure({
+      provider: BIG_WINDOW_PROVIDER,
+      modelCapabilities: {
+        ...CATALOGUED_MODEL_CAPABILITIES,
+        max_context_tokens: 256_000,
+      },
+    });
+    ctx.configureRuntimeModel(SMALL_WINDOW_PROVIDER, {
+      ...CATALOGUED_MODEL_CAPABILITIES,
+      max_context_tokens: 2_000,
+    });
+    await ctx.get(IAgentProfileService).bind({
+      profile: DEFAULT_AGENT_PROFILE_NAME,
+      model: 'small-model',
+    });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 100_000);
+
+    await ctx.get(IAgentProfileService).setModel('big-model');
+
+    expect(ctx.recordHistory.some((record) => record.type === 'full_compaction.begin')).toBe(false);
+    expect(ctx.llmCalls).toHaveLength(0);
+  });
+
+  it('does not compact on downshift when the context fits the smaller window', async () => {
+    const ctx = testAgent();
+    ctx.configure({
+      provider: SMALL_WINDOW_PROVIDER,
+      modelCapabilities: {
+        ...CATALOGUED_MODEL_CAPABILITIES,
+        max_context_tokens: 2_000,
+      },
+    });
+    ctx.configureRuntimeModel(BIG_WINDOW_PROVIDER, {
+      ...CATALOGUED_MODEL_CAPABILITIES,
+      max_context_tokens: 256_000,
+    });
+    await ctx.get(IAgentProfileService).bind({
+      profile: DEFAULT_AGENT_PROFILE_NAME,
+      model: 'big-model',
+    });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 1_000);
+
+    await ctx.get(IAgentProfileService).setModel('small-model');
+
+    expect(ctx.recordHistory.some((record) => record.type === 'full_compaction.begin')).toBe(false);
+    expect(ctx.llmCalls).toHaveLength(0);
   });
 
   it('includes an oversized pending user prompt in auto compaction', async () => {

@@ -44,11 +44,12 @@ export interface SpineState {
   readonly epochMemoryAt?: number;
 }
 
-function syntheticEpochNode(epoch: number): SpineNode {
+function syntheticEpochNode(epoch: number, archivePath?: string): SpineNode {
   return {
     id: String(epoch),
     summary: `root epoch ${String(epoch)}`,
     openedAt: SPINE_STARTUP_OPENED_AT,
+    archivePath,
     children: [epochStartupNodeId(epoch)],
   };
 }
@@ -188,13 +189,14 @@ export interface SpineRootCompactPayload {
   readonly epoch: number;
   readonly epochStartAt: number;
   readonly epochMemoryAt: number;
+  readonly archivePath?: string;
 }
 
 export const spineRootCompact = defineOp(SpineModel, 'spine.root_compact', {
   apply: (s, p: SpineRootCompactPayload): SpineState => {
     if (p.epoch !== s.rootEpoch + 1) return s;
     if (p.epochStartAt < 0) return s;
-    const epoch = syntheticEpochNode(p.epoch);
+    const epoch = syntheticEpochNode(p.epoch, p.archivePath);
     const startup = syntheticStartupNode(p.epoch);
     return {
       nodes: { ...s.nodes, [epoch.id]: epoch, [startup.id]: startup },

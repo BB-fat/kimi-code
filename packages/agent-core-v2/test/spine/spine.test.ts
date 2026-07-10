@@ -263,6 +263,66 @@ describe('Spine control tools', () => {
     expect(rejectedToolMessage?.isError).toBe(true);
   });
 
+  it('rejects close memory that references a nonexistent [U#] anchor', async () => {
+    const ctx = loopContext();
+    await configureLoop(ctx);
+    ctx.mockNextResponse(toolCallPart('call_open', 'spine_open', { summary: 'task A' }));
+    ctx.mockNextResponse(
+      toolCallPart('call_close', 'spine_close', { memory: 'wrapped up per [U9]' }),
+    );
+    ctx.mockNextResponse({ type: 'text', text: 'finished' });
+
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'start' }] });
+    await ctx.untilTurnEnd();
+
+    const state = readSpine(ctx);
+    expect(state.nodes['1.1.1']?.closedAt).toBeUndefined();
+    const rejectedToolMessage = ctx.context
+      .get()
+      .find((m) => m.role === 'tool' && m.toolCallId === 'call_close');
+    expect(rejectedToolMessage?.isError).toBe(true);
+    expect(textOf(rejectedToolMessage)).toContain('[U9]');
+  });
+
+  it('accepts close memory that references an existing [U#] anchor', async () => {
+    const ctx = loopContext();
+    await configureLoop(ctx);
+    ctx.mockNextResponse(toolCallPart('call_open', 'spine_open', { summary: 'task A' }));
+    ctx.mockNextResponse(
+      toolCallPart('call_close', 'spine_close', { memory: 'wrapped up per [U1]' }),
+    );
+    ctx.mockNextResponse({ type: 'text', text: 'finished' });
+
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'start' }] });
+    await ctx.untilTurnEnd();
+
+    const state = readSpine(ctx);
+    expect(state.nodes['1.1.1']?.closedAt).toBeDefined();
+    expect(state.nodes['1.1.1']?.memory).toContain('wrapped up per [U1]');
+  });
+
+  it('rejects next memory that references a nonexistent [U#] anchor', async () => {
+    const ctx = loopContext();
+    await configureLoop(ctx);
+    ctx.mockNextResponse(toolCallPart('call_open', 'spine_open', { summary: 'task A' }));
+    ctx.mockNextResponse(
+      toolCallPart('call_next', 'spine_next', { summary: 'task B', memory: 'did A per [U7]' }),
+    );
+    ctx.mockNextResponse({ type: 'text', text: 'finished' });
+
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'start' }] });
+    await ctx.untilTurnEnd();
+
+    const state = readSpine(ctx);
+    expect(state.nodes['1.1.1']?.closedAt).toBeUndefined();
+    expect(state.nodes['1.1.2']).toBeUndefined();
+    const rejectedToolMessage = ctx.context
+      .get()
+      .find((m) => m.role === 'tool' && m.toolCallId === 'call_next');
+    expect(rejectedToolMessage?.isError).toBe(true);
+    expect(textOf(rejectedToolMessage)).toContain('[U7]');
+  });
+
   it('renders the current tree through spine.tree', async () => {
     const ctx = loopContext();
     await configureLoop(ctx);

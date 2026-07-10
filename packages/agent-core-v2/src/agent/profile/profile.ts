@@ -7,6 +7,7 @@ import { createDecorator } from "#/_base/di/instantiation";
 import type { ErrorCode } from '#/_base/errors/codes';
 import { KimiError } from '#/_base/errors/errors';
 import type { ToolSource } from '#/agent/tool/toolContract';
+import type { Hooks } from '#/hooks';
 
 import { ProfileErrors } from './errors';
 
@@ -123,8 +124,25 @@ export interface BindAgentInput {
   readonly cwd?: string;
 }
 
+export interface WillSetModelContext {
+  readonly currentAlias: string | undefined;
+  readonly nextAlias: string;
+  readonly nextMaxContextTokens: number | undefined;
+}
+
 export interface IAgentProfileService {
   readonly _serviceBrand: undefined;
+
+  readonly hooks: Hooks<{
+    /**
+     * Runs inside `setModel` after the target model resolved but before the
+     * alias (and thus the provider used for new requests) switches. Handlers
+     * that need the CURRENT model still active — e.g. pre-compacting an
+     * oversized context with the larger-window model — must finish before
+     * calling `next`.
+     */
+    onWillSetModel: WillSetModelContext;
+  }>;
 
   configure(options: ProfileServiceOptions): void;
   update(changed: ProfileUpdateData): void;
