@@ -32,6 +32,7 @@ reports/
 
 # Agent scratch / throwaway files - do not commit
 .tmp/
+/spine/
 HANDOVER*.md
 HANDOFF*.md
 handoff.md
