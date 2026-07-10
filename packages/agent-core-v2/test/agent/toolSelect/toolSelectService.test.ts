@@ -21,6 +21,8 @@ import type { ToolCall } from '#/app/llmProtocol/message';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import type { UndoCut } from '#/agent/contextMemory/contextOps';
 import type { ContextMessage } from '#/agent/contextMemory/types';
+import { IAgentContextProjectorService } from '#/agent/contextProjector/contextProjector';
+import { AgentContextProjectorService } from '#/agent/contextProjector/contextProjectorService';
 import type { LoopRecordedEvent } from '#/agent/contextMemory/loopEventFold';
 import {
   IAgentLoopService,
@@ -259,6 +261,7 @@ interface Harness {
   readonly contextMemory: FakeContextMemory;
   readonly loop: FakeLoopService;
   readonly eventBus: RecordingEventBus;
+  readonly projector: IAgentContextProjectorService;
 }
 
 function registerSharedServices(
@@ -278,6 +281,7 @@ function registerSharedServices(
     enabled: (id: string) => (id === TOOL_SELECT_FLAG_ID ? flagEnabled : false),
   });
   reg.define(IAgentToolRegistryService, AgentToolRegistryService);
+  reg.define(IAgentContextProjectorService, AgentContextProjectorService);
   reg.define(IAgentToolSelectService, AgentToolSelectService);
   reg.define(IAgentToolSelectAnnouncementsService, AgentToolSelectAnnouncementsService);
   reg.define(IAgentSystemReminderService, AgentSystemReminderService);
@@ -307,6 +311,7 @@ function createHarness(): Harness {
     contextMemory,
     loop,
     eventBus,
+    projector: ix.get(IAgentContextProjectorService),
   };
 }
 
@@ -336,6 +341,7 @@ function createExecutorHarness(): ExecutorHarness {
     contextMemory,
     loop,
     eventBus,
+    projector: ix.get(IAgentContextProjectorService),
   };
 }
 
@@ -470,6 +476,29 @@ describe('AgentToolSelectService S0 baseline (gate closed)', () => {
     h.contextMemory.history.push(schemaMessage('t'), userMessage('keep'));
     const shaped = h.sut.shapeHistory(h.contextMemory.get());
     expect(shaped.map((message) => message.role)).toEqual(['user']);
+    expect(h.contextMemory.get()).toHaveLength(3);
+  });
+
+  it('shapes the history through a projector VIEW fold so collapse folds see the live history first', () => {
+    const h = createHarness();
+    h.contextMemory.landAnnouncement('<tools_added>\nt\n</tools_added>');
+    h.contextMemory.history.push(schemaMessage('t'), userMessage('keep'));
+
+    let collapseSawSchema = false;
+    disposables.add(
+      h.projector.registerContextFold('spy', (messages) => {
+        collapseSawSchema = messages.some((message) => (message.tools?.length ?? 0) > 0);
+        return messages;
+      }),
+    );
+
+    const projected = h.projector.project(h.contextMemory.get());
+
+    // The default-order spy fold saw the schema message before toolSelect's
+    // VIEW fold stripped it; the canonical history is untouched either way.
+    expect(collapseSawSchema).toBe(true);
+    expect(projected.map((message) => message.role)).toEqual(['user']);
+    expect(projected.every((message) => (message.tools?.length ?? 0) === 0)).toBe(true);
     expect(h.contextMemory.get()).toHaveLength(3);
   });
 

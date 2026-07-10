@@ -19,25 +19,46 @@
  * homedir (`<sessionDir>/agents/<id>/spine/`), and — for root compactions —
  * archives the history the new epoch boundary folds away (`archiveEpochRoot`),
  * with the path published back onto the new epoch node so the folded context
- * stays one `Read` away. Renders the read-only `spine_tree` view across every
+ * stays one `Read` away. Persistence failures are never swallowed: a failed
+ * commit dispatch or archive write is reported through `onUnexpectedError`,
+ * and a node whose archive could not be written still closes, with the failure
+ * marked in its memory. On restore it audits the rebuilt transcript against
+ * the committed `spine.*` records read through `wireRecord` — every accepted
+ * control-tool receipt must have its op — and reports lost transitions
+ * (detection only, no repair): ops without receipts (receipts a compaction
+ * folded away) are the benign direction and stay silent, and the legacy bare
+ * `accepted` receipt left by older sessions still counts, so resuming them
+ * raises no false alarm. A pending transition dropped without commit evidence
+ * is reported the same way, unless the owning step aborted (a routine
+ * interrupt). Renders the read-only `spine_tree` view across every
  * root epoch (current first by numeric order), so a superseded epoch's
  * closed-node archives stay discoverable after a root compaction. Registers
- * its history fold into `contextProjector` (spine → projector, never the
- * reverse) and self-checks the `KIMI_CODE_SPINE` gate at construction, so a
- * disabled spine never observes history. Bound at Agent scope.
+ * its history fold into `contextProjector` and its `<spine_view>` prompt block
+ * into `llmRequester` (spine → projector / llmRequester, never the reverse);
+ * the prompt contribution self-gates per request, so only turn requests whose
+ * tool list can act on the protocol (i.e. that offer `spine_open`) carry it —
+ * sub-agents and operations such as compaction never see it. Self-checks the
+ * `KIMI_CODE_SPINE` gate at construction, so a disabled spine never observes
+ * history. Bound at Agent scope.
  */
 
 import { Disposable } from '#/_base/di/lifecycle';
 import { InstantiationType } from '#/_base/di/extensions';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
+import { onUnexpectedError } from '#/_base/errors/unexpectedError';
 import { estimateTokensForMessages } from '#/_base/utils/tokens';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentContextProjectorService } from '#/agent/contextProjector/contextProjector';
 import { IAgentContextSizeService } from '#/agent/contextSize/contextSize';
+import { IAgentLLMRequesterService } from '#/agent/llmRequester/llmRequester';
 import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import {
+  IAgentWireRecordService,
+  type PersistedWireRecord,
+} from '#/agent/wireRecord/wireRecord';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IFlagService } from '#/app/flag/flag';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
@@ -47,9 +68,12 @@ import { IAgentWireService } from '#/wire/tokens';
 import type { IWireService } from '#/wire/wireService';
 
 import { SPINE_FLAG_ID } from './flag';
-import { loadSpineViewOverride } from './instructions';
+import { appendSpineView, loadSpineViewOverride } from './instructions';
 import {
   IAgentSpineService,
+  SPINE_TOOL_CLOSE,
+  SPINE_TOOL_NEXT,
+  SPINE_TOOL_OPEN,
   type SpineTransitionResult,
 } from './spine';
 import {
@@ -77,16 +101,16 @@ import {
   renderTree,
   type SpineTreeNodeView,
 } from './spineTree';
+import { ACCEPTED_OUTPUT } from './tools/controlResult';
 
-type SpinePending =
-  | { readonly kind: 'open'; readonly toolCallId: string; readonly summary: string }
-  | { readonly kind: 'close'; readonly toolCallId: string; readonly memory: string }
-  | {
-      readonly kind: 'next';
-      readonly toolCallId: string;
-      readonly summary: string;
-      readonly memory: string;
-    };
+type SpinePending = {
+  readonly toolCallId: string;
+  readonly stepSignal: AbortSignal | undefined;
+} & (
+  | { readonly kind: 'open'; readonly summary: string }
+  | { readonly kind: 'close'; readonly memory: string }
+  | { readonly kind: 'next'; readonly summary: string; readonly memory: string }
+);
 
 const REJECT_DISABLED: SpineTransitionResult = {
   accepted: false,
@@ -110,6 +134,7 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
 
   private pending: SpinePending | null = null;
   private lastObservedIndex = 0;
+  private stepSignal: AbortSignal | undefined;
 
   constructor(
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
@@ -122,8 +147,10 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     @ISessionContext private readonly sessionCtx: ISessionContext,
     @IAgentScopeContext private readonly agentScope: IAgentScopeContext,
     @IAgentWireService private readonly wire: IWireService,
+    @IAgentWireRecordService private readonly wireRecord: IAgentWireRecordService,
     @IAgentLoopService loop: IAgentLoopService,
     @IAgentContextProjectorService projector: IAgentContextProjectorService,
+    @IAgentLLMRequesterService llmRequester: IAgentLLMRequesterService,
   ) {
     super();
     if (this.enabled) {
@@ -134,8 +161,22 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
       this._register(projector.registerContextFold('spine', (messages) => this.fold(messages)));
     }
     this._register(
-      loop.hooks.beforeStep.register('spine', async (_ctx, next) => {
-        this.pending = null;
+      llmRequester.registerSystemPromptContribution('spine', (prompt, context) => {
+        if (!this.enabled) return prompt;
+        if (context.source?.type !== 'turn') return prompt;
+        if (!context.tools.some((tool) => tool.name === SPINE_TOOL_OPEN)) return prompt;
+        return appendSpineView(prompt);
+      }),
+    );
+    this._register(
+      loop.hooks.beforeStep.register('spine', async (ctx, next) => {
+        if (this.pending !== null) {
+          this.dropPending(
+            this.pending,
+            'the previous step ended before its tool result was observed',
+          );
+        }
+        this.stepSignal = ctx.signal;
         await next();
       }),
     );
@@ -149,6 +190,7 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
       this.wire.onRestored(() => {
         this.lastObservedIndex = this.context.get().length;
         this.pending = null;
+        if (this.enabled) this.reportLostCommits();
       }),
     );
   }
@@ -162,7 +204,7 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     if (guard !== null) return guard;
     const trimmed = summary.trim();
     if (trimmed.length === 0) return reject('open summary must not be empty.');
-    this.pending = { kind: 'open', toolCallId, summary: trimmed };
+    this.pending = { kind: 'open', toolCallId, summary: trimmed, stepSignal: this.stepSignal };
     return { accepted: true };
   }
 
@@ -174,7 +216,7 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     if (isRootEpoch(this.cursorId())) return REJECT_ROOT_EPOCH;
     const anchorGuard = this.anchorReferenceGuard('close', trimmed);
     if (anchorGuard !== null) return anchorGuard;
-    this.pending = { kind: 'close', toolCallId, memory: trimmed };
+    this.pending = { kind: 'close', toolCallId, memory: trimmed, stepSignal: this.stepSignal };
     return { accepted: true };
   }
 
@@ -188,7 +230,13 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     if (isRootEpoch(this.cursorId())) return REJECT_ROOT_EPOCH;
     const anchorGuard = this.anchorReferenceGuard('next', trimmedMemory);
     if (anchorGuard !== null) return anchorGuard;
-    this.pending = { kind: 'next', toolCallId, summary: trimmedSummary, memory: trimmedMemory };
+    this.pending = {
+      kind: 'next',
+      toolCallId,
+      summary: trimmedSummary,
+      memory: trimmedMemory,
+      stepSignal: this.stepSignal,
+    };
     return { accepted: true };
   }
 
@@ -231,6 +279,26 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
       projectedContext: used,
       projectedMeasured: this.contextSize.latestMeasurement()?.kind === 'measured',
     };
+  }
+
+  private reportLostCommits(): void {
+    const receipts = countAcceptedReceipts(this.context.get());
+    const committed = countCommittedOps(this.wireRecord.getRecords());
+    const lost: string[] = [];
+    for (const kind of SPINE_TRANSITION_KINDS) {
+      if (committed[kind] < receipts[kind]) {
+        lost.push(
+          `${SPINE_TOOL_NAME[kind]}: ${String(receipts[kind])} accepted receipt(s) vs ${String(committed[kind])} ${SPINE_OP_TYPE[kind]} op(s)`,
+        );
+      }
+    }
+    if (lost.length === 0) return;
+    onUnexpectedError(
+      new Error(
+        `Spine: lost transition(s) detected on restore — ${lost.join('; ')}. ` +
+          'A receipt was persisted but the matching tree op was not; the tree may be missing nodes. No automatic repair is attempted.',
+      ),
+    );
   }
 
   private guard(): SpineTransitionResult | null {
@@ -300,20 +368,43 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     const history = this.context.get();
     const evidence = findEvidence(history, this.lastObservedIndex, pending.toolCallId);
     this.lastObservedIndex = history.length;
-    if (evidence === null) return;
-
-    switch (pending.kind) {
-      case 'open':
-        this.commitOpen(pending.summary, evidence.assistantIndex);
-        break;
-      case 'close':
-        await this.commitClose(pending.memory, evidence.toolResultIndex);
-        break;
-      case 'next':
-        await this.commitNext(pending.summary, pending.memory, evidence.toolResultIndex);
-        break;
+    if (evidence === null) {
+      this.dropPending(pending, 'the step ended without tool-result evidence');
+      return;
     }
+
+    try {
+      switch (pending.kind) {
+        case 'open':
+          this.commitOpen(pending.summary, evidence.assistantIndex);
+          break;
+        case 'close':
+          await this.commitClose(pending.memory, evidence.toolResultIndex);
+          break;
+        case 'next':
+          await this.commitNext(pending.summary, pending.memory, evidence.toolResultIndex);
+          break;
+      }
+    } catch (error) {
+      onUnexpectedError(
+        new Error(
+          `Spine: failed to commit ${pending.kind} transition (toolCallId ${pending.toolCallId}); dropping the transition.`,
+          { cause: error },
+        ),
+      );
+    } finally {
+      this.pending = null;
+    }
+  }
+
+  private dropPending(pending: SpinePending, why: string): void {
     this.pending = null;
+    if (pending.stepSignal?.aborted === true) return;
+    onUnexpectedError(
+      new Error(
+        `Spine: dropping ${pending.kind} transition (toolCallId ${pending.toolCallId}) — ${why}. The accepted receipt stays in the transcript.`,
+      ),
+    );
   }
 
   private commitOpen(summary: string, openedAt: number): void {
@@ -344,7 +435,9 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     });
     const closing: SpineNode = { ...node, closedAt, memory: assembled };
     const archivePath = await this.archiveNode(closing);
-    this.wire.dispatch(spineClose({ id, closedAt, memory: assembled, archivePath }));
+    this.wire.dispatch(
+      spineClose({ id, closedAt, memory: markArchiveFailure(assembled, archivePath), archivePath }),
+    );
   }
 
   private async commitNext(summary: string, memory: string, closedAt: number): Promise<void> {
@@ -367,7 +460,7 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
       spineNext({
         closedId,
         closedAt,
-        memory: assembled,
+        memory: markArchiveFailure(assembled, archivePath),
         archivePath,
         openedId,
         summary,
@@ -383,7 +476,8 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     try {
       await writeNodeArchive(this.hostFs, path, content);
       return path;
-    } catch {
+    } catch (error) {
+      onUnexpectedError(error);
       return undefined;
     }
   }
@@ -397,7 +491,8 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     try {
       await writeNodeArchive(this.hostFs, path, content);
       return path;
-    } catch {
+    } catch (error) {
+      onUnexpectedError(error);
       return undefined;
     }
   }
@@ -467,6 +562,93 @@ function findEvidence(
     }
   }
   return null;
+}
+
+type SpineTransitionKind = 'open' | 'close' | 'next';
+
+const SPINE_TRANSITION_KINDS: readonly SpineTransitionKind[] = ['open', 'close', 'next'];
+
+const SPINE_TOOL_NAME: Record<SpineTransitionKind, string> = {
+  open: SPINE_TOOL_OPEN,
+  close: SPINE_TOOL_CLOSE,
+  next: SPINE_TOOL_NEXT,
+};
+
+const SPINE_OP_TYPE: Record<SpineTransitionKind, string> = {
+  open: 'spine.open',
+  close: 'spine.close',
+  next: 'spine.next',
+};
+
+const LEGACY_ACCEPTED_RECEIPT = 'accepted';
+
+const ARCHIVE_FAILURE_NOTE =
+  '[spine: the trajectory archive for this node could not be written; its detailed history was not persisted.]';
+
+function markArchiveFailure(memory: string, archivePath: string | undefined): string {
+  return archivePath === undefined ? `${memory}\n\n${ARCHIVE_FAILURE_NOTE}` : memory;
+}
+
+function countAcceptedReceipts(
+  messages: readonly ContextMessage[],
+): Record<SpineTransitionKind, number> {
+  const counts: Record<SpineTransitionKind, number> = { open: 0, close: 0, next: 0 };
+  const kindsByCallId = new Map<string, SpineTransitionKind>();
+  for (const message of messages) {
+    if (message.role !== 'assistant') continue;
+    for (const call of message.toolCalls) {
+      const kind = kindOfToolName(call.name);
+      if (kind !== undefined) kindsByCallId.set(call.id, kind);
+    }
+  }
+  for (const message of messages) {
+    if (message.role !== 'tool' || message.toolCallId === undefined || message.isError === true) {
+      continue;
+    }
+    const kind = kindsByCallId.get(message.toolCallId);
+    if (kind === undefined) continue;
+    const text = toolMessageText(message);
+    if (text !== ACCEPTED_OUTPUT && text !== LEGACY_ACCEPTED_RECEIPT) continue;
+    counts[kind]++;
+  }
+  return counts;
+}
+
+function countCommittedOps(
+  records: readonly PersistedWireRecord[],
+): Record<SpineTransitionKind, number> {
+  const counts: Record<SpineTransitionKind, number> = { open: 0, close: 0, next: 0 };
+  for (const record of records) {
+    switch (record.type) {
+      case 'spine.open':
+        counts.open++;
+        break;
+      case 'spine.close':
+        counts.close++;
+        break;
+      case 'spine.next':
+        counts.next++;
+        break;
+    }
+  }
+  return counts;
+}
+
+function kindOfToolName(name: string): SpineTransitionKind | undefined {
+  switch (name) {
+    case SPINE_TOOL_OPEN:
+      return 'open';
+    case SPINE_TOOL_CLOSE:
+      return 'close';
+    case SPINE_TOOL_NEXT:
+      return 'next';
+    default:
+      return undefined;
+  }
+}
+
+function toolMessageText(message: ContextMessage): string {
+  return message.content.map((part) => (part.type === 'text' ? part.text : '')).join('');
 }
 
 function invalidAnchorReferences(memory: string, maxAnchor: number): readonly number[] {

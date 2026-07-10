@@ -258,6 +258,7 @@ describe('AgentLoopService onStarted', () => {
 
     ix.set(IAgentLLMRequesterService, {
       _serviceBrand: undefined,
+      registerSystemPromptContribution: () => ({ dispose: () => undefined }),
       async request(_overrides, onPart) {
         requestStarted.resolve();
         await responseEvent;
@@ -304,6 +305,7 @@ describe('AgentLoopService onStarted', () => {
 
     ix.set(IAgentLLMRequesterService, {
       _serviceBrand: undefined,
+      registerSystemPromptContribution: () => ({ dispose: () => undefined }),
       async request() {
         requestStarted.resolve();
         await release;
@@ -344,6 +346,7 @@ describe('AgentLoopService onStarted', () => {
 
     ix.set(IAgentLLMRequesterService, {
       _serviceBrand: undefined,
+      registerSystemPromptContribution: () => ({ dispose: () => undefined }),
       request: async () => {
         throw cause;
       },

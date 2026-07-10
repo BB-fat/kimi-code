@@ -10,9 +10,11 @@
  * dropped) are reported through an optional sink and surfaced once here as a
  * single deduped warning, so a silently-mangled history always leaves a trace.
  *
- * History-collapsing features plug in through `registerContextFold` rather
- * than being imported here: the projector applies the registered folds (in
- * registration order) before every projection and knows nothing about spine.
+ * History-shaping features plug in through `registerContextFold` rather than
+ * being imported here: the projector applies the registered folds (ascending
+ * fold order, registration order within the same order) before every
+ * projection over the live history — projections over an explicit message
+ * list skip folds — and knows nothing about spine or toolSelect.
  */
 
 import { InstantiationType } from '#/_base/di/extensions';
@@ -23,7 +25,19 @@ import { renderToolResultForModel } from '#/agent/contextMemory/toolResultRender
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { ErrorCodes, KimiError } from '#/errors';
 import type { ContentPart, Message } from '#/app/llmProtocol/message';
-import { IAgentContextProjectorService, type ContextFold } from './contextProjector';
+import {
+  CONTEXT_FOLD_ORDER,
+  IAgentContextProjectorService,
+  type ContextFold,
+  type ContextFoldOptions,
+  type ContextFoldOrder,
+  type ProjectOptions,
+} from './contextProjector';
+
+interface RegisteredFold {
+  readonly fold: ContextFold;
+  readonly order: ContextFoldOrder;
+}
 
 export class AgentContextProjectorService implements IAgentContextProjectorService {
   declare readonly _serviceBrand: undefined;
@@ -34,33 +48,39 @@ export class AgentContextProjectorService implements IAgentContextProjectorServi
   // later recurrence after a healthy stretch is surfaced again.
   private lastRepairSignature: string | null = null;
 
-  // Folds registered by history-collapsing features, keyed by registrant id so
-  // a re-registration replaces and disposal removes; Map order is registration
-  // order, which is the composition order.
-  private readonly folds = new Map<string, ContextFold>();
+  private readonly folds = new Map<string, RegisteredFold>();
 
   constructor(
     @ILogService private readonly log: ILogService,
   ) {}
 
-  registerContextFold(id: string, fold: ContextFold): IDisposable {
-    this.folds.set(id, fold);
+  registerContextFold(id: string, fold: ContextFold, options?: ContextFoldOptions): IDisposable {
+    this.folds.set(id, { fold, order: options?.order ?? CONTEXT_FOLD_ORDER.COLLAPSE });
     return toDisposable(() => {
       this.folds.delete(id);
     });
   }
 
-  project(messages: readonly ContextMessage[]): readonly Message[] {
-    return this.projectWithTrace(this.foldHistory(messages), project);
+  project(messages: readonly ContextMessage[], options?: ProjectOptions): readonly Message[] {
+    return this.projectWithTrace(this.historyForProjection(messages, options), project);
   }
 
-  projectStrict(messages: readonly ContextMessage[]): readonly Message[] {
-    return this.projectWithTrace(this.foldHistory(messages), projectStrict);
+  projectStrict(messages: readonly ContextMessage[], options?: ProjectOptions): readonly Message[] {
+    return this.projectWithTrace(this.historyForProjection(messages, options), projectStrict);
+  }
+
+  private historyForProjection(
+    messages: readonly ContextMessage[],
+    options: ProjectOptions | undefined,
+  ): readonly ContextMessage[] {
+    if (options?.applyFolds === false) return messages;
+    return this.foldHistory(messages);
   }
 
   private foldHistory(messages: readonly ContextMessage[]): readonly ContextMessage[] {
     let folded = messages;
-    for (const fold of this.folds.values()) folded = fold(folded);
+    const ordered = [...this.folds.values()].sort((a, b) => a.order - b.order);
+    for (const { fold } of ordered) folded = fold(folded);
     return folded;
   }
 

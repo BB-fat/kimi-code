@@ -4,7 +4,10 @@
  * Creates and tracks the session's agents as child scopes in a flat registry.
  * Seeds each agent's identity through `agent` scopeContext, wires per-agent
  * wire records and the wire state machine, the blob store, and MCP, and
- * registers the agent in the session registry. Bound at Session scope.
+ * registers the agent in the session registry. Disposal drains the agent's
+ * activity kernel, then flushes pending wire-log appends through `wire`
+ * before releasing the child scope, so the last records of a turn survive a
+ * process exit that follows disposal. Bound at Session scope.
  *
  * No agent id is special here: the main agent is created by its bootstrappers
  * as `create({ agentId: 'main' })` (see `mainAgent.ts`), and `fork` requires
@@ -17,6 +20,7 @@ import { InstantiationType } from '#/_base/di/extensions';
 import { IInstantiationService } from '#/_base/di/instantiation';
 import { Disposable } from '#/_base/di/lifecycle';
 import { Emitter } from '#/_base/event';
+import { onUnexpectedError } from '#/_base/errors/unexpectedError';
 import { sessionMediaOriginalsDir } from '#/_base/tools/support/image-originals';
 import { SyncDescriptor } from '#/_base/di/descriptors';
 import {
@@ -421,6 +425,11 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
     const activity = handle.accessor.get(IAgentActivityService);
     activity.beginDisposal();
     await activity.settled();
+    try {
+      await handle.accessor.get(IAgentWireService).flush();
+    } catch (error) {
+      onUnexpectedError(error);
+    }
     handle.dispose();
     this.onDidDisposeEmitter.fire(agentId);
   }

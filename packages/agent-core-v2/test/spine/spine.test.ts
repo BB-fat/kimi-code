@@ -2,9 +2,36 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { MASTER_ENV } from '#/app/flag/flagService';
 import { IAgentProfileCatalogService } from '#/app/agentProfileCatalog/agentProfileCatalog';
-import { IAgentWireService, SpineModel, spineClose, spineNext, spineOpen } from '#/index';
+import {
+  resetUnexpectedErrorHandler,
+  setUnexpectedErrorHandler,
+} from '#/_base/errors/unexpectedError';
+import { Disposable } from '#/_base/di/lifecycle';
+import {
+  IAgentLoopService,
+  type AfterStepContext,
+  type BeforeStepContext,
+} from '#/agent/loop/loop';
+import { ACCEPTED_OUTPUT, toControlResult } from '#/agent/spine/tools/controlResult';
+import type { PersistedWireRecord } from '#/agent/wireRecord/wireRecord';
+import type { PersistedRecord } from '#/wire/wireService';
+import {
+  IAgentSpineService,
+  IAgentWireRecordService,
+  IAgentWireService,
+  SpineModel,
+  spineClose,
+  spineNext,
+  spineOpen,
+} from '#/index';
 
-import { execEnvServices, testAgent, type TestAgentContext } from '../harness';
+import {
+  agentService,
+  execEnvServices,
+  InMemoryWireRecordPersistence,
+  testAgent,
+  type TestAgentContext,
+} from '../harness';
 
 const SPINE_ENV = 'KIMI_CODE_SPINE';
 
@@ -341,6 +368,150 @@ describe('Spine control tools', () => {
     expect(output).toContain('task A');
     expect(output).toContain('cursor');
   });
+
+  it('maps an accepted transition to the delayed-commit receipt', () => {
+    const result = toControlResult({ accepted: true });
+    expect(result.isError).toBe(false);
+    expect(result.output).toBe(ACCEPTED_OUTPUT);
+    expect(result.output).toMatch(/^accepted/);
+    expect(result.output).toContain('commit');
+  });
+
+  it('returns the delayed-commit receipt as the tool output of an accepted open', async () => {
+    const ctx = loopContext();
+    await configureLoop(ctx);
+    ctx.mockNextResponse(toolCallPart('call_open', 'spine_open', { summary: 'task A' }));
+    ctx.mockNextResponse({ type: 'text', text: 'finished' });
+
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'start' }] });
+    await ctx.untilTurnEnd();
+
+    const receipt = ctx.context.get().find((m) => m.role === 'tool' && m.toolCallId === 'call_open');
+    expect(receipt?.isError).not.toBe(true);
+    expect(textOf(receipt)).toBe(ACCEPTED_OUTPUT);
+  });
+});
+
+describe('Spine durability', () => {
+  beforeEach(() => {
+    vi.stubEnv(MASTER_ENV, '0');
+    vi.stubEnv(SPINE_ENV, '1');
+  });
+  afterEach(() => {
+    resetUnexpectedErrorHandler();
+    vi.unstubAllEnvs();
+  });
+
+  it('closes the node, marks its memory, and reports when the archive write fails', async () => {
+    const reported: unknown[] = [];
+    setUnexpectedErrorHandler((err) => {
+      reported.push(err);
+    });
+    const failingHostFs = {
+      writeText: async () => {
+        throw new Error('disk full');
+      },
+      mkdir: async () => {},
+    };
+    const ctx = testAgent(execEnvServices({ hostFs: failingHostFs }));
+    await configureLoop(ctx);
+    ctx.mockNextResponse(toolCallPart('call_open', 'spine_open', { summary: 'task A' }));
+    ctx.mockNextResponse(toolCallPart('call_close', 'spine_close', { memory: 'did A' }));
+    ctx.mockNextResponse({ type: 'text', text: 'finished' });
+
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'start' }] });
+    await ctx.untilTurnEnd();
+
+    const node = readSpine(ctx).nodes['1.1.1'];
+    expect(node?.closedAt).toBeDefined();
+    expect(node?.archivePath).toBeUndefined();
+    expect(node?.memory).toContain('could not be written');
+    expect(reported.some((err) => String(err).includes('disk full'))).toBe(true);
+  });
+
+  it('reports an accepted receipt that lost its committed op on restore', async () => {
+    const records = await recordSpineTurn();
+    const stripped = records.filter((record) => record.type !== 'spine.close');
+
+    const reported = await restoreAndCaptureReports(stripped);
+
+    const spineReports = reported.filter((err) => String(err).includes('Spine:'));
+    expect(spineReports).toHaveLength(1);
+    expect(String(spineReports[0])).toContain('spine_close');
+  });
+
+  it('stays quiet on restore when every receipt has its op', async () => {
+    const reported = await restoreAndCaptureReports(await recordSpineTurn());
+
+    expect(reported.filter((err) => String(err).includes('Spine:'))).toHaveLength(0);
+  });
+
+  it('stays quiet when ops outnumber receipts (a compaction can fold receipts away)', async () => {
+    const records = await recordSpineTurn();
+    const stripped = records.filter((record) => !isToolResultRecord(record, 'call_close'));
+
+    const reported = await restoreAndCaptureReports(stripped);
+
+    expect(reported.filter((err) => String(err).includes('Spine:'))).toHaveLength(0);
+  });
+
+  it('stays quiet on restore for legacy bare-accepted receipts', async () => {
+    const records = await recordSpineTurn();
+    const legacy = records.map((record) =>
+      isToolResultRecord(record, 'call_close') ? withToolResultText(record, 'accepted') : record,
+    );
+
+    const reported = await restoreAndCaptureReports(legacy);
+
+    expect(reported.filter((err) => String(err).includes('Spine:'))).toHaveLength(0);
+  });
+
+  it('reports a pending transition dropped when its step ends without evidence', async () => {
+    const { beforeStep, afterStep, reported, spine } = spineWithCapturedStepHooks();
+    await hookOf(beforeStep, 'spine')(beforeCtx(new AbortController().signal), noopNext);
+    expect(spine.acceptOpen('task A', 'call_open').accepted).toBe(true);
+
+    await hookOf(afterStep, 'spine')(afterCtx(new AbortController().signal), noopNext);
+
+    expect(reported).toHaveLength(1);
+    expect(String(reported[0])).toContain('call_open');
+
+    // The drop cleared the pending transition: the next step stays quiet.
+    await hookOf(beforeStep, 'spine')(beforeCtx(new AbortController().signal), noopNext);
+    expect(reported).toHaveLength(1);
+  });
+
+  it('stays quiet when the dropped transition belonged to an aborted step', async () => {
+    const { beforeStep, afterStep, reported, spine } = spineWithCapturedStepHooks();
+    const controller = new AbortController();
+    await hookOf(beforeStep, 'spine')(beforeCtx(controller.signal), noopNext);
+    spine.acceptOpen('task A', 'call_open');
+    controller.abort();
+
+    await hookOf(afterStep, 'spine')(afterCtx(controller.signal), noopNext);
+
+    expect(reported).toHaveLength(0);
+  });
+
+  it('attributes a leftover pending transition to its owning step across turns', async () => {
+    const { beforeStep, reported, spine } = spineWithCapturedStepHooks();
+    // Turn 1: the step owning the pending transition aborts before afterStep
+    // ever runs (turn-level cancel), leaving the pending behind.
+    const controller = new AbortController();
+    await hookOf(beforeStep, 'spine')(beforeCtx(controller.signal), noopNext);
+    spine.acceptOpen('task A', 'call_open');
+    controller.abort();
+
+    // Turn 2: dropping the leftover is routine — quiet.
+    await hookOf(beforeStep, 'spine')(beforeCtx(new AbortController().signal), noopNext);
+    expect(reported).toHaveLength(0);
+
+    // A leftover from a step that did NOT abort is anomalous — reported.
+    spine.acceptOpen('task B', 'call_open_2');
+    await hookOf(beforeStep, 'spine')(beforeCtx(new AbortController().signal), noopNext);
+    expect(reported).toHaveLength(1);
+    expect(String(reported[0])).toContain('call_open_2');
+  });
 });
 
 function readSpine(ctx: TestAgentContext) {
@@ -371,4 +542,120 @@ function textOf(message: { content?: readonly { type: string; text?: string }[] 
   return (
     message?.content?.map((part) => (part.type === 'text' ? (part.text ?? '') : '')).join('') ?? ''
   );
+}
+
+async function recordSpineTurn(): Promise<readonly PersistedWireRecord[]> {
+  const persistence = new InMemoryWireRecordPersistence();
+  const ctx = testAgent({ persistence }, execEnvServices({ hostFs: recordingHostFs().fs }));
+  await configureLoop(ctx);
+  ctx.mockNextResponse(toolCallPart('call_open', 'spine_open', { summary: 'task A' }));
+  ctx.mockNextResponse(toolCallPart('call_close', 'spine_close', { memory: 'did A' }));
+  ctx.mockNextResponse({ type: 'text', text: 'finished' });
+  await ctx.rpc.prompt({ input: [{ type: 'text', text: 'start' }] });
+  await ctx.untilTurnEnd();
+  return persistence.records;
+}
+
+async function restoreAndCaptureReports(
+  records: readonly PersistedWireRecord[],
+): Promise<unknown[]> {
+  const reported: unknown[] = [];
+  setUnexpectedErrorHandler((err) => {
+    reported.push(err);
+  });
+  try {
+    const ctx = testAgent();
+    // Force the Eager spine service up so its onRestored audit is registered
+    // before the replay fires the restored handlers.
+    ctx.get(IAgentSpineService);
+    const wireRecord = ctx.get(IAgentWireRecordService);
+    await wireRecord.restore(records);
+    const restored = wireRecord.getRecords() as readonly PersistedRecord[];
+    await ctx.get(IAgentWireService).replay(...restored);
+  } finally {
+    resetUnexpectedErrorHandler();
+  }
+  return reported;
+}
+
+function isToolResultRecord(record: PersistedWireRecord, toolCallId: string): boolean {
+  const r = record as {
+    readonly type?: string;
+    readonly event?: { readonly type?: string; readonly toolCallId?: string };
+  };
+  return (
+    r.type === 'context.append_loop_event' &&
+    r.event?.type === 'tool.result' &&
+    r.event?.toolCallId === toolCallId
+  );
+}
+
+function withToolResultText(record: PersistedWireRecord, text: string): PersistedWireRecord {
+  const r = record as {
+    readonly event?: { readonly result?: { readonly output?: unknown } };
+  };
+  if (r.event?.result === undefined) return record;
+  return {
+    ...record,
+    event: { ...r.event, result: { ...r.event.result, output: text } },
+  } as unknown as PersistedWireRecord;
+}
+
+type BeforeStepHook = (ctx: BeforeStepContext, next: () => Promise<void>) => Promise<void>;
+type AfterStepHook = (ctx: AfterStepContext, next: () => Promise<void>) => Promise<void>;
+
+const noopNext = async (): Promise<void> => {};
+
+/**
+ * Stand up the spine service against a fake loop that captures the registered
+ * step hooks, so tests can drive beforeStep / afterStep by hand instead of
+ * racing a real turn.
+ */
+function spineWithCapturedStepHooks(): {
+  readonly beforeStep: Map<string, BeforeStepHook>;
+  readonly afterStep: Map<string, AfterStepHook>;
+  readonly reported: unknown[];
+  readonly spine: IAgentSpineService;
+} {
+  const beforeStep = new Map<string, BeforeStepHook>();
+  const afterStep = new Map<string, AfterStepHook>();
+  const fakeLoop = {
+    _serviceBrand: undefined,
+    run: async () => ({ type: 'completed' as const, steps: 0, truncated: false }),
+    hooks: {
+      beforeStep: {
+        register: (name: string, fn: BeforeStepHook) => {
+          beforeStep.set(name, fn);
+          return Disposable.None;
+        },
+      },
+      afterStep: {
+        register: (name: string, fn: AfterStepHook) => {
+          afterStep.set(name, fn);
+          return Disposable.None;
+        },
+      },
+      onError: { register: () => Disposable.None },
+    },
+  } as unknown as IAgentLoopService;
+  const reported: unknown[] = [];
+  setUnexpectedErrorHandler((err) => {
+    reported.push(err);
+  });
+  const ctx = testAgent(agentService(IAgentLoopService, fakeLoop));
+  return { beforeStep, afterStep, reported, spine: ctx.get(IAgentSpineService) };
+}
+
+function hookOf<THook>(hooks: Map<string, THook>, name: string): THook {
+  const hook = hooks.get(name);
+  if (hook === undefined) throw new Error(`hook '${name}' was not registered`);
+  return hook;
+}
+
+function beforeCtx(signal: AbortSignal): BeforeStepContext {
+  return { turnId: 1, step: 1, signal };
+}
+
+function afterCtx(signal: AbortSignal): AfterStepContext {
+  return { turnId: 1, step: 1, signal } as unknown as AfterStepContext;
 }

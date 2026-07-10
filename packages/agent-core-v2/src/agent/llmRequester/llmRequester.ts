@@ -1,4 +1,5 @@
 import { createDecorator } from '#/_base/di/instantiation';
+import type { IDisposable } from '#/_base/di/lifecycle';
 import type { FinishReason } from '#/app/llmProtocol/finishReason';
 import type { Message, StreamedMessagePart } from '#/app/llmProtocol/message';
 import type { Tool } from '#/app/llmProtocol/tool';
@@ -95,6 +96,35 @@ export interface LLMRequestOverrides {
   retry?: LLMRequestRetryOptions;
 }
 
+/**
+ * Read-only view of the request being assembled, handed to system-prompt
+ * contributions so they can decide whether they apply: `source` distinguishes
+ * turns from operations (e.g. compaction), and `tools` is the final
+ * provider-visible tool list of the request.
+ */
+export interface SystemPromptContributionContext {
+  readonly source: LLMRequestSource | undefined;
+  readonly tools: readonly Tool[];
+}
+
+/**
+ * Transform over the assembled system prompt. Prompt-shaping features (e.g.
+ * the spine view protocol block) register a contribution instead of the
+ * requester importing them: the requester stays closed for modification.
+ *
+ * The contract a contribution signs up for:
+ *   - It receives the prompt assembled so far plus the request's source and
+ *     final tool list, and returns the prompt to pass on; return the input
+ *     unchanged to decline.
+ *   - Contributions compose in registration order, each seeing the output of
+ *     the previous one.
+ *   - The input prompt and context are read-only.
+ */
+export type SystemPromptContribution = (
+  prompt: string,
+  context: SystemPromptContributionContext,
+) => string;
+
 export interface IAgentLLMRequesterService {
   readonly _serviceBrand: undefined;
 
@@ -103,6 +133,16 @@ export interface IAgentLLMRequesterService {
     onPart?: LLMRequestPartHandler,
     signal?: AbortSignal,
   ): Promise<LLMRequestFinish>;
+
+  /**
+   * Register a contribution applied to every assembled system prompt; returns
+   * a disposable that unregisters it. With no contributions registered the
+   * profile's system prompt passes through unchanged.
+   */
+  registerSystemPromptContribution(
+    id: string,
+    contribution: SystemPromptContribution,
+  ): IDisposable;
 }
 
 export const IAgentLLMRequesterService = createDecorator<IAgentLLMRequesterService>(

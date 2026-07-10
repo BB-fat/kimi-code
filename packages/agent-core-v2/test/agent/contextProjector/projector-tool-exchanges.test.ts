@@ -5,7 +5,10 @@ import { DisposableStore } from '#/_base/di/lifecycle';
 import { TestInstantiationService } from '#/_base/di/test';
 import { ILogService, type ILogger } from '#/_base/log/log';
 import type { ContextMessage } from '#/agent/contextMemory/types';
-import { IAgentContextProjectorService } from '#/agent/contextProjector/contextProjector';
+import {
+  CONTEXT_FOLD_ORDER,
+  IAgentContextProjectorService,
+} from '#/agent/contextProjector/contextProjector';
 import { AgentContextProjectorService } from '#/agent/contextProjector/contextProjectorService';
 import { toProtocolMessage } from '#/agent/contextMemory/messageProjection';
 import type { Message } from '#/app/llmProtocol/message';
@@ -472,5 +475,86 @@ describe('projector tool-exchange normalization', () => {
         expect.objectContaining({ assistantsMerged: 1 }),
       );
     });
+  });
+});
+
+// Tests for the fold contract: collapse folds anchor on the untouched live
+// history and run before view folds reshape it, same-order folds compose in
+// registration order, and projections over an explicit (non-live) message
+// list skip folds entirely.
+describe('context fold contract', () => {
+  let disposables: DisposableStore;
+  let projector: IAgentContextProjectorService;
+
+  beforeEach(() => {
+    disposables = new DisposableStore();
+    const ix = disposables.add(new TestInstantiationService());
+    ix.set(ILogService, createCapturingLog([]));
+    ix.set(IAgentContextProjectorService, new SyncDescriptor(AgentContextProjectorService));
+    projector = ix.get(IAgentContextProjectorService);
+  });
+
+  afterEach(() => disposables.dispose());
+
+  it('runs collapse folds on the untouched history before view folds reshape it', () => {
+    const history = [user('a'), user('b'), user('c')];
+    let collapseSaw = -1;
+    let viewSaw = -1;
+    projector.registerContextFold('collapse', (messages) => {
+      collapseSaw = messages.length;
+      return messages.slice(0, 1);
+    });
+    projector.registerContextFold(
+      'view',
+      (messages) => {
+        viewSaw = messages.length;
+        return messages;
+      },
+      { order: CONTEXT_FOLD_ORDER.VIEW },
+    );
+
+    projector.project(history);
+
+    // The collapse fold anchored on the live history's full length; the view
+    // fold only saw the collapsed output.
+    expect(collapseSaw).toBe(3);
+    expect(viewSaw).toBe(1);
+  });
+
+  it('composes folds of the same order in registration order', () => {
+    const seen: string[] = [];
+    projector.registerContextFold('first', (messages) => {
+      seen.push('first');
+      return messages;
+    });
+    projector.registerContextFold('second', (messages) => {
+      seen.push('second');
+      return messages;
+    });
+
+    projector.project([user('a')]);
+
+    expect(seen).toEqual(['first', 'second']);
+  });
+
+  it('skips folds entirely for projections over an explicit message list', () => {
+    let foldCalls = 0;
+    projector.registerContextFold('collapse', (messages) => {
+      foldCalls += 1;
+      return messages;
+    });
+    projector.registerContextFold(
+      'view',
+      (messages) => {
+        foldCalls += 1;
+        return messages;
+      },
+      { order: CONTEXT_FOLD_ORDER.VIEW },
+    );
+
+    const projected = projector.project([user('a')], { applyFolds: false });
+
+    expect(foldCalls).toBe(0);
+    expect(projected).toHaveLength(1);
   });
 });

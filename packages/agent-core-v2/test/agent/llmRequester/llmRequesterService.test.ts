@@ -14,18 +14,22 @@ import { DisposableStore } from '#/_base/di/lifecycle';
 import { TestInstantiationService } from '#/_base/di/test';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import type { ContextMessage } from '#/agent/contextMemory/types';
-import { IAgentContextProjectorService } from '#/agent/contextProjector/contextProjector';
+import {
+  IAgentContextProjectorService,
+  type ProjectOptions,
+} from '#/agent/contextProjector/contextProjector';
 import { AgentLLMRequesterService } from '#/agent/llmRequester/llmRequesterService';
-import { IAgentLLMRequesterService } from '#/agent/llmRequester/llmRequester';
+import { IAgentLLMRequesterService, type LLMRequestSource } from '#/agent/llmRequester/llmRequester';
 import { IAgentContextSizeService } from '#/agent/contextSize/contextSize';
 import { IAgentProfileService } from '#/agent/profile/profile';
+import type { ToolInfo } from '#/agent/tool/toolContract';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { IAgentToolSelectService } from '#/agent/toolSelect/toolSelect';
 import { IAgentUsageService } from '#/agent/usage/usage';
 import { IConfigService } from '#/app/config/config';
-import { IFlagService } from '#/app/flag/flag';
 import { APIStatusError } from '#/app/llmProtocol/errors';
 import type { MaxCompletionTokensOptions } from '#/app/llmProtocol/provider';
+import type { Tool } from '#/app/llmProtocol/tool';
 import { emptyUsage } from '#/app/llmProtocol/usage';
 import type { Message } from '#/app/llmProtocol/message';
 import type { ModelCapability } from '#/app/llmProtocol/capability';
@@ -107,6 +111,7 @@ function createService(
     get: () => ({ size: 0, measured: 0, estimated: 0 }),
     measured: () => undefined,
   },
+  toolEntries: readonly ToolInfo[] = [],
 ) {
   const ix = disposables.add(new TestInstantiationService());
   const profile: Partial<IAgentProfileService> = {
@@ -132,7 +137,7 @@ function createService(
   };
   const usage = { record: () => undefined };
   const context = { get: () => history };
-  const tools = { list: () => [] };
+  const tools = { list: () => toolEntries };
   const config: Partial<IConfigService> = {
     get: (() => undefined) as IConfigService['get'],
   };
@@ -152,7 +157,6 @@ function createService(
   ix.stub(IAgentProfileService, profile);
   ix.stub(IAgentUsageService, usage);
   ix.stub(IConfigService, config);
-  ix.stub(IFlagService, { enabled: () => false });
   ix.stub(ILogService, log);
   ix.stub(ITelemetryService, telemetry);
   ix.set(
@@ -254,5 +258,136 @@ describe('AgentLLMRequesterService completion budget sizing', () => {
 
     expect(budget.value).toBeDefined();
     expect(budget.value?.usedContextTokens).toBeUndefined();
+  });
+});
+
+describe('AgentLLMRequesterService fold application', () => {
+  function recordingProjector(seen: { value?: ProjectOptions }) {
+    return {
+      project: (messages: readonly ContextMessage[], options?: ProjectOptions) => {
+        seen.value = options;
+        return messages;
+      },
+      projectStrict: (messages: readonly ContextMessage[], options?: ProjectOptions) => {
+        seen.value = options;
+        return messages;
+      },
+    };
+  }
+
+  it('applies folds for requests over the live history', async () => {
+    const seen: { value?: ProjectOptions } = {};
+    const service = createService(createModel({ value: 0 }, {}, false), recordingProjector(seen));
+
+    await service.request({ retry: { maxAttempts: 1 } });
+
+    expect(seen.value).toEqual({ applyFolds: true });
+  });
+
+  it('skips folds for requests over an explicit message list', async () => {
+    const seen: { value?: ProjectOptions } = {};
+    const service = createService(createModel({ value: 0 }, {}, false), recordingProjector(seen));
+
+    await service.request({ messages: [...history], retry: { maxAttempts: 1 } });
+
+    expect(seen.value).toEqual({ applyFolds: false });
+  });
+});
+
+describe('AgentLLMRequesterService system prompt contributions', () => {
+  const identityProjector: Pick<IAgentContextProjectorService, 'project' | 'projectStrict'> = {
+    project: (messages: readonly ContextMessage[]) => messages,
+    projectStrict: (messages: readonly ContextMessage[]) => messages,
+  };
+  const turnSource: LLMRequestSource = { type: 'turn', turnId: 1 };
+  const readTool: Tool = { name: 'Read', description: 'read files', parameters: {} };
+  const readToolInfo: ToolInfo = { ...readTool, source: 'builtin' };
+
+  function capturingModel(captured: { systemPrompt?: string; toolNames?: string[] }): Model {
+    const model = createModel({ value: 0 }, {}, false);
+    // The `withXxx` builders of `createModel` return fresh instances, so patch
+    // them to return the same instance — otherwise the capture patch below is
+    // lost the moment the requester applies the completion budget.
+    Object.defineProperties(model, {
+      request: {
+        value: async function* (input: { systemPrompt: string; tools: readonly Tool[] }) {
+          captured.systemPrompt = input.systemPrompt;
+          captured.toolNames = input.tools.map((tool) => tool.name);
+          yield {
+            type: 'finish',
+            message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }], toolCalls: [] },
+            providerFinishReason: 'completed',
+            rawFinishReason: 'stop',
+            id: 'resp-1',
+          };
+        },
+      },
+      withMaxCompletionTokens: { value: () => model },
+      withThinking: { value: () => model },
+      withGenerationKwargs: { value: () => model },
+      withProviderOptions: { value: () => model },
+      withThinkingKeep: { value: () => model },
+    });
+    return model;
+  }
+
+  it('applies contributions with the request source and final tool list', async () => {
+    const captured: { systemPrompt?: string } = {};
+    const seen: { source?: LLMRequestSource; toolNames?: string[] } = {};
+    const service = createService(capturingModel(captured), identityProjector);
+    service.registerSystemPromptContribution('test', (prompt, context) => {
+      seen.source = context.source;
+      seen.toolNames = context.tools.map((tool) => tool.name);
+      return `${prompt}\nCONTRIBUTED`;
+    });
+
+    await service.request({ source: turnSource, tools: [readTool] });
+
+    expect(captured.systemPrompt).toBe('system\nCONTRIBUTED');
+    expect(seen.source).toEqual(turnSource);
+    expect(seen.toolNames).toEqual(['Read']);
+  });
+
+  it('hands the default shaped tool list to contributions when no tool override is given', async () => {
+    const seen: { toolNames?: string[] } = {};
+    const service = createService(
+      capturingModel({}),
+      identityProjector,
+      { get: () => ({ size: 0, measured: 0, estimated: 0 }), measured: () => undefined },
+      [readToolInfo],
+    );
+    service.registerSystemPromptContribution('test', (prompt, context) => {
+      seen.toolNames = context.tools.map((tool) => tool.name);
+      return prompt;
+    });
+
+    await service.request({ source: turnSource });
+
+    expect(seen.toolNames).toEqual(['Read']);
+  });
+
+  it('chains contributions in registration order', async () => {
+    const captured: { systemPrompt?: string } = {};
+    const service = createService(capturingModel(captured), identityProjector);
+    service.registerSystemPromptContribution('a', (prompt) => `${prompt}|a`);
+    service.registerSystemPromptContribution('b', (prompt) => `${prompt}|b`);
+
+    await service.request({ source: turnSource });
+
+    expect(captured.systemPrompt).toBe('system|a|b');
+  });
+
+  it('stops applying a contribution once its registration is disposed', async () => {
+    const captured: { systemPrompt?: string } = {};
+    const service = createService(capturingModel(captured), identityProjector);
+    const registration = service.registerSystemPromptContribution(
+      'gone',
+      (prompt) => `${prompt}|gone`,
+    );
+
+    registration.dispose();
+    await service.request({ source: turnSource });
+
+    expect(captured.systemPrompt).toBe('system');
   });
 });

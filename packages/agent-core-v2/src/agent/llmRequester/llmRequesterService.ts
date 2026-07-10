@@ -2,11 +2,15 @@
  * `llmRequester` domain (L3) — `IAgentLLMRequesterService` implementation.
  *
  * Thin shell over the god-object `Model` (App scope). Assembles per-turn
- * `LLMRequestInput` from `profile` (system prompt), `contextMemory` +
- * `contextProjector` (history), `toolRegistry` (tools), and `toolSelect`
- * (progressive-disclosure shaping of the tool and history views), applies the
- * completion-token budget, then drives `model.request(input, signal)` with
- * bounded retry. Forwards streamed `part` events to the caller's `onPart`
+ * `LLMRequestInput` from `profile` plus the registered system-prompt
+ * contributions (prompt — prompt-shaping features plug in through
+ * `registerSystemPromptContribution` rather than the requester importing
+ * them), `contextMemory` + `contextProjector` (history — the fold pipeline
+ * carries the spine collapse and the toolSelect history view; requests over
+ * an explicit message list such as compaction bypass folds, which anchor on
+ * the live stored history), `toolRegistry`
+ * + `toolSelect` (tool list), applies the completion-token budget, then
+ * drives `model.request(input, signal)` with bounded retry. Forwards streamed `part` events to the caller's `onPart`
  * handler, records `usage` through `IAgentUsageService`, resolves to an
  * `LLMRequestFinish` on the `finish` event, logs the request lifecycle
  * (config deduplicated by content, request/response/failure lines, plus
@@ -17,18 +21,16 @@
 
 import { createHash } from 'node:crypto';
 import { InstantiationType } from '#/_base/di/extensions';
+import { toDisposable, type IDisposable } from '#/_base/di/lifecycle';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import { IAgentContextProjectorService } from '#/agent/contextProjector/contextProjector';
 import { IAgentContextSizeService } from '#/agent/contextSize/contextSize';
 import { IAgentProfileService } from '#/agent/profile/profile';
-import { SPINE_FLAG_ID } from '#/agent/spine/flag';
-import { appendSpineView } from '#/agent/spine/instructions';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { IAgentToolSelectService } from '#/agent/toolSelect/toolSelect';
 import { IAgentUsageService } from '#/agent/usage/usage';
 import { IConfigService } from '#/app/config/config';
-import { IFlagService } from '#/app/flag/flag';
 import {
   APIConnectionError,
   APIContextOverflowError,
@@ -62,6 +64,7 @@ import type {
   LLMRequestPartHandler,
   LLMRequestSource,
   LLMStreamTiming,
+  SystemPromptContribution,
 } from './llmRequester';
 import { IAgentLLMRequesterService } from './llmRequester';
 import {
@@ -93,6 +96,7 @@ interface ResolvedLLMRequest {
   readonly systemPrompt: string;
   readonly tools: readonly Tool[];
   readonly messages: Message[];
+  readonly applyFolds: boolean;
   readonly source: LLMRequestSource | undefined;
   readonly logFields: LLMRequestLogFields;
 }
@@ -113,6 +117,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
   declare readonly _serviceBrand: undefined;
 
   private lastConfigLogSignature: string | undefined;
+  private readonly systemPromptContributions = new Map<string, SystemPromptContribution>();
 
   constructor(
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
@@ -123,11 +128,20 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     @IAgentProfileService private readonly profile: IAgentProfileService,
     @IAgentUsageService private readonly usage: IAgentUsageService,
     @IConfigService private readonly config: IConfigService,
-    @IFlagService private readonly flags: IFlagService,
     @ILogService private readonly log: ILogService,
     @ITelemetryService private readonly telemetry: ITelemetryService,
     @IAgentWireService private readonly wire: IWireService,
   ) {}
+
+  registerSystemPromptContribution(
+    id: string,
+    contribution: SystemPromptContribution,
+  ): IDisposable {
+    this.systemPromptContributions.set(id, contribution);
+    return toDisposable(() => {
+      this.systemPromptContributions.delete(id);
+    });
+  }
 
   async request(
     overrides: LLMRequestOverrides = {},
@@ -239,8 +253,8 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
       systemPrompt: request.systemPrompt,
       tools: request.tools,
       messages: strict
-        ? this.projector.projectStrict(this.toolSelect.shapeHistory(request.messages))
-        : this.projector.project(this.toolSelect.shapeHistory(request.messages)),
+        ? this.projector.projectStrict(request.messages, { applyFolds: request.applyFolds })
+        : this.projector.project(request.messages, { applyFolds: request.applyFolds }),
     });
 
     const run = async (strict: boolean): Promise<LLMRequestFinish> => {
@@ -352,19 +366,35 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
 
     const messages = overrides.messages ?? this.context.get();
     const baseSystemPrompt = overrides.systemPrompt ?? this.profile.getSystemPrompt();
-    const systemPrompt = this.flags.enabled(SPINE_FLAG_ID)
-      ? appendSpineView(baseSystemPrompt)
-      : baseSystemPrompt;
+    const tools = [...(overrides.tools ?? this.defaultTools())];
+    const systemPrompt = this.applySystemPromptContributions(
+      baseSystemPrompt,
+      overrides.source,
+      tools,
+    );
     return {
       model,
       modelAlias: resolved.modelAlias,
       thinkingEffort: resolved.thinkingLevel,
       systemPrompt,
-      tools: [...(overrides.tools ?? this.defaultTools())],
+      tools,
       messages: [...messages],
+      applyFolds: overrides.messages === undefined,
       source: overrides.source,
       logFields: logFieldsForSource(overrides.source, extraLogFields),
     };
+  }
+
+  private applySystemPromptContributions(
+    prompt: string,
+    source: LLMRequestSource | undefined,
+    tools: readonly Tool[],
+  ): string {
+    let result = prompt;
+    for (const contribution of this.systemPromptContributions.values()) {
+      result = contribution(result, { source, tools });
+    }
+    return result;
   }
 
   private logRequest(input: LLMRequestLogInput): void {

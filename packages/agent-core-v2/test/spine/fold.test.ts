@@ -5,6 +5,7 @@ import { MASTER_ENV } from '#/app/flag/flagService';
 import {
   _resetSpineViewOverrideForTests,
   appendSpineView,
+  IAgentLLMRequesterService,
   IAgentSpineService,
   IAgentWireService,
   loadSpineViewOverride,
@@ -189,6 +190,55 @@ describe('Spine projection fold', () => {
 
     const systemPrompt = ctx.llmCalls[0]?.systemPrompt ?? '';
     expect(systemPrompt).not.toContain('<spine_view>');
+  });
+
+  it('omits the spine view for operation requests even when enabled', async () => {
+    // Compaction-style requests carry their own explicit message list and have
+    // no use for the tree protocol; the block would only burn tokens.
+    const ctx = testAgent();
+    await configureLoop(ctx);
+    ctx.mockNextResponse({ type: 'text', text: 'summary' });
+
+    const requester = ctx.get(IAgentLLMRequesterService);
+    await requester.request({
+      messages: [userMessage('summarize this')],
+      source: { type: 'operation', requestKind: 'full_compaction' },
+    });
+
+    const systemPrompt = ctx.llmCalls.at(-1)?.systemPrompt ?? '';
+    expect(systemPrompt).not.toContain('<spine_view>');
+  });
+
+  it('omits the spine view when the request tools do not offer spine_open', async () => {
+    // Sub-agent whitelists (coder/explore) exclude the spine tools; showing
+    // the protocol there asks the model to use tools it does not have.
+    const ctx = testAgent();
+    await configureLoop(ctx);
+    ctx.mockNextResponse({ type: 'text', text: 'done' });
+
+    const requester = ctx.get(IAgentLLMRequesterService);
+    await requester.request({
+      tools: [{ name: 'Read', description: 'read files', parameters: {} }],
+      source: { type: 'turn', turnId: 1 },
+    });
+
+    const systemPrompt = ctx.llmCalls.at(-1)?.systemPrompt ?? '';
+    expect(systemPrompt).not.toContain('<spine_view>');
+  });
+
+  it('appends the spine view when the request tools offer spine_open', async () => {
+    const ctx = testAgent();
+    await configureLoop(ctx);
+    ctx.mockNextResponse({ type: 'text', text: 'done' });
+
+    const requester = ctx.get(IAgentLLMRequesterService);
+    await requester.request({
+      tools: [{ name: 'spine_open', description: 'open a node', parameters: {} }],
+      source: { type: 'turn', turnId: 1 },
+    });
+
+    const systemPrompt = ctx.llmCalls.at(-1)?.systemPrompt ?? '';
+    expect(systemPrompt).toContain('<spine_view>');
   });
 
   it('uses a spine_instruction.md override in place of the built-in view', async () => {

@@ -3,10 +3,13 @@
  *
  * Shapes the provider-visible tool and history views for progressive tool
  * disclosure, loads MCP schemas into `contextMemory`, and exposes
- * loadable-tools announcement text. Reads live tools from `toolRegistry`,
- * active-tool and capability state from `profile`, gates through `flag`,
- * hooks into `toolExecutor`, and listens to context lifecycle events through
- * `event`. Bound at Agent scope.
+ * loadable-tools announcement text. The history view rides the context
+ * projector as a VIEW-order fold (`shapeHistory`, self-gated by `enabled()`),
+ * so index-anchored COLLAPSE folds such as spine see the untouched live
+ * history first; llmRequester only shapes the tool list directly. Reads live
+ * tools from `toolRegistry`, active-tool and capability state from `profile`,
+ * gates through `flag`, hooks into `toolExecutor`, and listens to context
+ * lifecycle events through `event`. Bound at Agent scope.
  */
 
 import { InstantiationType } from '#/_base/di/extensions';
@@ -17,6 +20,10 @@ import { IFlagService } from '#/app/flag/flag';
 import type { Tool } from '#/app/llmProtocol/tool';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import type { ContextMessage } from '#/agent/contextMemory/types';
+import {
+  CONTEXT_FOLD_ORDER,
+  IAgentContextProjectorService,
+} from '#/agent/contextProjector/contextProjector';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import type { ToolInfo } from '#/agent/tool/toolContract';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
@@ -45,11 +52,17 @@ export class AgentToolSelectService extends Disposable implements IAgentToolSele
     @IAgentToolRegistryService private readonly toolRegistry: IAgentToolRegistryService,
     @IAgentProfileService private readonly profile: IAgentProfileService,
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
+    @IAgentContextProjectorService projector: IAgentContextProjectorService,
     @IAgentToolExecutorService toolExecutor: IAgentToolExecutorService,
     @IFlagService private readonly flags: IFlagService,
     @IEventBus eventBus: IEventBus,
   ) {
     super();
+    this._register(
+      projector.registerContextFold('toolSelect', (messages) => this.shapeHistory(messages), {
+        order: CONTEXT_FOLD_ORDER.VIEW,
+      }),
+    );
     this._register(
       toolExecutor.registerUnavailableToolDescriber((name) => this.describeUnavailableTool(name)),
     );

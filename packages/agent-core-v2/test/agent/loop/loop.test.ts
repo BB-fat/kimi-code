@@ -369,6 +369,7 @@ function createTimingRequester(): IAgentLLMRequesterService {
 
   return {
     _serviceBrand: undefined,
+    registerSystemPromptContribution: () => ({ dispose: () => undefined }),
     async request(_overrides, onPart = () => {}) {
       await onPart({ type: 'text', text: 'answer' });
       return {
