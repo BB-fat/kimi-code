@@ -176,6 +176,7 @@ import '#/activity/sessionActivityKernel';
 import '#/agent/plan/profile/plan';
 import '#/agent/plan/tools/enter-plan-mode';
 import '#/agent/plan/tools/exit-plan-mode';
+import '#/agent/plan/configSection';
 export * from '#/agent/plan/plan';
 export * from '#/agent/plan/planOps';
 export * from '#/agent/plan/planService';
@@ -245,8 +246,6 @@ export * from '#/app/sessionLegacy/sessionLegacy';
 export * from '#/app/sessionLegacy/sessionLegacyService';
 export * from '#/session/interaction/interaction';
 export * from '#/session/interaction/interactionService';
-export * from '#/agent/interaction/interactionTurnBridge';
-export * from '#/agent/interaction/interactionTurnBridgeService';
 export * from '#/session/sessionContext/sessionContext';
 export * from '#/session/sessionActivity/sessionActivity';
 export * from '#/session/sessionActivity/sessionActivityService';
@@ -254,6 +253,7 @@ export * from '#/session/sessionActivity/sessionActivityService';
 import '#/session/approval/approval';
 import '#/session/approval/approvalService';
 export { ISessionApprovalService } from '#/session/approval/approval';
+export type { ApprovalRequest as SessionApprovalRequest, ApprovalResponse as SessionApprovalResponse } from '#/session/approval/approval';
 export * from '#/session/question/question';
 export * from '#/session/question/questionService';
 import '#/agent/questionTools/tools/ask-user';
@@ -311,6 +311,11 @@ export {
   buildImageCompressionCaption,
   compressBase64ForModel,
   compressImageForModel,
+  IMAGE_BYTE_BUDGET,
+  MAX_IMAGE_EDGE_PX,
+  READ_IMAGE_BYTE_BUDGET,
+  resolveMaxImageEdgePx,
+  resolveReadImageByteBudget,
   type ImageCompressionTelemetry,
 } from '#/_base/tools/support/image-compress';
 export {
@@ -372,10 +377,14 @@ export * from '#/agent/mcp/mcp';
 export * from '#/agent/mcp/mcpService';
 export * from '#/agent/mcp/mcpDiscoveryOps';
 export * from '#/agent/mcp/config-schema';
+export type { McpServerEntry } from '#/agent/mcp/connection-manager';
 export * from '#/agent/media/mediaTools';
 export * from '#/agent/media/mediaToolsRegistrar';
 export * from '#/agent/media/registerMediaTools';
+import '#/agent/media/configSection';
+export * from '#/agent/media/imageConfigBridge';
 export * from '#/agent/spine/index';
+import '#/agent/permissionMode/configSection';
 export * from '#/agent/permissionMode/permissionMode';
 export * from '#/agent/permissionMode/permissionModeService';
 export * from '#/agent/permissionPolicy/permissionPolicy';
@@ -406,6 +415,7 @@ export * from '#/agent/shellCommand/shellCommand';
 export * from '#/agent/shellCommand/shellCommandService';
 export * from '#/agent/rpc/rpc';
 export * from '#/agent/rpc/rpcService';
+export type { McpServerInfo } from '#/agent/rpc/core-api';
 export * from '#/agent/scopeContext/scopeContext';
 export * from '#/session/btw/btw';
 export * from '#/session/btw/btwService';

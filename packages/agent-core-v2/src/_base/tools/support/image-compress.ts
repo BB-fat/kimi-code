@@ -33,47 +33,32 @@ import { sniffImageDimensions } from './file-type';
 /**
  * Built-in longest-edge ceiling (px). Larger images are scaled down to fit.
  * This is the default only: the effective ceiling is resolved per call by
- * {@link resolveMaxImageEdgePx} (explicit option > env > config > this).
+ * {@link resolveMaxImageEdgePx} (explicit option > `[image] max_edge_px` config
+ * > this). The config value is pushed by the media-domain image-config bridge,
+ * which reads the env-resolved `image` section (`KIMI_IMAGE_MAX_EDGE_PX` wins
+ * over the file value over there — this module never reads env directly).
  */
 export const MAX_IMAGE_EDGE_PX = 2000;
 
 /**
- * Env var overriding the longest-edge ceiling (px). Read live on every
- * resolution so it applies in any process without wiring; a value that is
- * not a positive integer is ignored.
- */
-export const MAX_IMAGE_EDGE_ENV = 'KIMI_IMAGE_MAX_EDGE_PX';
-
-/**
- * The `[image] max_edge_px` value from config.toml, pushed by the config
- * owner on load and reload. Processes that never load config leave this
- * unset and get env/built-in behavior.
+ * The `[image] max_edge_px` value, pushed by the image-config bridge on load
+ * and on config change. Processes that never load config (or have no `[image]`
+ * section) leave this unset and get the built-in ceiling.
  */
 let configuredMaxImageEdgePx: number | undefined;
 
-/** Push (or clear, with `undefined`) the config.toml longest-edge ceiling. */
+/** Push (or clear, with `undefined`) the configured longest-edge ceiling. */
 export function setConfiguredMaxImageEdgePx(value: number | undefined): void {
   configuredMaxImageEdgePx = value !== undefined && isPositiveInt(value) ? value : undefined;
 }
 
 /**
- * Effective default longest-edge ceiling (px), for calls that pass no
- * explicit `maxEdge`. Precedence mirrors the experimental-flag resolver:
- * env var > config.toml > built-in {@link MAX_IMAGE_EDGE_PX}.
+ * Effective default longest-edge ceiling (px), for calls that pass no explicit
+ * `maxEdge`. Precedence: configured `[image] max_edge_px` (env already folded
+ * in by the config layer) > built-in {@link MAX_IMAGE_EDGE_PX}.
  */
-export function resolveMaxImageEdgePx(
-  env: Readonly<Record<string, string | undefined>> = process.env,
-): number {
-  const raw = env[MAX_IMAGE_EDGE_ENV]?.trim();
-  if (raw !== undefined && raw.length > 0 && /^\d+$/.test(raw)) {
-    const parsed = Number(raw);
-    if (isPositiveInt(parsed)) return parsed;
-  }
+export function resolveMaxImageEdgePx(): number {
   return configuredMaxImageEdgePx ?? MAX_IMAGE_EDGE_PX;
-}
-
-function isPositiveInt(value: number): boolean {
-  return Number.isInteger(value) && value > 0;
 }
 
 /**
@@ -88,44 +73,38 @@ export const IMAGE_BYTE_BUDGET = 3.75 * 1024 * 1024;
  * (ReadMediaFile's default path). Far below {@link IMAGE_BYTE_BUDGET}: a
  * session that keeps screenshotting and reading images accumulates every one
  * of them in the request body on every turn, so per-image size — not the
- * provider's per-image ceiling — is what keeps the total under the
- * provider's request-size limit. 256 KB keeps a clean 2000px UI screenshot
- * on the lossless fast path while capping dense content at a readable
- * q80/1000px JPEG; fine detail stays reachable through the `region`
- * readback, which deliberately ignores this budget.
+ * provider's per-image ceiling — is what keeps the total under the provider's
+ * request-size limit. 256 KB keeps a clean UI screenshot on the lossless fast
+ * path while capping dense content at a readable q80/1000px JPEG; fine detail
+ * stays reachable through the `region` readback, which deliberately ignores
+ * this budget. Overridden by `[image] read_byte_budget` (env
+ * `KIMI_IMAGE_READ_BYTE_BUDGET` folded in by the config layer) via
+ * {@link resolveReadImageByteBudget}.
  */
 export const READ_IMAGE_BYTE_BUDGET = 256 * 1024;
 
-/**
- * Env var overriding the read-image byte budget. Read live on every
- * resolution; a value that is not a positive integer is ignored.
- */
-export const READ_IMAGE_BYTE_BUDGET_ENV = 'KIMI_IMAGE_READ_BYTE_BUDGET';
-
-/** The `[image] read_byte_budget` value from config.toml; see {@link setConfiguredMaxImageEdgePx}. */
+/** The `[image] read_byte_budget` value; see {@link setConfiguredMaxImageEdgePx}. */
 let configuredReadImageByteBudget: number | undefined;
 
-/** Push (or clear, with `undefined`) the config.toml read-image byte budget. */
+/** Push (or clear, with `undefined`) the configured read-image byte budget. */
 export function setConfiguredReadImageByteBudget(value: number | undefined): void {
-  configuredReadImageByteBudget = value !== undefined && isPositiveInt(value) ? value : undefined;
+  configuredReadImageByteBudget =
+    value !== undefined && isPositiveInt(value) ? value : undefined;
 }
 
 /**
  * Effective read-image byte budget. Precedence mirrors
- * {@link resolveMaxImageEdgePx}: env var > config.toml > built-in
+ * {@link resolveMaxImageEdgePx}: configured `[image] read_byte_budget` (env
+ * already folded in by the config layer) > built-in
  * {@link READ_IMAGE_BYTE_BUDGET}.
  */
-export function resolveReadImageByteBudget(
-  env: Readonly<Record<string, string | undefined>> = process.env,
-): number {
-  const raw = env[READ_IMAGE_BYTE_BUDGET_ENV]?.trim();
-  if (raw !== undefined && raw.length > 0 && /^\d+$/.test(raw)) {
-    const parsed = Number(raw);
-    if (isPositiveInt(parsed)) return parsed;
-  }
+export function resolveReadImageByteBudget(): number {
   return configuredReadImageByteBudget ?? READ_IMAGE_BYTE_BUDGET;
 }
 
+function isPositiveInt(value: number): boolean {
+  return Number.isInteger(value) && value > 0;
+}
 /** Progressively lower JPEG quality until the payload fits the byte budget. */
 const JPEG_QUALITY_STEPS = [80, 60, 40, 20] as const;
 

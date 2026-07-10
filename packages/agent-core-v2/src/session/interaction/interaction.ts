@@ -54,13 +54,14 @@ export interface ISessionInteractionService {
 
   request<TPayload, TResponse>(req: InteractionRequest<TPayload>): Promise<TResponse>;
   /**
-   * Cancel every pending interaction whose origin carries `turnId`, resolving
-   * each with `{ cancelled: true, reason: 'turn_ended' }` — a turn that has
-   * ended can never answer its pending requests, and leaving them parked would
-   * pin `sessionActivity` at `awaiting_approval` / `awaiting_question`
-   * indefinitely. Driven by the Agent-scope `IAgentInteractionTurnBridge`
-   * (sibling `turn.ended` events never reach a Session Service: `IEventBus` is
-   * Agent-scoped, out of Session's DI visibility).
+   * Cancel every pending interaction whose {@link InteractionOrigin.turnId}
+   * matches `turnId`, resolving each as `{ cancelled: true, reason: 'turn_ended' }`
+   * — a turn that has ended can never answer its pending requests, and leaving
+   * them parked would pin `sessionActivity` at `awaiting_approval` /
+   * `awaiting_question` indefinitely. Driven from the per-agent `IEventBus`
+   * `turn.ended` by `IAgentLifecycleService`, which subscribes each agent's bus
+   * on creation (the bus is Agent-scoped and cannot be injected here directly).
+   * No-op when no pending interaction matches.
    */
   cancelPendingForTurn(turnId: number): void;
   /**

@@ -446,9 +446,12 @@ export class ReadMediaFileTool implements BuiltinTool<ReadMediaFileInput> {
           };
         } else {
           // Shrink oversized images so a large screenshot neither wastes context
-          // tokens nor trips the provider's per-image byte ceiling. Best effort:
-          // on any failure compressImageForModel returns the original bytes, so
-          // the read still succeeds with the uncompressed image.
+          // tokens nor trips the provider's per-image byte ceiling. Model-read
+          // images get the much tighter read budget: they accumulate in the
+          // request body on every turn, and detail stays reachable through the
+          // region readback (which ignores the budget). Best effort: on any
+          // failure compressImageForModel returns the original bytes, so the
+          // read still succeeds with the uncompressed image.
           const compressed = await compressImageForModel(data, fileType.mimeType, {
             byteBudget: resolveReadImageByteBudget(),
             telemetry: this.compressTelemetry,

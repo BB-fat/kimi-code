@@ -355,18 +355,17 @@ async function runNativeTurn(
     // spawned has drained (config-bounded). Flush the buffered assistant
     // message first so a long drain does not withhold the final message.
     writer.flushAssistant();
-    if (result.type === 'completed') {
-      try {
-        await drainBackgroundTasks(app, session);
-      } catch {
-        // Draining is best-effort; a wedged background task must not fail the
-        // (already completed) turn. Swallow and proceed to finish.
-      }
+    if (result.type !== 'completed') {
       writer.finish();
-      return;
+      throw new Error(formatNativeTurnFailure(result));
+    }
+    try {
+      await drainBackgroundTasks(app, session);
+    } catch {
+      // Draining is best-effort; a wedged background task must not fail the
+      // (already completed) turn. Swallow and proceed to finish.
     }
     writer.finish();
-    throw new Error(formatNativeTurnFailure(result));
   } catch (error) {
     writer.finish();
     throw error instanceof Error ? error : new Error(String(error));
@@ -497,21 +496,18 @@ async function drainBackgroundTasks(app: Scope, session: ISessionScopeHandle): P
 function formatNativeTurnFailure(
   result: Exclude<LoopRunResult, { readonly type: 'completed' }>,
 ): string {
-  if (result.type === 'failed') {
-    const error = result.error as { readonly code?: string; readonly message?: string } | undefined;
-    if (error?.code === 'provider.filtered') {
-      return 'Provider safety policy blocked the response.';
-    }
-    if (error?.code !== undefined) {
-      return `${error.code}: ${error.message ?? ''}`.trimEnd();
-    }
-    if (result.error instanceof Error) {
-      return result.error.message;
-    }
-    return 'Prompt turn ended with reason: failed';
+  if (result.type === 'cancelled') {
+    return `Prompt turn ended with reason: ${String(result.reason)}`;
   }
-  if (result.reason === 'blocked') {
-    return 'Prompt hook blocked the request.';
+  const error = result.error as { readonly code?: string; readonly message?: string } | undefined;
+  if (error?.code === 'provider.filtered') {
+    return 'Provider safety policy blocked the response.';
   }
-  return `Prompt turn ended with reason: ${String(result.reason)}`;
+  if (error?.code !== undefined) {
+    return `${error.code}: ${error.message ?? ''}`.trimEnd();
+  }
+  if (result.error instanceof Error) {
+    return result.error.message;
+  }
+  return 'Prompt turn failed.';
 }

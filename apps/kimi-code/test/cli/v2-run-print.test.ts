@@ -153,7 +153,7 @@ describe('runV2Print', () => {
             }
             return {
               id: 1,
-              result: Promise.resolve({ reason: 'completed' }),
+              result: Promise.resolve({ type: 'completed', steps: 1, truncated: false }),
             };
           }),
         },

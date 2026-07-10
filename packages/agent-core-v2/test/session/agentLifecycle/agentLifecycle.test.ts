@@ -172,6 +172,7 @@ describe('AgentLifecycleService', () => {
     ix.stub(IConfigService, {
       ready: Promise.resolve(),
       get: (() => undefined) as IConfigService['get'],
+      onDidSectionChange: (() => ({ dispose: () => {} })) as IConfigService['onDidSectionChange'],
     } as unknown as IConfigService);
     ix.stub(IAtomicDocumentStore, {
       _serviceBrand: undefined,
@@ -306,6 +307,8 @@ describe('AgentLifecycleService', () => {
     expect(child.id).toBe('child');
     expect(registerAgent).toHaveBeenCalledWith('child', {
       homedir: '/tmp/kimi-agentLifecycle-test/agents/child',
+      type: 'sub',
+      parentAgentId: 'main',
       forkedFrom: 'main',
       labels: { swarmItem: 'swarm-item-1' },
     });
