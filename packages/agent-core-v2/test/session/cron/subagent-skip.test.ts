@@ -18,6 +18,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ISessionCronService } from '#/session/cron/sessionCronService';
 import { IAgentProfileService } from '#/agent/profile/profile';
+import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
+import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
 import { createTestAgent, cronServices, type TestAgentContext } from '../../harness';
 
 const CRON_TOOL_NAMES = ['CronCreate', 'CronList', 'CronDelete'] as const;
@@ -37,15 +39,9 @@ describe('Agent + Cron — subagent suppression', () => {
 
   describe("type='sub'", () => {
     let ctx: TestAgentContext;
-    let cron: ISessionCronService;
-    let profile: IAgentProfileService;
-    let listenerCountBeforeCreate: number;
 
     beforeEach(() => {
-      listenerCountBeforeCreate = process.listenerCount('SIGUSR1');
       ctx = createTestAgent(cronServices());
-      cron = ctx.get(ISessionCronService);
-      profile = ctx.get(IAgentProfileService);
     });
 
     afterEach(async () => {
@@ -56,24 +52,23 @@ describe('Agent + Cron — subagent suppression', () => {
       }
     });
 
-    it('cron exists, start() is skipped, tools not registered', () => {
+    it('subagents get no cron tools or SIGUSR1 listener of their own', async () => {
       if (process.platform === 'win32') return;
 
-      // Subagents get a disabled SessionCronService: no scheduler, no timers,
-      // no SIGUSR1 listener and no tools — the service-DI equivalent of
-      // the old `agent.cron === null`.
-      expect(cron.isEnabled).toBe(false);
+      // Suppression is structural now: SessionCronService is a session
+      // singleton bound only to the main agent (onDidCreateMain), so a
+      // subagent must not receive the Cron tools in its own registry and
+      // must not bind another SIGUSR1 listener.
+      const listenerCountBeforeCreate = process.listenerCount('SIGUSR1');
+      const agents = ctx.get(IAgentLifecycleService);
+      const sub = await agents.create({ agentId: 'sub-cron-test' });
 
-      // start() was not called — no SIGUSR1 binding accrued.
       expect(process.listenerCount('SIGUSR1')).toBe(listenerCountBeforeCreate);
+      expect(ctx.get(ISessionCronService).isEnabled).toBe(true);
 
-      // Configure with the cron tool names in the whitelist; even with
-      // the LLM allowlist explicitly listing them, the BuiltinToolManager
-      // must not have constructed the instances for a subagent.
-      profile.update({ activeToolNames: [...CRON_TOOL_NAMES] });
-      const toolNames = ctx.toolsData().map((info) => info.name);
+      const subRegistry = sub.accessor.get(IAgentToolRegistryService);
       for (const name of CRON_TOOL_NAMES) {
-        expect(toolNames).not.toContain(name);
+        expect(subRegistry.resolve(name)).toBeUndefined();
       }
     });
   });

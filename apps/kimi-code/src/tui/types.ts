@@ -40,6 +40,8 @@ export interface AppState {
   thinkingEffort: ThinkingEffort;
   contextUsage: number;
   contextTokens: number;
+  /** Whole stored-history estimate before projection folds; 0 until measured. */
+  rawContextTokens: number;
   maxContextTokens: number;
   isCompacting: boolean;
   isReplaying: boolean;

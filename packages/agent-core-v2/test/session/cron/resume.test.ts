@@ -1,27 +1,25 @@
 /**
  * Resume / cross-restart persistence for SessionCronService.
  *
- * The manager's `addTask` / `removeTasks` wrappers mirror every mutation
- * to `<sessionDir>/agents/<agentId>/cron/<id>.json`, and `loadFromStore()`
- * re-populates the in-memory store on `kimi resume`. The scheduler's
- * `createdAt`-based baseline is what makes a reloaded task fire
- * correctly even when ideal fire times landed during downtime — these
- * tests pin down both sides of the contract.
+ * `addTask` / `removeTasks` / cursor advances persist through the
+ * App-scoped `ICronTaskPersistence` (keyed by `workspaceId`), and
+ * `loadFromStore()` re-populates the in-memory store on `kimi resume`.
+ * The scheduler's `createdAt`-based baseline is what makes a reloaded
+ * task fire correctly even when ideal fire times landed during
+ * downtime — these tests pin down both sides of the contract.
  */
 
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, relative } from 'pathe';
+import { join } from 'pathe';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ContentPart } from '#/app/llmProtocol/message';
 import type { ContextMessage, PromptOrigin } from '#/agent/contextMemory/types';
 import { IAgentPromptService } from '#/agent/prompt/prompt';
-import type { CronTask } from '#/app/cron/cronTask';
 import { ISessionCronService } from '#/session/cron/sessionCronService';
-import { IBootstrapService } from '#/app/bootstrap/bootstrap';
-import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
+import { ICronTaskPersistence } from '#/app/cron/cronTaskPersistence';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import {
   createTestAgent,
@@ -77,11 +75,6 @@ function cronDir(ctx: TestAgentContext): string {
   return join(session.sessionDir, 'agents', 'main', 'cron');
 }
 
-function cronScope(ctx: TestAgentContext): string {
-  const bootstrap = ctx.get(IBootstrapService);
-  return relative(bootstrap.homeDir, cronDir(ctx));
-}
-
 async function readDiskIds(ctx: TestAgentContext): Promise<readonly string[]> {
   try {
     const entries = await readdir(cronDir(ctx));
@@ -101,15 +94,14 @@ function createCronAgent(
   return createTestAgent(homeDirServices(sessionDir), cronOverride);
 }
 
-function cronDocuments(ctx: TestAgentContext): IAtomicDocumentStore {
-  return ctx.get(IAtomicDocumentStore);
-}
-
-async function readPersistedTask(
-  ctx: TestAgentContext,
-  id: string,
-): Promise<CronTask | undefined> {
-  return cronDocuments(ctx).get<CronTask>(cronScope(ctx), `${id}.json`);
+function persistence(ctx: TestAgentContext): {
+  readonly store: ICronTaskPersistence;
+  readonly workspaceId: string;
+} {
+  return {
+    store: ctx.get(ICronTaskPersistence),
+    workspaceId: ctx.get(ISessionContext).workspaceId,
+  };
 }
 
 describe('SessionCronService — persistence and resume', () => {
@@ -157,32 +149,34 @@ describe('SessionCronService — persistence and resume', () => {
       cron = ctx.get(ISessionCronService);
     });
 
-    it('addTask writes a JSON record to <sessionDir>/agents/<agentId>/cron/<id>.json', async () => {
+    it('addTask persists the task through ICronTaskPersistence', async () => {
       const task = cron.addTask({
         cron: '*/5 * * * *',
         prompt: 'ping',
       });
       await cron.flushPersist();
 
-      const loaded = await readPersistedTask(ctx, task.id);
+      const { store, workspaceId } = persistence(ctx);
+      const loaded = await store.get(workspaceId, task.id);
       expect(loaded).toEqual({
         id: task.id,
         cron: '*/5 * * * *',
         prompt: 'ping',
         createdAt: harness.now(),
-        recurring: undefined,
+        tags: { sessionId: ctx.get(ISessionContext).sessionId },
       });
-      expect(await readDiskIds(ctx)).toEqual([task.id]);
+      expect((await store.list({ workspaceId })).map((t) => t.id)).toEqual([task.id]);
     });
 
-    it('removeTasks deletes the JSON record', async () => {
+    it('removeTasks deletes the persisted record', async () => {
+      const { store, workspaceId } = persistence(ctx);
       const task = cron.addTask({ cron: '*/5 * * * *', prompt: 'a' });
       await cron.flushPersist();
-      expect((await readDiskIds(ctx)).length).toBe(1);
+      expect(await store.list({ workspaceId })).toHaveLength(1);
 
       cron.removeTasks([task.id]);
       await cron.flushPersist();
-      expect(await readDiskIds(ctx)).toEqual([]);
+      expect(await store.list({ workspaceId })).toEqual([]);
     });
   });
 
@@ -305,7 +299,10 @@ describe('SessionCronService — persistence and resume', () => {
         recurring: false,
       });
       await cron.flushPersist();
-      expect(await readDiskIds(ctx)).toEqual([oneShot.id]);
+      {
+        const { store, workspaceId } = persistence(ctx);
+        expect((await store.list({ workspaceId })).map((t) => t.id)).toEqual([oneShot.id]);
+      }
       clockB.install();
       await resumedCron!.loadFromStore();
 
@@ -320,7 +317,10 @@ describe('SessionCronService — persistence and resume', () => {
 
       await resumedCron!.flushPersist();
       expect(resumedCron!.list()).toEqual([]);
-      expect(await readDiskIds(ctx)).toEqual([]);
+      {
+        const { store, workspaceId } = persistence(ctx);
+        expect(await store.list({ workspaceId })).toEqual([]);
+      }
     });
   });
 
@@ -359,7 +359,8 @@ describe('SessionCronService — persistence and resume', () => {
 
       await cron.flushPersist();
 
-      const onDisk = await readPersistedTask(ctx, task.id);
+      const { store, workspaceId } = persistence(ctx);
+      const onDisk = await store.get(workspaceId, task.id);
       expect(typeof onDisk?.lastFiredAt).toBe('number');
       expect(onDisk!.lastFiredAt!).toBeLessThanOrEqual(clockA.now());
 
@@ -404,9 +405,10 @@ describe('SessionCronService — persistence and resume', () => {
       const task = cron.addTask({ cron: '*/5 * * * *', prompt: 'check' });
       await cron.flushPersist();
 
-      const original = await readPersistedTask(ctx, task.id);
+      const { store, workspaceId } = persistence(ctx);
+      const original = await store.get(workspaceId, task.id);
       if (original === undefined) throw new Error('expected persisted task');
-      await cronDocuments(ctx).set(cronScope(ctx), `${task.id}.json`, {
+      await store.save(workspaceId, {
         ...original,
         lastFiredAt: clockA.now() + 365 * 24 * 60 * 60 * 1000,
       });

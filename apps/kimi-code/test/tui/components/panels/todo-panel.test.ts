@@ -217,7 +217,18 @@ describe('TodoPanelComponent', () => {
     const panel = new TodoPanelComponent();
     panel.setTree([ip('root task', { children: [ip('current step', { active: true })] })]);
     const lines = panel.render(80).map(strip);
-    expect(lines).toEqual(['─'.repeat(80), '  Todo', '  ● root task', '    ● current step']);
+    expect(lines).toEqual(['─'.repeat(80), '  Spine Tree', '  ● root task', '    ● current step']);
+  });
+
+  it('header title follows the mode: Spine Tree for tree, Todo for flat', () => {
+    const panel = new TodoPanelComponent();
+    panel.setTree([ip('root', { active: true })]);
+    expect(strip(panel.render(80).join('\n'))).toContain('Spine Tree');
+
+    panel.setTodos([{ title: 'plain', status: 'pending' }]);
+    const flatOut = strip(panel.render(80).join('\n'));
+    expect(flatOut).toContain('Todo');
+    expect(flatOut).not.toContain('Spine Tree');
   });
 
   it('tree mode: folds done subtrees into a single counted line', () => {

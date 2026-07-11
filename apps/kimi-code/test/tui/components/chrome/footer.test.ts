@@ -43,6 +43,7 @@ const appState: AppState = {
   thinkingEffort: 'off',
   contextUsage: 0,
   contextTokens: 0,
+  rawContextTokens: 0,
   maxContextTokens: 0,
   isCompacting: false,
   isReplaying: false,

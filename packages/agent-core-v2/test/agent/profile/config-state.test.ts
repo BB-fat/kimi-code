@@ -57,6 +57,7 @@ describe('ConfigState model capabilities', () => {
         kimi: {
           type: 'kimi',
           apiKey: 'test-key',
+          baseUrl: 'https://api.example.test/v1',
         },
       },
       models: {
@@ -118,6 +119,7 @@ describe('ConfigState model capabilities', () => {
         kimi: {
           type: 'kimi',
           apiKey: 'test-key',
+          baseUrl: 'https://api.example.test/v1',
         },
       },
       models: {
@@ -193,6 +195,7 @@ describe('ConfigState prompt cache hint', () => {
         kimi: {
           type: 'kimi',
           apiKey: 'test-key',
+          baseUrl: 'https://api.example.test/v1',
         },
       },
       models: {
@@ -233,11 +236,15 @@ describe('ConfigState prompt cache hint', () => {
 describe('ConfigState thinking clamp for always-thinking models', () => {
   let ctx: TestAgentContext;
   let profile: IAgentProfileService;
+  let requester: IAgentLLMRequesterService;
   let kimiConfig: TestKimiConfig;
+  let generate: GenerateFn;
 
   beforeEach(() => {
     kimiConfig = {
-      providers: { kimi: { type: 'kimi', apiKey: 'test-key' } },
+      providers: {
+        kimi: { type: 'kimi', apiKey: 'test-key', baseUrl: 'https://api.example.test/v1' },
+      },
       models: {
         'kimi-code/deep': {
           provider: 'kimi',
@@ -262,8 +269,13 @@ describe('ConfigState thinking clamp for always-thinking models', () => {
         },
       },
     };
-    ctx = createTestAgent(configServices(() => kimiConfig));
+    generate = defaultGenerate;
+    ctx = createTestAgent(
+      configServices(() => kimiConfig),
+      llmGenerateServices((...args) => generate(...args)),
+    );
     profile = ctx.get(IAgentProfileService);
+    requester = ctx.get(IAgentLLMRequesterService);
   });
 
   afterEach(async () => {
@@ -280,14 +292,27 @@ describe('ConfigState thinking clamp for always-thinking models', () => {
     expect(profile.data().thinkingLevel).toBe('high');
   });
 
-  it('builds the provider with thinking enabled even after thinking was set off', () => {
-    profile.update({ modelAlias: 'kimi-code/deep', thinkingLevel: 'off' });
-
-    const provider = profile.getProvider();
-    const gen = Reflect.get(provider as object, '_generationKwargs') as {
-      extra_body?: { thinking?: { type?: unknown } };
+  it('builds the provider with thinking enabled even after thinking was set off', async () => {
+    let captured: { extra_body?: { thinking?: { type?: unknown } } } | undefined;
+    generate = async (provider) => {
+      captured = Reflect.get(provider as object, '_generationKwargs') as typeof captured;
+      return {
+        id: 'response-1',
+        message: { role: 'assistant', content: [], toolCalls: [] },
+        usage: emptyUsage(),
+        finishReason: 'completed',
+        rawFinishReason: 'stop',
+      };
     };
-    expect(gen.extra_body?.thinking?.type).toBe('enabled');
+    profile.update({
+      modelAlias: 'kimi-code/deep',
+      systemPrompt: 'system',
+      thinkingLevel: 'off',
+    });
+
+    await requester.request({}, undefined, new AbortController().signal);
+
+    expect(captured?.extra_body?.thinking?.type).toBe('enabled');
   });
 
   it('keeps thinking off working for toggleable models', () => {
@@ -314,15 +339,22 @@ describe('ConfigState thinking clamp for always-thinking models', () => {
 describe('ConfigState.provider applies global KIMI_MODEL_* request config', () => {
   let ctx: TestAgentContext | undefined;
   let profile: IAgentProfileService;
+  let requester: IAgentLLMRequesterService;
   let kimiConfig: TestKimiConfig;
+  let generate: GenerateFn;
+  let capturedKwargs: Record<string, unknown> | undefined;
 
   beforeEach(() => {
     kimiConfig = {
-      providers: { kimi: { type: 'kimi', apiKey: 'test-key' } },
+      providers: {
+        kimi: { type: 'kimi', apiKey: 'test-key', baseUrl: 'https://api.example.test/v1' },
+      },
       models: {
         'kimi-code': { provider: 'kimi', model: 'kimi-code', maxContextSize: 128_000 },
       },
     };
+    generate = defaultGenerate;
+    capturedKwargs = undefined;
   });
 
   afterEach(async () => {
@@ -336,45 +368,66 @@ describe('ConfigState.provider applies global KIMI_MODEL_* request config', () =
   });
 
   function createAgentWithEnv(): void {
-    ctx = createTestAgent(configServices(() => kimiConfig));
+    ctx = createTestAgent(
+      configServices(() => kimiConfig),
+      llmGenerateServices((...args) => generate(...args)),
+    );
     profile = ctx.get(IAgentProfileService);
+    requester = ctx.get(IAgentLLMRequesterService);
   }
 
-  it('injects KIMI_MODEL_TEMPERATURE into config.provider (the provider compaction also uses)', () => {
+  function captureGenerationKwargs(): void {
+    generate = async (provider) => {
+      capturedKwargs = Reflect.get(provider as object, '_generationKwargs') as
+        | Record<string, unknown>
+        | undefined;
+      return {
+        id: 'response-1',
+        message: { role: 'assistant', content: [], toolCalls: [] },
+        usage: emptyUsage(),
+        finishReason: 'completed',
+        rawFinishReason: 'stop',
+      };
+    };
+  }
+
+  function capturedThinkingKeep(): unknown {
+    const extraBody = capturedKwargs?.['extra_body'] as
+      | { thinking?: { keep?: unknown } }
+      | undefined;
+    return extraBody?.thinking?.keep;
+  }
+
+  it('injects KIMI_MODEL_TEMPERATURE into config.provider (the provider compaction also uses)', async () => {
     vi.stubEnv('KIMI_MODEL_TEMPERATURE', '0.3');
+    captureGenerationKwargs();
     createAgentWithEnv();
 
-    profile.update({ modelAlias: 'kimi-code' });
+    profile.update({ modelAlias: 'kimi-code', systemPrompt: 'system' });
+    await requester.request({}, undefined, new AbortController().signal);
 
-    const provider = profile.getProvider();
-    expect(Reflect.get(provider as object, '_generationKwargs')).toMatchObject({
-      temperature: 0.3,
-    });
+    expect(capturedKwargs).toMatchObject({ temperature: 0.3 });
   });
 
-  it('injects KIMI_MODEL_THINKING_KEEP into config.provider when thinking is on (so compaction keeps it)', () => {
+  it('injects KIMI_MODEL_THINKING_KEEP into config.provider when thinking is on (so compaction keeps it)', async () => {
     vi.stubEnv('KIMI_MODEL_THINKING_KEEP', 'all');
+    captureGenerationKwargs();
     createAgentWithEnv();
 
-    profile.update({ modelAlias: 'kimi-code', thinkingLevel: 'high' });
+    profile.update({ modelAlias: 'kimi-code', systemPrompt: 'system', thinkingLevel: 'high' });
+    await requester.request({}, undefined, new AbortController().signal);
 
-    const provider = profile.getProvider();
-    const gen = Reflect.get(provider as object, '_generationKwargs') as {
-      extra_body?: { thinking?: { keep?: unknown } };
-    };
-    expect(gen.extra_body?.thinking?.keep).toBe('all');
+    expect(capturedThinkingKeep()).toBe('all');
   });
 
-  it('does NOT inject thinking.keep into config.provider when thinking is off', () => {
+  it('does NOT inject thinking.keep into config.provider when thinking is off', async () => {
     vi.stubEnv('KIMI_MODEL_THINKING_KEEP', 'all');
+    captureGenerationKwargs();
     createAgentWithEnv();
 
-    profile.update({ modelAlias: 'kimi-code', thinkingLevel: 'off' });
+    profile.update({ modelAlias: 'kimi-code', systemPrompt: 'system', thinkingLevel: 'off' });
+    await requester.request({}, undefined, new AbortController().signal);
 
-    const provider = profile.getProvider();
-    const gen = Reflect.get(provider as object, '_generationKwargs') as {
-      extra_body?: { thinking?: { keep?: unknown } };
-    };
-    expect(gen.extra_body?.thinking?.keep).toBeUndefined();
+    expect(capturedThinkingKeep()).toBeUndefined();
   });
 });

@@ -19,12 +19,17 @@ describe('cron persistence guards', () => {
       expect(CRON_ID_REGEX.test('ffffffff')).toBe(true);
     });
 
-    it('rejects non-hex, wrong-length, uppercase, and traversal-looking ids', () => {
+    it('rejects non-hex, wrong-length, and traversal-looking ids', () => {
       expect(CRON_ID_REGEX.test('0123abc')).toBe(false);
       expect(CRON_ID_REGEX.test('0123abcde')).toBe(false);
-      expect(CRON_ID_REGEX.test('0123ABCD')).toBe(false);
       expect(CRON_ID_REGEX.test('zzzzzzzz')).toBe(false);
       expect(CRON_ID_REGEX.test('../etcok')).toBe(false);
+    });
+
+    it('accepts hex and ULID ids case-insensitively', () => {
+      expect(CRON_ID_REGEX.test('0123ABCD')).toBe(true);
+      expect(CRON_ID_REGEX.test('01HF7YAT00TP4QF6RDFFZR3QJ7')).toBe(true);
+      expect(CRON_ID_REGEX.test('01hf7yat00tp4qf6rdffzr3qj7')).toBe(true);
     });
   });
 

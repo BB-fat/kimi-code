@@ -21,6 +21,13 @@ export interface IAgentContextSizeService {
   readonly _serviceBrand: undefined;
 
   get(start?: number, end?: number): ContextSize;
+  /**
+   * Cost of the request the model would see if NO fold were applied (the "raw"
+   * context): the current projected request cost plus whatever the folds
+   * removed. The system-prompt/tool overhead cancels in the difference, so
+   * the result stays >= the projected `get().size` by construction.
+   */
+  rawSize(): number;
   measured(input: readonly Message[], output: readonly Message[], usage: TokenUsage): void;
   latestMeasurement(): ContextSizeMeasurement | undefined;
 }

@@ -8,11 +8,13 @@
  * - flat: the host calls {@link setTodos} whenever the LLM invokes the
  *   `TodoList` tool; state survives across turns so the list stays visible
  *   until explicitly cleared (`todos: []`), a new session starts, or
- *   `/clear` is issued.
+ *   `/clear` is issued. Titled "Todo".
  * - tree: spine sessions never emit `TodoList` calls, so the host feeds the
  *   transcript-derived spine task tree through {@link setTree} instead.
+ *   Titled "Spine Tree".
  *
- * The mode follows whichever setter ran last; `clear()` resets both.
+ * The mode (and the header title) follows whichever setter ran last;
+ * `clear()` resets both.
  */
 
 import type { Component } from '@moonshot-ai/pi-tui';
@@ -236,7 +238,7 @@ export class TodoPanelComponent implements Component {
     const c = currentTheme.palette;
     const lines: string[] = [
       chalk.hex(c.border)('─'.repeat(width)),
-      chalk.hex(c.primary).bold('  Todo'),
+      chalk.hex(c.primary).bold(this.mode === 'tree' ? '  Spine Tree' : '  Todo'),
     ];
 
     if (this.mode === 'tree') {

@@ -42,7 +42,12 @@ describe('Agent + Cron integration (P1.7)', () => {
       expect(cron.list()).toEqual([]);
     });
 
-    it('registers CronCreate / CronList / CronDelete in the tool manager', () => {
+    it('registers CronCreate / CronList / CronDelete in the tool manager', async () => {
+      // Tool registration rides the async main-agent bind chain
+      // (config.ready → registerCronTools), so wait for it to land.
+      await vi.waitFor(() => {
+        expect(ctx.toolsData().map((info) => info.name)).toContain('CronCreate');
+      });
       const toolNames = ctx.toolsData().map((info) => info.name);
       expect(toolNames).toContain('CronCreate');
       expect(toolNames).toContain('CronList');

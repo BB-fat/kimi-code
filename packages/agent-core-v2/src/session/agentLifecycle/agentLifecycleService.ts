@@ -347,6 +347,11 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
   }
 
   notifyMainCreated(handle: IAgentScopeHandle): void {
+    // Register as well as announce: consumers probe `getHandle('main')` at
+    // fire time, so an announced main must be discoverable even when it was
+    // not materialized through `create()` (idempotent for the production
+    // path, where `create()` already registered the same handle).
+    this.handles.set(handle.id, handle);
     this.onDidCreateMainEmitter.fire(handle);
   }
 

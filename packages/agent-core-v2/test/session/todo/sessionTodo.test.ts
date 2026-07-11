@@ -4,18 +4,13 @@ import type { ServiceIdentifier, ServicesAccessor } from '#/_base/di/instantiati
 import { IInstantiationService } from '#/_base/di/instantiation';
 import { toDisposable, type IDisposable } from '#/_base/di/lifecycle';
 import { type IAgentScopeHandle, LifecycleScope } from '#/_base/di/scope';
-import { Emitter } from '#/_base/event';
 import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
-import { createHooks } from '#/hooks';
-import {
-  type AgentTaskHooks,
-  IAgentLifecycleService,
-} from '#/session/agentLifecycle/agentLifecycle';
 import { ISessionTodoService } from '#/session/todo/sessionTodo';
+import { makeLifecycleStub } from '../agentLifecycle/stubs';
 import { SessionTodoService } from '#/session/todo/sessionTodoService';
 import { readTodoItems, type TodoItem } from '#/session/todo/todoItem';
 import { TODO_LIST_REMINDER_VARIANT } from '#/session/todo/todoListReminder';
@@ -181,60 +176,7 @@ function makeFakeAgent(agentId: string, options: FakeAgentOptions = {}): FakeAge
   };
 }
 
-interface LifecycleStub {
-  readonly service: IAgentLifecycleService;
-  readonly fireCreate: (handle: IAgentScopeHandle) => void;
-  readonly fireCreateMain: (handle: IAgentScopeHandle) => void;
-  readonly fireDispose: (agentId: string) => void;
-}
 
-function makeLifecycleStub(handles: readonly IAgentScopeHandle[] = []): LifecycleStub {
-  const onDidCreate = new Emitter<IAgentScopeHandle>();
-  const onDidCreateMain = new Emitter<IAgentScopeHandle>();
-  const onDidDispose = new Emitter<string>();
-  const byId = new Map(handles.map((h) => [h.id, h]));
-
-  const service: IAgentLifecycleService = {
-    _serviceBrand: undefined,
-    hooks: createHooks<AgentTaskHooks, keyof AgentTaskHooks>([
-      'onWillStartAgentTask',
-      'onDidStopAgentTask',
-    ]),
-    onDidCreate: onDidCreate.event,
-    onDidCreateMain: onDidCreateMain.event,
-    onDidDispose: onDidDispose.event,
-    getHandle: (id: string) => byId.get(id),
-    list: () => [...byId.values()],
-    create: async () => {
-      throw new Error('not implemented');
-    },
-    ensureMcpReady: () => Promise.resolve(),
-    notifyMainCreated: () => {},
-    fork: async () => {
-      throw new Error('not implemented');
-    },
-    run: () => {
-      throw new Error('not implemented');
-    },
-    remove: async () => {},
-  };
-
-  return {
-    service,
-    fireCreate: (h) => {
-      byId.set(h.id, h);
-      onDidCreate.fire(h);
-    },
-    fireCreateMain: (h) => {
-      byId.set(h.id, h);
-      onDidCreateMain.fire(h);
-    },
-    fireDispose: (id) => {
-      byId.delete(id);
-      onDidDispose.fire(id);
-    },
-  };
-}
 
 describe('SessionTodoService', () => {
   afterEach(() => {

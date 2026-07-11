@@ -120,7 +120,9 @@ describe('SessionCronService — P1.8 manual tick + SIGUSR1', () => {
       // Move the injected wall clock past one ideal fire, then let the
       // setInterval drain by advancing fake timers past one poll.
       harness.advance(6 * 60_000);
-      vi.advanceTimersByTime(60);
+      // tick() runs asynchronously after the interval callback, so drain
+      // the timer queue (and its microtasks) before asserting delivery.
+      await vi.advanceTimersByTimeAsync(60);
 
       expect(steerSpy).toHaveBeenCalledTimes(1);
     });
@@ -232,7 +234,7 @@ describe('SessionCronService — P1.8 manual tick + SIGUSR1', () => {
           process.emit('SIGUSR1', 'SIGUSR1');
           expect(writeSpy).toHaveBeenCalled();
           const calls = writeSpy.mock.calls.map((c) => String(c[0]));
-          expect(calls.some((s) => /cron\/service.*SIGUSR1/.test(s))).toBe(
+          expect(calls.some((s) => /cron\/session.*SIGUSR1/.test(s))).toBe(
             true,
           );
           expect(calls.some((s) => s.includes('debug-boom'))).toBe(true);

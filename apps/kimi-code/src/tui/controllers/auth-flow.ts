@@ -57,6 +57,7 @@ export class AuthFlowController {
       model: '',
       thinkingEffort: 'off',
       contextTokens: 0,
+      rawContextTokens: 0,
       maxContextTokens: 0,
       contextUsage: 0,
       sessionTitle: null,
@@ -137,6 +138,7 @@ export class AuthFlowController {
       maxContextTokens: 0,
       contextUsage: 0,
       contextTokens: 0,
+      rawContextTokens: 0,
     });
   }
 

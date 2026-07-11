@@ -171,7 +171,7 @@ describe('SessionCronService', () => {
       expect(call.origin.stale).toBe(false);
       expect(call.origin.coalescedCount).toBeGreaterThanOrEqual(1);
       expect(call.origin.cron).toBe('*/5 * * * *');
-      expect(call.origin.jobId).toMatch(/^[0-9a-f]{8}$/);
+      expect(call.origin.jobId).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/i);
       // Content is wrapped in the cron-fire envelope (Bug A fix).
       expect(call.content).toHaveLength(1);
       const text = (call.content[0] as { type: 'text'; text: string }).text;
@@ -435,7 +435,23 @@ describe('SessionCronService', () => {
       createSteerSpy(prompt, undefined);
     });
 
-    it('reports buffered=true on the telemetry event when steer returns null', async () => {
+    it('reports buffered=true on the telemetry event when a turn starts mid-tick', async () => {
+      // tick()'s idle gate and deliverFire's buffered probe both read
+      // getActiveTurn; the first call admits the fire, the second models a
+      // turn that started while the tick was in flight.
+      const turnService = ctx.get(IAgentTurnService);
+      let activeTurnChecks = 0;
+      vi.spyOn(turnService, 'getActiveTurn').mockImplementation(() => {
+        activeTurnChecks += 1;
+        return activeTurnChecks === 1
+          ? undefined
+          : {
+            id: 1,
+            signal: new AbortController().signal,
+            ready: Promise.resolve(),
+            result: Promise.resolve({ type: 'completed', steps: 0, truncated: false }),
+          };
+      });
       cron.addTask({ cron: '*/5 * * * *', prompt: 'while-active' });
       harness.advance(6 * 60_000);
       await cron.tick();
@@ -581,7 +597,7 @@ describe('SessionCronService', () => {
       prompt = ctx.get(IAgentPromptService);
     });
 
-    it('continues past a task with a malformed cron and still fires due tasks', () => {
+    it('continues past a task with a malformed cron and still fires due tasks', async () => {
       steerCalls = createSteerSpy(prompt);
       // A malformed cron cannot be scheduled through CronCreate (which
       // validates), but the public addTask API does not validate, so a
@@ -590,7 +606,7 @@ describe('SessionCronService', () => {
       cron.addTask({ cron: 'not a cron', prompt: 'broken' });
       cron.addTask({ cron: '*/5 * * * *', prompt: 'healthy' });
       harness.advance(6 * 60_000);
-      expect(() => { void cron.tick(); }).not.toThrow();
+      await expect(cron.tick()).resolves.toBeUndefined();
       expect(steerCalls.length).toBe(1);
       const text = (steerCalls[0]!.content[0] as { type: 'text'; text: string }).text;
       expect(text).toContain('healthy');

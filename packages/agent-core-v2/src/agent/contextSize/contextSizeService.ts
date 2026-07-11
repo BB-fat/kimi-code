@@ -4,9 +4,11 @@
  * Owns the measured context token counts in the wire `ContextSizeModel`:
  * reads it through `wire.getModel`, writes it through
  * `wire.dispatch(contextSizeMeasured(...))` (called by `llmRequester` after
- * each measured exchange), and emits the `contextTokens` slice of
- * `agent.status.updated` live through `wire.signal` when the measured value
- * changes. `get(start?, end?)` returns `{ size, measured, estimated }` for the
+ * each measured exchange). Two `agent.status.updated` slices are emitted
+ * live: `contextTokens` through the Op's `toEvent` when the measured value
+ * changes, and `rawContextTokens` (the unfolded-request cost, always >= the
+ * projected size — see `rawSize`) from a `ContextModel` subscription on
+ * every live context mutation. `get(start?, end?)` returns `{ size, measured, estimated }` for the
  * context-message range `[start, end)`, resolved like `Array.prototype.slice`
  * (defaulting to the whole context; negative indices count back from the end;
  * an inverted range is empty). `measured` resolves as follows: the full
@@ -25,7 +27,10 @@ import { InstantiationType } from '#/_base/di/extensions';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
 import { estimateTokensForMessages } from '#/_base/utils/tokens';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
+import { ContextModel } from '#/agent/contextMemory/contextOps';
 import type { ContextMessage } from '#/agent/contextMemory/types';
+import { IEventBus } from '#/app/event/eventBus';
+import { IAgentContextProjectorService } from '#/agent/contextProjector/contextProjector';
 import type { Message } from '#/app/llmProtocol/message';
 import type { TokenUsage } from '#/app/llmProtocol/usage';
 import { IAgentWireService } from '#/wire/tokens';
@@ -42,8 +47,24 @@ export class AgentContextSizeService extends Disposable implements IAgentContext
   constructor(
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
     @IAgentWireService private readonly wire: IWireService,
+    @IEventBus private readonly eventBus: IEventBus,
+    @IAgentContextProjectorService private readonly projector: IAgentContextProjectorService,
   ) {
     super();
+    // Raw follows the stored history, so it is re-derived on every live
+    // context mutation (append, streamed loop events, clear, undo,
+    // compaction) instead of from `measured`: a measured exchange runs before
+    // its own response and tool results fold in, which would lag the gauge a
+    // full step behind the history the user actually has. The subscription
+    // fires once per live dispatch (never on replay).
+    this._register(
+      this.wire.subscribe(ContextModel, () => {
+        this.eventBus.publish({
+          type: 'agent.status.updated',
+          rawContextTokens: this.rawSize(),
+        });
+      }),
+    );
   }
 
   get(start?: number, end?: number): ContextSize {
@@ -63,6 +84,23 @@ export class AgentContextSizeService extends Disposable implements IAgentContext
         : measuredSubRange(context, model.snapshots, from, measuredEnd);
     const estimated = estimateTokensForMessages(context.slice(estimatedStart, to));
     return { size: measured + estimated, measured, estimated };
+  }
+
+  rawSize(): number {
+    const history = this.context.get();
+    const rawMessages = estimateTokensForMessages(history);
+    // Projecting the stored history gives the message side of the projected
+    // request cost, so `rawMessages - projectedMessages` is exactly what the
+    // folds removed — the system-prompt/tool overhead cancels. Clamping at
+    // zero keeps fold-added noise (the status line, synthesized results)
+    // from ever pushing raw below the projected size.
+    let projectedMessages: number;
+    try {
+      projectedMessages = estimateTokensForMessages(this.projector.project(history));
+    } catch {
+      projectedMessages = rawMessages;
+    }
+    return this.get().size + Math.max(0, rawMessages - projectedMessages);
   }
 
   measured(input: readonly Message[], output: readonly Message[], usage: TokenUsage): void {

@@ -29,6 +29,7 @@ function baseState(overrides: Partial<AppState> = {}): AppState {
     thinkingEffort: 'off',
     contextUsage: 0,
     contextTokens: 0,
+    rawContextTokens: 0,
     maxContextTokens: 0,
     isCompacting: false,
     isReplaying: false,
@@ -70,6 +71,19 @@ describe('FooterComponent — context NaN resilience', () => {
     const fc = new FooterComponent(baseState({ contextUsage: 0.427 }));
     const out = strip(fc.render(200).join(''));
     expect(out).toMatch(/context: 42\.7%/);
+  });
+
+  it('renders raw / projection / all token counts when the window is known', () => {
+    const fc = new FooterComponent(
+      baseState({
+        contextUsage: 0.25,
+        contextTokens: 250_000,
+        rawContextTokens: 400_000,
+        maxContextTokens: 1_000_000,
+      }),
+    );
+    const out = strip(fc.render(200).join(''));
+    expect(out).toMatch(/context: 25\.0% \(raw 400\.0k \/ projection 250\.0k \/ all 1\.0M\)/);
   });
 
   it('tokens provided but max=0 → falls back to percent-only, no division-by-zero artefact', () => {

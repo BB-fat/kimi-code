@@ -3,7 +3,7 @@
  *
  * Layout:
  *   Line 1: [yolo] [plan] <model> <cwd>  <git-badge>  <shortcut hints>
- *   Line 2: context: XX.X% (tokens/max)
+ *   Line 2: context: XX.X% (raw X / projection Y / all Z)
  */
 
 import type { Component } from '@moonshot-ai/pi-tui';
@@ -164,10 +164,21 @@ function safeUsage(usage: number): number {
   return safeUsageRatio(usage);
 }
 
-function formatContextStatus(usage: number, tokens?: number, maxTokens?: number): string {
+function formatContextStatus(
+  usage: number,
+  tokens?: number,
+  maxTokens?: number,
+  rawTokens?: number,
+): string {
   const pct = `${(safeUsage(usage) * 100).toFixed(1)}%`;
   if (maxTokens && maxTokens > 0 && tokens !== undefined) {
-    return `context: ${pct} (${formatTokenCount(tokens)}/${formatTokenCount(maxTokens)})`;
+    // raw = whole stored history, projection = folded view the model sees,
+    // all = the context-window ceiling the percentage is measured against.
+    const raw = rawTokens ?? tokens;
+    return (
+      `context: ${pct} (raw ${formatTokenCount(raw)} / ` +
+      `projection ${formatTokenCount(tokens)} / all ${formatTokenCount(maxTokens)})`
+    );
   }
   return `context: ${pct}`;
 }
@@ -337,6 +348,7 @@ export class FooterComponent implements Component {
       state.contextUsage,
       state.contextTokens,
       state.maxContextTokens,
+      state.rawContextTokens,
     );
     const contextWidth = visibleWidth(contextText);
     let line2: string;

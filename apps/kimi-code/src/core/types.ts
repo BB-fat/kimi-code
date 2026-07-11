@@ -141,6 +141,10 @@ export type TelemetryContextPatch = Record<string, string | null>;
  * `status` activity field, which this projection intentionally drops (v1
  * parity). `swarmMode`/`usage` stay optional only for v1 shape parity; the
  * `getStatus` projection always assigns them.
+ *
+ * `rawContextTokens` is a v2-only addition (no v1 counterpart): the whole
+ * stored-history estimate before projection folds, shown next to the
+ * projected `contextTokens` on status surfaces.
  */
 export interface SessionStatus {
   readonly model?: string;
@@ -149,6 +153,7 @@ export interface SessionStatus {
   readonly planMode: boolean;
   readonly swarmMode?: boolean;
   readonly contextTokens: number;
+  readonly rawContextTokens: number;
   readonly maxContextTokens: number;
   readonly contextUsage: number;
   /** Merged from the main agent's `IAgentUsageService.status()` by `getStatus`. */

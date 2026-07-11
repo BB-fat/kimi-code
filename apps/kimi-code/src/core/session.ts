@@ -300,6 +300,7 @@ export class CoreSession {
       planMode: (await accessor.get(IAgentPlanService).status()) !== null,
       swarmMode: accessor.get(IAgentSwarmService).isActive,
       contextTokens,
+      rawContextTokens: accessor.get(IAgentContextSizeService).rawSize(),
       maxContextTokens,
       contextUsage: maxContextTokens > 0 ? contextTokens / maxContextTokens : 0,
       usage: accessor.get(IAgentUsageService).status(),

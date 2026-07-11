@@ -34,6 +34,7 @@ declare module '#/app/event/eventBus' {
       model?: string;
       maxContextTokens?: number;
       contextTokens?: number;
+      rawContextTokens?: number;
       phase?: AgentPhase;
     };
   }

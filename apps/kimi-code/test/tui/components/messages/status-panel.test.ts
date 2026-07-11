@@ -34,6 +34,7 @@ describe('status panel report lines', () => {
         permission: 'auto',
         planMode: true,
         contextTokens: 3000,
+        rawContextTokens: 3000,
         maxContextTokens: 12000,
         contextUsage: 0.25,
       },

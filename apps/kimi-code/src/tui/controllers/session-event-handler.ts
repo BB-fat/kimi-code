@@ -632,6 +632,7 @@ export class SessionEventHandler {
       this.host.state.swarmModeEntry === 'task';
     const patch: Partial<AppState> = {};
     if (event.contextTokens !== undefined) patch.contextTokens = event.contextTokens;
+    if (event.rawContextTokens !== undefined) patch.rawContextTokens = event.rawContextTokens;
     if (event.maxContextTokens !== undefined) patch.maxContextTokens = event.maxContextTokens;
     // The v2 `agent.status.updated` payload carries no `contextUsage` (or
     // `permission`) field, unlike the v1 protocol event: derive the usage

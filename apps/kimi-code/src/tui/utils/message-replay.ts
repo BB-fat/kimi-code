@@ -62,6 +62,9 @@ export function appStateFromResumeAgent(agent: ResumedAgentState): Partial<AppSt
   return {
     model: agent.config.modelAlias ?? agent.config.provider?.model ?? '',
     contextTokens,
+    // No fold has run on a freshly resumed history, so the stored (raw) size
+    // equals the projected size until the next measured exchange refines it.
+    rawContextTokens: contextTokens,
     maxContextTokens,
     contextUsage,
     planMode: agent.plan !== null,

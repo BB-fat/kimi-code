@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SyncDescriptor } from '#/_base/di/descriptors';
+import type { ServiceIdentifier } from '#/_base/di/instantiation';
 import { DisposableStore } from '#/_base/di/lifecycle';
+import type { IAgentScopeHandle } from '#/_base/di/scope';
 import { TestInstantiationService } from '#/_base/di/test';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { ConfigTarget, IConfigRegistry, IConfigService } from '#/app/config/config';
@@ -22,11 +24,17 @@ import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { IAgentTurnService, type Turn } from '#/agent/turn/turn';
 import { IAgentWireRecordService } from '#/agent/wireRecord/wireRecord';
+import { ICronTaskPersistence } from '#/app/cron/cronTaskPersistence';
+import type { CronTask } from '#/app/cron/cronTask';
+import { IEventBus } from '#/app/event/eventBus';
+import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
+import { IAgentWireService } from '#/wire/tokens';
 
 import { stubBootstrap } from '../../app/bootstrap/stubs';
 import { stubWireRecord } from '../../agent/contextMemory/stubs';
 import { stubLog } from '../../_base/log/stubs';
 import { stubTurn } from '../../agent/turn/stubs';
+import { makeLifecycleStub, type LifecycleStub } from '../agentLifecycle/stubs';
 
 const FAR_FUTURE_MS = 10 * 366 * 24 * 60 * 60 * 1000;
 
@@ -49,11 +57,6 @@ function textOf(message: ContextMessage): string {
 // `IAgentPromptService.steer`. The cases below cover that path directly, so there is
 // no separate coordinator suite to migrate.
 
-// TODO: The DI setup below was written for AgentCronService (Agent scope).
-// SessionCronServiceImpl (Session scope) injects ISessionContext, ICronTaskPersistence,
-// IAgentLifecycleService, ITelemetryService, IConfigService — not IAgentPromptService,
-// IAgentRecordService, IAgentTurnService directly. The stub setup needs to be
-// reworked to match the new dependency graph.
 describe('SessionCronService', () => {
   let disposables: DisposableStore;
   let ix: TestInstantiationService;
@@ -62,6 +65,17 @@ describe('SessionCronService', () => {
   let steered: ContextMessage[];
   let steerLaunchError: Error | null;
   let storeRecords: Map<string, unknown>;
+  let lifecycle: LifecycleStub;
+  let mainHandle: IAgentScopeHandle;
+
+  // Binds the fake main agent the way production does (lifecycle event after
+  // construction), then lets bindMainAgent finish its loadFromStore/start
+  // chain so it cannot wipe tasks the test adds afterwards.
+  async function bindMain(): Promise<void> {
+    lifecycle.fireCreateMain(mainHandle);
+    await ix.get(IConfigService).ready;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
 
   beforeEach(() => {
     vi.stubEnv('KIMI_CRON_POLL_INTERVAL_MS', '0');
@@ -121,12 +135,37 @@ describe('SessionCronService', () => {
       },
     });
     ix.set(IAtomicTomlDocumentStore, new SyncDescriptor(TomlAtomicDocumentStore));
+    // SessionCronServiceImpl reaches the main agent's services through the
+    // lifecycle handle's accessor; delegate it to this container so the stubs
+    // above (prompt / turn / tool registry) serve both scopes.
+    mainHandle = {
+      id: 'main',
+      accessor: {
+        get: <T,>(id: ServiceIdentifier<T>): T => ix.get(id),
+      },
+    } as unknown as IAgentScopeHandle;
+    lifecycle = makeLifecycleStub();
+    ix.stub(IAgentLifecycleService, lifecycle.service);
+    ix.stub(ICronTaskPersistence, {
+      get: async (_workspaceId: string, taskId: string) =>
+        storeRecords.get(`${taskId}.json`) as CronTask | undefined,
+      list: async () => [...storeRecords.values()] as CronTask[],
+      save: async (_workspaceId: string, task: CronTask) => {
+        storeRecords.set(`${task.id}.json`, task);
+      },
+      delete: async (_workspaceId: string, taskId: string) => {
+        storeRecords.delete(`${taskId}.json`);
+      },
+    });
+    ix.stub(IAgentWireService, {
+      dispatch: () => {},
+      onRestored: () => ({ dispose: () => {} }),
+      getModel: () => new Map(),
+    });
+    ix.stub(IEventBus, { publish: () => {} });
     ix.set(IConfigRegistry, new SyncDescriptor(ConfigRegistry));
     ix.set(IConfigService, new SyncDescriptor(ConfigService));
-    ix.set(
-      ISessionCronService,
-      new SyncDescriptor(SessionCronServiceImpl, [{}]),
-    );
+    ix.set(ISessionCronService, new SyncDescriptor(SessionCronServiceImpl));
   });
   afterEach(() => {
     disposables.dispose();
@@ -145,6 +184,7 @@ describe('SessionCronService', () => {
 
   it('does not fire while a turn is active', async () => {
     const svc = ix.get(ISessionCronService);
+    await bindMain();
     svc.addTask({ cron: '* * * * *', prompt: 'fire-me', recurring: false });
 
     activeTurn = fakeTurn();
@@ -156,6 +196,7 @@ describe('SessionCronService', () => {
 
   it('fires a due task when idle', async () => {
     const svc = ix.get(ISessionCronService);
+    await bindMain();
     svc.addTask({ cron: '* * * * *', prompt: 'fire-me', recurring: false });
 
     now = FAR_FUTURE_MS;
@@ -168,6 +209,7 @@ describe('SessionCronService', () => {
 
   it('removes one-shot tasks after firing', async () => {
     const svc = ix.get(ISessionCronService);
+    await bindMain();
     svc.addTask({ cron: '* * * * *', prompt: 'x', recurring: false });
 
     now = FAR_FUTURE_MS;
@@ -179,6 +221,7 @@ describe('SessionCronService', () => {
   it('isDisabled reflects live config (not frozen at registration)', async () => {
     const svc = ix.get(ISessionCronService);
     const config = ix.get(IConfigService);
+    await config.ready;
 
     expect(svc.isDisabled()).toBe(false);
     await config.set('cron', { disabled: true }, ConfigTarget.Memory);
@@ -189,6 +232,7 @@ describe('SessionCronService', () => {
 
   it('retains a one-shot and retries when steer launch rejects', async () => {
     const svc = ix.get(ISessionCronService);
+    await bindMain();
     svc.addTask({ cron: '* * * * *', prompt: 'retry-me', recurring: false });
 
     steerLaunchError = new Error('turn not ready');
