@@ -1,3 +1,4 @@
+import { COMPACTION_SUMMARY_PREFIX } from '#/core/index';
 import type {
   AgentReplayRecord,
   ContextMessage,
@@ -10,6 +11,7 @@ import type {
 } from '#/core/index';
 
 import { ToolCallComponent } from '../components/messages/tool-call';
+import { currentTheme } from '../theme';
 import type { TodoItem } from '../components/chrome/todo-panel';
 import type {
   AppState,
@@ -26,6 +28,7 @@ import {
 import { formatBackgroundAgentTranscript } from '../utils/background-agent-status';
 import { formatBackgroundTaskTranscript } from '../utils/background-task-status';
 import { buildGoalCompletionMessage } from '../utils/goal-completion';
+import { formatBashOutputForDisplay } from '../utils/shell-output';
 import {
   appStateFromResumeAgent,
   backgroundOrigin,
@@ -63,6 +66,22 @@ export interface SessionReplayHost {
   showError(msg: string): void;
   appendTranscriptEntry(entry: TranscriptEntry): void;
   mergeAllTurnSteps(): void;
+}
+
+function extractBashTag(
+  text: string,
+  tag: 'bash-input' | 'bash-stdout' | 'bash-stderr',
+): string | undefined {
+  const match = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(text);
+  return match?.[1] === undefined ? undefined : unescapeBashXml(match[1]);
+}
+
+function unescapeBashXml(text: string): string {
+  return text
+    .replaceAll('&lt;', '<')
+    .replaceAll('&gt;', '>')
+    .replaceAll('&quot;', '"')
+    .replaceAll('&amp;', '&');
 }
 
 export class SessionReplayRenderer {
@@ -274,10 +293,45 @@ export class SessionReplayRenderer {
     if (message.origin?.kind === 'injection') {
       return;
     }
-    // TODO(v2-gap): v2 has no `shell_command` prompt origin and does not record
-    // `!`-command input/output into context (no `<bash-input>`/`<bash-stdout>`
-    // tags), so the v1 `$ cmd` + output replay view has nothing to render.
-    // Shell command output is simply absent from v2 replay for now.
+    if (message.origin?.kind === 'shell_command') {
+      // A `!` command, replayed from records. Unwrap the XML tags back into the
+      // same `$ cmd` + output view the live editor produced. (Must NOT fall into
+      // the `injection` branch above — that returns without rendering.)
+      this.flushAssistant(context);
+      const text = contentPartsToText(message.content);
+      if (message.origin.phase === 'input') {
+        const cmd = (extractBashTag(text, 'bash-input') ?? text).trim();
+        this.advanceTurn(context);
+        this.host.appendTranscriptEntry(
+          replayEntry(context, 'user', currentTheme.fg('shellMode', `$ ${cmd}`), 'plain', {
+            bullet: '',
+          }),
+        );
+      } else {
+        const stdout = (extractBashTag(text, 'bash-stdout') ?? '').trim();
+        const stderr = (extractBashTag(text, 'bash-stderr') ?? '').trim();
+        const out = formatBashOutputForDisplay(stdout, stderr, message.origin.isError);
+        this.host.appendTranscriptEntry(replayEntry(context, 'status', out, 'plain'));
+      }
+      return;
+    }
+    if (message.origin?.kind === 'compaction_summary') {
+      // Defensive fallback: the summary normally arrives as a `compaction`
+      // replay record (rendered by renderCompaction with token counts) since
+      // the facade folds wire records. Only a summary that shows up as a bare
+      // context message lands here; render the same collapsible card instead
+      // of dumping the text as a plain user message.
+      this.flushAssistant(context);
+      const text = contentPartsToText(message.content);
+      const summary = text.startsWith(COMPACTION_SUMMARY_PREFIX)
+        ? text.slice(COMPACTION_SUMMARY_PREFIX.length).trimStart()
+        : text;
+      this.host.appendTranscriptEntry({
+        ...replayEntry(context, 'status', 'Compaction complete', 'plain'),
+        compactionData: { summary },
+      });
+      return;
+    }
     if (message.origin?.kind === 'cron_job') {
       this.renderCronJob(context, message);
       return;

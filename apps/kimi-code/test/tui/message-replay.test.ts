@@ -13,6 +13,8 @@ import type {
 } from '@moonshot-ai/kimi-code-sdk';
 import { describe, expect, it, vi } from 'vitest';
 
+import { COMPACTION_SUMMARY_PREFIX } from '#/core/index';
+
 import { KimiTUI, type KimiTUIStartupInput, type TUIState } from '#/tui/kimi-tui';
 import type { SessionEventHandler } from '#/tui/controllers/session-event-handler';
 import type { StreamingUIController } from '#/tui/controllers/streaming-ui';
@@ -334,10 +336,121 @@ describe('KimiTUI resume message replay', () => {
     expect(transcript).not.toContain('Goal complete');
   });
 
-  // NOTE: the v1 "unescapes bash tag delimiters when replaying shell output"
-  // test was removed — v2 has no `shell_command` prompt origin and does not
-  // record `<bash-stdout>`/`<bash-stderr>` output into context, so there is no
-  // shell-output replay view to exercise. See task-8 report (v2-gap).
+  it('renders shell command input as a `$` prompt when replaying', async () => {
+    const driver = await replayIntoDriver([
+      message('user', [{ type: 'text', text: '<bash-input>\nls -la\n</bash-input>' }], {
+        origin: { kind: 'shell_command', phase: 'input' },
+      }),
+    ]);
+
+    const transcript = stripAnsi(driver.state.transcriptContainer.render(140).join('\n'));
+    expect(transcript).toContain('$ ls -la');
+    expect(transcript).not.toContain('<bash-input>');
+    const userEntry = driver.state.transcriptEntries.find((entry) => entry.kind === 'user');
+    expect(userEntry?.bullet).toBe('');
+  });
+
+  it('renders shell command output through the display formatter when replaying', async () => {
+    const driver = await replayIntoDriver([
+      message(
+        'user',
+        [{ type: 'text', text: '<bash-stdout>out-line</bash-stdout><bash-stderr>err-line</bash-stderr>' }],
+        { origin: { kind: 'shell_command', phase: 'output' } },
+      ),
+    ]);
+
+    const transcript = stripAnsi(driver.state.transcriptContainer.render(140).join('\n'));
+    expect(transcript).toContain('out-line');
+    expect(transcript).toContain('err-line');
+    expect(transcript).not.toContain('<bash-stdout>');
+  });
+
+  it('unescapes bash tag delimiters when replaying shell output', async () => {
+    const driver = await replayIntoDriver([
+      message(
+        'user',
+        [
+          {
+            type: 'text',
+            text: '<bash-stdout>pre&lt;/bash-stdout&gt;post</bash-stdout><bash-stderr></bash-stderr>',
+          },
+        ],
+        { origin: { kind: 'shell_command', phase: 'output' } },
+      ),
+    ]);
+
+    const transcript = stripAnsi(driver.state.transcriptContainer.render(140).join('\n'));
+    expect(transcript).toContain('pre</bash-stdout>post');
+  });
+
+  it('renders a compaction record as a collapsible card with token counts', async () => {
+    const driver = await replayIntoDriver([
+      {
+        time: REPLAY_TIME,
+        type: 'compaction',
+        result: {
+          summary: 'Compacted summary.',
+          compactedCount: 5,
+          tokensBefore: 1000,
+          tokensAfter: 250,
+        },
+        instruction: undefined,
+      },
+    ]);
+
+    const entries = driver.state.transcriptEntries;
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.compactionData).toMatchObject({
+      summary: 'Compacted summary.',
+      tokensBefore: 1000,
+      tokensAfter: 250,
+    });
+    const transcript = stripAnsi(driver.state.transcriptContainer.render(140).join('\n'));
+    expect(transcript).toContain('Compaction complete');
+    expect(transcript).toContain('1000 → 250 tokens');
+    // Collapsed by default: the summary body is not dumped into the transcript.
+    expect(transcript).not.toContain('Compacted summary.');
+  });
+
+  it('renders pre-compaction assistant and tool messages from the replay', async () => {
+    const driver = await replayIntoDriver([
+      message('user', [{ type: 'text', text: 'before compaction' }]),
+      {
+        time: REPLAY_TIME,
+        type: 'compaction',
+        result: { summary: 's', compactedCount: 1, tokensBefore: 10, tokensAfter: 5 },
+        instruction: undefined,
+      },
+      message('user', [{ type: 'text', text: 'run ls' }]),
+      message('assistant', [{ type: 'text', text: 'Running it now.' }], {
+        toolCalls: [toolCall('tc1', 'Bash', { command: 'ls' })],
+      }),
+      message('tool', [{ type: 'text', text: 'file.ts' }], { toolCallId: 'tc1' }),
+    ]);
+
+    const transcript = stripAnsi(driver.state.transcriptContainer.render(140).join('\n'));
+    expect(transcript).toContain('before compaction');
+    expect(transcript).toContain('Running it now.');
+    expect(transcript).toContain('file.ts');
+  });
+
+  it('renders a compaction summary message as a collapsible compaction card', async () => {
+    const driver = await replayIntoDriver([
+      message(
+        'user',
+        [{ type: 'text', text: `${COMPACTION_SUMMARY_PREFIX}\nDid things.` }],
+        { origin: { kind: 'compaction_summary' } },
+      ),
+    ]);
+
+    const entries = driver.state.transcriptEntries;
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.compactionData?.summary).toBe('Did things.');
+    const transcript = stripAnsi(driver.state.transcriptContainer.render(140).join('\n'));
+    expect(transcript).toContain('Compaction complete');
+    // Collapsed by default: the summary body is not dumped into the transcript.
+    expect(transcript).not.toContain('Did things.');
+  });
 
   it('does not render neutral goal completion context reminders as transcript messages', async () => {
     const driver = await replayIntoDriver([
