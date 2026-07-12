@@ -99,6 +99,7 @@ function skillCatalogStub(): ISessionSkillCatalog {
       listSkills: () => [],
       listInvocableSkills: () => [],
       getSkillRoots: () => [],
+      getSkippedByPolicy: () => [],
       getModelSkillListing: () => '',
     },
     ready: Promise.resolve(),
@@ -616,6 +617,35 @@ describe('SessionLifecycleService', () => {
     resolveMcpReady?.();
     await create;
     expect(settled).toBe(true);
+  });
+
+  it('hides a session from get/list until its resume finishes', async () => {
+    let resolveMcpReady: (() => void) | undefined;
+    const mcpReady = new Promise<void>((resolve) => {
+      resolveMcpReady = resolve;
+    });
+    const svc = build([
+      stubPair(ISessionIndex, sessionIndexWithSummary('s1', '/tmp/proj')),
+      stubPair(IAgentLifecycleService, {
+        ...agentLifecycleWithMainStub(),
+        ensureMcpReady: () => mcpReady,
+      }),
+    ]);
+
+    const resumed = svc.resume('s1');
+    await tick();
+
+    // materialize has registered the handle in `sessions` and is now blocked on
+    // ensureMcpReady with `resuming` set — the handle must not be observable yet.
+    expect(svc.get('s1')).toBeUndefined();
+    expect(svc.list()).toEqual([]);
+
+    resolveMcpReady?.();
+    const handle = await resumed;
+
+    expect(handle?.id).toBe('s1');
+    expect(svc.get('s1')).toBe(handle);
+    expect(svc.list()).toEqual([handle]);
   });
 
   it('fires onDidCloseSession when a session is closed', async () => {

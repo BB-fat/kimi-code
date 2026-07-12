@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { InstantiationType } from '#/_base/di/extensions';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
+import { isUserCancellation } from '#/_base/utils/abort';
 import type {
   AssistantDeltaEvent,
   ThinkingDeltaEvent,
@@ -12,7 +13,6 @@ import type {
   TurnStepStartedEvent,
 } from '@moonshot-ai/protocol';
 import { IAgentLLMRequesterService, type LLMRequestFinish } from '#/agent/llmRequester/llmRequester';
-import { IAgentUsageService } from '#/agent/usage/usage';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { IConfigService } from '#/app/config/config';
 import { IEventBus } from '#/app/event/eventBus';
@@ -63,7 +63,6 @@ export class AgentLoopService implements IAgentLoopService {
   constructor(
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
     @IAgentLLMRequesterService private readonly llmRequester: IAgentLLMRequesterService,
-    @IAgentUsageService private readonly usage: IAgentUsageService,
     @IEventBus private readonly eventBus: IEventBus,
     @IAgentToolExecutorService private readonly toolExecutor: IAgentToolExecutorService,
     @IConfigService private readonly config: IConfigService,
@@ -107,15 +106,24 @@ export class AgentLoopService implements IAgentLoopService {
           );
         }
 
-        if (stepResult.stopReason === 'tool_calls' || stepResult.continue) {
+        // A hook-set stopTurn is a hard stop: it wins over both requested
+        // tool calls and any hook that set continue (steer flushes, Stop-hook
+        // continuations), so the turn always ends at this step boundary.
+        if (!stepResult.stopTurn && (stepResult.stopReason === 'tool_calls' || stepResult.continue)) {
           continue;
         }
 
         return { type: 'completed', steps, truncated: stepResult.stopReason === 'truncated' };
       } catch (error) {
         if (isAbortError(error) || signal.aborted) {
-          this.emitStepInterrupted(turnId, activeStep, 'aborted');
-          return { type: 'cancelled', reason: signal.reason ?? error, steps };
+          const abortReason = signal.reason ?? error;
+          this.emitStepInterrupted(
+            turnId,
+            activeStep,
+            'aborted',
+            isUserCancellation(abortReason) ? undefined : errorMessage(abortReason),
+          );
+          return { type: 'cancelled', reason: abortReason, steps };
         }
 
         const reason: LoopInterruptReason = isMaxStepsExceededError(error) ? 'max_steps' : 'error';
@@ -144,6 +152,7 @@ export class AgentLoopService implements IAgentLoopService {
   ): Promise<{
     readonly stopReason: FinishReason;
     readonly continue: boolean;
+    readonly stopTurn: boolean;
   }> {
     await this.hooks.beforeStep.run({ turnId, step: currentStep, signal });
     signal.throwIfAborted();
@@ -267,9 +276,6 @@ export class AgentLoopService implements IAgentLoopService {
       providerFinishReason,
       rawFinishReason: response.rawFinishReason,
     });
-    if (response.model !== undefined) {
-      this.usage.record(response.model, usage, { type: 'turn', turnId, step: currentStep });
-    }
     this.emitStepCompleted(turnId, currentStep, stepUuid, usage, stepFinishReason, response);
 
     const afterStepContext: AfterStepContext = {
@@ -279,6 +285,7 @@ export class AgentLoopService implements IAgentLoopService {
       usage,
       finishReason,
       continue: false,
+      stopTurn: false,
     };
     try {
       await this.hooks.afterStep.run(afterStepContext);
@@ -290,6 +297,7 @@ export class AgentLoopService implements IAgentLoopService {
     return {
       stopReason: finishReason,
       continue: afterStepContext.continue,
+      stopTurn: afterStepContext.stopTurn,
     };
   }
 

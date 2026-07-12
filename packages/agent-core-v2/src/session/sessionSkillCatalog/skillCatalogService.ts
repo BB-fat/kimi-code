@@ -4,8 +4,9 @@
  * Dumb ordered-merge table: pulls the seven eager `ISkillSource`s (builtin /
  * user / explicit / extra / workspace / plugin / CLI `--skills-dir`) and folds
  * their contributions into an in-memory catalog by priority, so higher-priority
- * sources win name collisions. `ready` resolves once all seven have completed
- * their first `load()`+merge; a source's
+ * sources win name collisions; load diagnostics (`skipped`, `scannedRoots`)
+ * carried by file-backed sources are folded into the catalog as well. `ready`
+ * resolves once all seven have completed their first `load()`+merge; a source's
  * `onDidChange` (e.g. plugin reload) re-pulls just that source and re-merges,
  * firing `onDidChange`. `set`/`remove` (`ISkillCatalogSink`) let ad-hoc sources
  * push contributions. Bound at Session scope; the same instance is the
@@ -114,7 +115,11 @@ export class SessionSkillCatalogService
   private remerge(): void {
     const m = new InMemorySkillCatalog();
     const ordered = [...this.contributions.values()].toSorted((a, b) => a.priority - b.priority);
-    for (const { c } of ordered) for (const skill of c.skills) m.register(skill, { replace: true });
+    for (const { c } of ordered) {
+      for (const skill of c.skills) m.register(skill, { replace: true });
+      m.addRoots(c.scannedRoots ?? []);
+      m.recordSkipped(c.skipped ?? []);
+    }
     this.merged = m;
   }
 }

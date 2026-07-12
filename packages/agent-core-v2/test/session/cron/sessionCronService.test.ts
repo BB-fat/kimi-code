@@ -24,11 +24,11 @@ import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { IAgentTurnService, type Turn } from '#/agent/turn/turn';
 import { IAgentWireRecordService } from '#/agent/wireRecord/wireRecord';
+import { IAgentWireService } from '#/wire/tokens';
 import { ICronTaskPersistence } from '#/app/cron/cronTaskPersistence';
 import type { CronTask } from '#/app/cron/cronTask';
 import { IEventBus } from '#/app/event/eventBus';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
-import { IAgentWireService } from '#/wire/tokens';
 
 import { stubBootstrap } from '../../app/bootstrap/stubs';
 import { stubWireRecord } from '../../agent/contextMemory/stubs';
@@ -160,7 +160,7 @@ describe('SessionCronService', () => {
     ix.stub(IAgentWireService, {
       dispatch: () => {},
       onRestored: () => ({ dispose: () => {} }),
-      getModel: () => new Map(),
+      getModel: () => new Map() as never,
     });
     ix.stub(IEventBus, { publish: () => {} });
     ix.set(IConfigRegistry, new SyncDescriptor(ConfigRegistry));
