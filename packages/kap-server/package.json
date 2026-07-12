@@ -30,7 +30,7 @@
     "pino": "^9.5.0",
     "smol-toml": "^1.6.1",
     "ulid": "^3.0.1",
-    "ws": "^8.18.0",
+    "ws": "^8.20.0",
     "zod": "catalog:"
   },
   "devDependencies": {
