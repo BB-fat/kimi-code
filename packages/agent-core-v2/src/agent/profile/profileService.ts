@@ -22,7 +22,11 @@
  * consumers a window where the outgoing model is still the active provider;
  * the same live-only path mirrors the resolved model protocol into the
  * ambient telemetry context (`provider_type` / `protocol`) whenever the model
- * alias changes.
+ * alias changes. Also owns the context-window ceilings learned from provider
+ * overflow rejections (`observeMaxContextTokens`, keyed by model alias,
+ * live-only): `getEffectiveMaxContextTokens` clamps the catalogued
+ * `max_context_tokens` to the observed ceiling so budget and trigger
+ * arithmetic size against the real window.
  * Bound at Agent scope.
  */
 
@@ -109,6 +113,10 @@ export class AgentProfileService implements IAgentProfileService {
   // means "no overlay — read the Model". Reset on every full `setActiveTools`.
   private activeToolNamesOverlay: readonly string[] | undefined;
   private agentsMdWarning: string | undefined;
+  // Context-window ceilings learned from provider overflow rejections, keyed
+  // by model alias: an overflow proves the real window smaller than the
+  // catalogued capability, so the effective max clamps down to it.
+  private readonly observedMaxContextTokensByModel = new Map<string, number>();
 
   // Effective active-tool set: the live overlay when present, else the persisted
   // base rebuilt by `wire.replay`. `undefined` means every tool is active.
@@ -356,6 +364,24 @@ export class AgentProfileService implements IAgentProfileService {
 
   getModelCapabilities(): ModelCapability {
     return this.tryResolveRawModel()?.capabilities ?? UNKNOWN_CAPABILITY;
+  }
+
+  getEffectiveMaxContextTokens(): number {
+    const configured = this.getModelCapabilities().max_context_tokens;
+    const alias = this.modelAlias;
+    const observed =
+      alias === undefined ? undefined : this.observedMaxContextTokensByModel.get(alias);
+    if (observed === undefined) return configured;
+    if (configured <= 0) return observed;
+    return Math.min(configured, observed);
+  }
+
+  observeMaxContextTokens(observed: number): void {
+    const alias = this.modelAlias;
+    if (alias === undefined) return;
+    const current = this.getEffectiveMaxContextTokens();
+    if (current > 0 && observed >= current) return;
+    this.observedMaxContextTokensByModel.set(alias, observed);
   }
 
   getMaxOutputSize(): number | undefined {

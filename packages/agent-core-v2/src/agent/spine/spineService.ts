@@ -17,7 +17,9 @@
  * ordinals), so `[U#]` citations stay resolvable after the span folds away.
  * Reads the cursor and node layout through
  * `wire.getModel(SpineModel)`, writes through `wire.dispatch(spineOpen(...))`
- * etc., records each node's provider-token baseline via `contextSize`,
+ * etc., records each node's provider-token baseline and closing high-water
+ * mark via `contextSize` — surfaced as per-node cost in `spine_tree` and as
+ * the projected-growth `cursor_context` delta in `<spine_status>` —
  * assembles continuation memory with `spineTree.assembleMemoryBody`, archives
  * each closed node's trajectory under the bootstrap-issued per-agent session
  * homedir (`<sessionDir>/agents/<id>/spine/`), and — for root compactions —
@@ -152,6 +154,8 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
   private pending: SpinePending | null = null;
   private lastObservedIndex = 0;
   private stepSignal: AbortSignal | undefined;
+  private spineViewOverride: string | undefined;
+  private spineViewReady: Promise<void> = Promise.resolve();
 
   constructor(
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
@@ -172,7 +176,15 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
   ) {
     super();
     if (this.enabled) {
-      void loadSpineViewOverride(this.hostFs, this.hostEnv.homeDir);
+      // Awaited in the will-begin-step hook before the first request assembles
+      // its system prompt, so every request of this agent carries the same
+      // `<spine_view>` — a mid-session swap from the default to the override
+      // would invalidate the prompt prefix cache from position 0.
+      this.spineViewReady = loadSpineViewOverride(this.hostFs, this.hostEnv.homeDir).then(
+        (override) => {
+          this.spineViewOverride = override;
+        },
+      );
       // Fold registration is the only thing the projector ever learns about
       // spine; gated on the flag so a disabled spine never touches the
       // projection. Construction is Eager, so this lands before the first send.
@@ -183,11 +195,12 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
         if (!this.enabled) return prompt;
         if (context.source?.type !== 'turn') return prompt;
         if (!context.tools.some((tool) => tool.name === SPINE_TOOL_OPEN)) return prompt;
-        return appendSpineView(prompt);
+        return appendSpineView(prompt, this.spineViewOverride);
       }),
     );
     this._register(
       loop.hooks.onWillBeginStep.register('spine', async (ctx, next) => {
+        await this.spineViewReady;
         if (this.pending !== null) {
           // A leftover pending means the previous step ended (usually an abort
           // before afterStep ran) without committing its transition. Commit it
@@ -290,10 +303,11 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
 
   renderTree(): string {
     const state = this.state();
+    const used = this.contextSize.get().size;
     return renderTree({
       cursorId: this.cursorId(),
       rootIds: epochRootIds(state),
-      resolve: (id) => this.nodeView(state, id),
+      resolve: (id) => this.nodeView(state, id, used),
     });
   }
 
@@ -310,8 +324,7 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     const cursorId = topOf(state);
     const cursor = state.nodes[cursorId];
     const summary = cursor?.summary ?? '';
-    const openedAt = cursor === undefined ? 0 : Math.max(0, cursor.openedAt);
-    const maxContextTokens = this.profile.getModelCapabilities().max_context_tokens;
+    const maxContextTokens = this.profile.getEffectiveMaxContextTokens();
     const used = this.contextSize.get().size;
     const contextLeft =
       maxContextTokens !== undefined && maxContextTokens > 0
@@ -321,7 +334,12 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
       cursorId,
       summary,
       parentId: parentNodeId(cursorId),
-      cursorContext: this.contextSize.get(openedAt).size,
+      // Projected-growth caliber: the live gauge minus the node's open
+      // baseline. The stored-range reading this replaces counted folded-away
+      // child/sibling spans the model no longer sees, drifting the budget
+      // signal apart from the compaction trigger's caliber; a node whose
+      // folds reclaimed more than it added reads as zero.
+      cursorContext: Math.max(0, used - (cursor?.baselineTokens ?? 0)),
       contextLeft,
       rawContext: estimateTokensForMessages(this.context.get()),
       projectedContext: used,
@@ -368,7 +386,7 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     return top;
   }
 
-  private nodeView(state: SpineState, id: string): SpineTreeNodeView | undefined {
+  private nodeView(state: SpineState, id: string, used: number): SpineTreeNodeView | undefined {
     const node = state.nodes[id];
     if (node === undefined) return undefined;
     const supersededEpoch = isRootEpoch(id) && id !== String(state.rootEpoch);
@@ -377,9 +395,9 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
       summary: node.summary,
       closed: node.closedAt !== undefined || supersededEpoch,
       archivePath: node.archivePath,
-      tokenCost: undefined,
+      tokenCost: nodeTokenCost(node, used),
       children: node.children
-        .map((childId) => this.nodeView(state, childId))
+        .map((childId) => this.nodeView(state, childId, used))
         .filter((child): child is SpineTreeNodeView => child !== undefined),
     };
   }
@@ -476,7 +494,13 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     const closing: SpineNode = { ...node, closedAt, memory: assembled };
     const archivePath = await this.archiveNode(closing);
     this.wire.dispatch(
-      spineClose({ id, closedAt, memory: markArchiveFailure(assembled, archivePath), archivePath }),
+      spineClose({
+        id,
+        closedAt,
+        memory: markArchiveFailure(assembled, archivePath),
+        archivePath,
+        finalTokens: this.contextSize.get().size,
+      }),
     );
   }
 
@@ -502,15 +526,17 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     });
     const closed: SpineNode = { ...closing, closedAt, memory: assembled };
     const archivePath = await this.archiveNode(closed);
+    const sizeNow = this.contextSize.get().size;
     this.wire.dispatch(
       spineNext({
         closedId,
         closedAt,
         memory: markArchiveFailure(assembled, archivePath),
         archivePath,
+        finalTokens: sizeNow,
         openedId,
         summary,
-        baselineTokens: this.contextSize.get().size,
+        baselineTokens: sizeNow,
       }),
     );
   }
@@ -569,6 +595,20 @@ function topOf(state: SpineState): string {
     throw new Error('Spine openStack is empty; the tree must always contain a root epoch.');
   }
   return top;
+}
+
+// Net projected-context growth attributable to the node: the gauge delta
+// between its open baseline and its closing high-water mark (or the live
+// gauge while still open). Folds committed inside the node can make the net
+// negative — the tree view only needs the "no lasting cost" signal there, so
+// it clamps at zero. Nodes without a recorded baseline (root epochs, startup
+// nodes, records predating the baseline) render no cost.
+function nodeTokenCost(node: SpineNode, currentUsed: number): number | undefined {
+  const baseline = node.baselineTokens;
+  if (baseline === undefined) return undefined;
+  const end = node.closedAt === undefined ? currentUsed : node.finalTokens;
+  if (end === undefined) return undefined;
+  return Math.max(0, end - baseline);
 }
 
 function closedChildMemories(state: SpineState, node: SpineNode): readonly string[] {

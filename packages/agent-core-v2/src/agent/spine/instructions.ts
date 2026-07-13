@@ -1,11 +1,18 @@
 /**
  * `spine` domain (L4) — the `<spine_view>` protocol block appended to the
- * system prompt when spine is enabled, plus the `appendSpineView` splicer.
+ * system prompt when spine is enabled, plus the `appendSpineView` splicer and
+ * the `~/spine_instruction.md` override loader.
  *
  * The text is transcribed from the upstream protocol (with the `spine.trim`
  * guidance removed, since trim is not implemented in this milestone) so the
- * model sees an identical contract. Pure string + string concatenation; no IO.
- * Consumed by the `llmRequester` request assembly.
+ * model sees an identical contract. `loadSpineViewOverride` returns the
+ * `<spine_view>` block extracted from `~/spine_instruction.md` (`undefined`
+ * when the file is missing, unreadable, empty, or carries no block); the
+ * caller owns the result — there is no module-level cache, so co-resident
+ * agents never share an override by accident, and `spineService` can await
+ * the load before its first turn request to keep every request's system
+ * prompt byte-identical. Pure string handling apart from the single file
+ * read. Consumed by `spineService` and the `llmRequester` request assembly.
  */
 
 export const SPINE_VIEW = `<spine_view>
@@ -100,8 +107,6 @@ const SPINE_VIEW_OPEN = '<spine_view>';
 const SPINE_VIEW_CLOSE = '</spine_view>';
 const OVERRIDE_FILENAME = 'spine_instruction.md';
 
-let cachedOverride: string | undefined;
-
 export function extractSpineView(contents: string): string | undefined {
   const start = contents.indexOf(SPINE_VIEW_OPEN);
   if (start < 0) return undefined;
@@ -115,22 +120,18 @@ export function extractSpineView(contents: string): string | undefined {
 export async function loadSpineViewOverride(
   hostFs: { readText(path: string): Promise<string> },
   homeDir: string,
-): Promise<void> {
+): Promise<string | undefined> {
   const path = `${homeDir}/${OVERRIDE_FILENAME}`;
   try {
     const contents = await hostFs.readText(path);
-    cachedOverride = contents.trim().length === 0 ? undefined : extractSpineView(contents);
+    return contents.trim().length === 0 ? undefined : extractSpineView(contents);
   } catch {
-    cachedOverride = undefined;
+    return undefined;
   }
 }
 
-export function _resetSpineViewOverrideForTests(): void {
-  cachedOverride = undefined;
-}
-
-export function appendSpineView(baseInstructions: string): string {
-  const view = cachedOverride ?? SPINE_VIEW;
+export function appendSpineView(baseInstructions: string, viewOverride?: string): string {
+  const view = viewOverride ?? SPINE_VIEW;
   const existing = baseInstructions.lastIndexOf(SPINE_VIEW_START_MARKER);
   const base = existing < 0 ? baseInstructions : baseInstructions.slice(0, existing);
   if (base.includes(view)) return base;

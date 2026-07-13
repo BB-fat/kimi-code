@@ -3,9 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { MASTER_ENV } from '#/app/flag/flagService';
 import {
-  _resetSpineViewOverrideForTests,
   appendSpineView,
+  IAgentContextSizeService,
   IAgentLLMRequesterService,
+  IAgentProfileService,
   IAgentSpineService,
   IAgentWireService,
   loadSpineViewOverride,
@@ -46,7 +47,6 @@ describe('Spine projection fold', () => {
   });
   afterEach(() => {
     vi.unstubAllEnvs();
-    _resetSpineViewOverrideForTests();
   });
 
   it('replaces a closed node span with one memory message without mutating storage', () => {
@@ -254,12 +254,95 @@ describe('Spine projection fold', () => {
     };
 
     testAgent(hostEnvironmentServices(homeDir), execEnvServices({ hostFs }));
-    await loadSpineViewOverride(hostFs, homeDir);
+    const view = await loadSpineViewOverride(hostFs, homeDir);
 
-    const spliced = appendSpineView('BASE SYSTEM');
+    const spliced = appendSpineView('BASE SYSTEM', view);
     expect(spliced).toContain('CUSTOM SPINE PROTOCOL');
     expect(spliced).not.toContain('Spine-managed');
     expect(spliced.startsWith('BASE SYSTEM')).toBe(true);
+  });
+
+  it('carries the override already in the first turn request', async () => {
+    const homeDir = '/home/test';
+    const override = '<spine_view>\nCUSTOM SPINE PROTOCOL\n</spine_view>';
+    const hostFs = {
+      readText: async (path: string) => {
+        if (path === `${homeDir}/spine_instruction.md`) return override;
+        throw new Error('ENOENT');
+      },
+      writeText: async () => {},
+      mkdir: async () => {},
+    };
+
+    const ctx = testAgent(hostEnvironmentServices(homeDir), execEnvServices({ hostFs }));
+    await configureLoop(ctx);
+    ctx.mockNextResponse({ type: 'text', text: 'done' });
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'hi' }] });
+    await ctx.untilTurnEnd();
+
+    // The override load is awaited before the first step assembles its
+    // request: the default view must never leak into an early request (a
+    // mid-session system-prompt swap would invalidate the prefix cache).
+    const systemPrompt = ctx.llmCalls[0]?.systemPrompt ?? '';
+    expect(systemPrompt).toContain('CUSTOM SPINE PROTOCOL');
+    expect(systemPrompt).not.toContain('Spine-managed');
+  });
+
+  it('reports cursor_context as the projected growth since the cursor opened', () => {
+    const ctx = testAgent();
+    buildClosedNodeHistory(ctx);
+    const used = ctx.get(IAgentContextSizeService).get().size;
+    ctx
+      .get(IAgentWireService)
+      .dispatch(
+        spineOpen({
+          id: '1.1.1',
+          summary: 'task A',
+          parentId: '1.1',
+          openedAt: 0,
+          baselineTokens: used,
+        }),
+      );
+
+    // The node added nothing since its baseline: the raw stored span behind
+    // it (~51 tokens above) must not leak into the budget signal. The few
+    // tokens that do show are the status line's own text changing with the
+    // cursor — the old stored-range reading would report the full span.
+    const status = statusText(fold(ctx));
+    const cursorContext = Number(/cursor_context="~(\d+)"/.exec(status)?.[1]);
+    expect(cursorContext).toBeLessThan(10);
+  });
+
+  it('derives context_left from the overflow-observed effective max', () => {
+    const ctx = testAgent();
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+    });
+    ctx.get(IAgentProfileService).observeMaxContextTokens(100_000);
+    append(ctx, userMessage('hi'));
+
+    // The catalogued 256K window clamps to the observed 100K ceiling; the
+    // tiny harness history leaves (nearly) the full observed window as
+    // headroom instead of ~256K.
+    expect(statusText(fold(ctx))).toContain('context_left="~100K"');
+  });
+
+  it('renders a closed node cost from its baseline-to-close gauge delta', () => {
+    const ctx = testAgent();
+    const wire = ctx.get(IAgentWireService);
+    wire.dispatch(
+      spineOpen({
+        id: '1.1.1',
+        summary: 'task A',
+        parentId: '1.1',
+        openedAt: 0,
+        baselineTokens: 10_000,
+      }),
+    );
+    wire.dispatch(spineClose({ id: '1.1.1', closedAt: 0, memory: 'mem A', finalTokens: 24_000 }));
+
+    expect(ctx.get(IAgentSpineService).renderTree()).toContain('1.1.1 [closed, ~14K] — task A');
   });
 
   it('replaces each sibling of a next-chain with its own memory', () => {
@@ -506,4 +589,8 @@ function textOf(message: { content?: readonly { type: string; text?: string }[] 
   return (
     message?.content?.map((part) => (part.type === 'text' ? (part.text ?? '') : '')).join('') ?? ''
   );
+}
+
+function statusText(folded: readonly ContextMessage[]): string {
+  return textOf(folded.find((m) => textOf(m).includes('<spine_status')));
 }

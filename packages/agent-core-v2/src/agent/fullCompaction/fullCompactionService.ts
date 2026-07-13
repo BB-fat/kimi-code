@@ -146,7 +146,6 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
   private readonly strategy: CompactionStrategy;
   private compactionCountInTurn = 0;
   private _compacting: ActiveCompaction | null = null;
-  private readonly observedMaxContextTokensByModel = new Map<string, number>();
   // Token count right after the last successful compaction. While nothing new
   // has been appended, the history is already in its minimal compacted form;
   // re-compacting would only summarize the summary again, so
@@ -232,23 +231,13 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
     return this._compacting;
   }
 
-  private getEffectiveMaxContextTokens(): number {
-    const configured = this.profile.data().modelCapabilities.max_context_tokens;
-    const modelAlias = this.profile.data().modelAlias;
-    const observed =
-      modelAlias === undefined ? undefined : this.observedMaxContextTokensByModel.get(modelAlias);
-    if (observed === undefined) return configured;
-    if (configured <= 0) return observed;
-    return Math.min(configured, observed);
-  }
-
   private resolveModelContextWithEffectiveMax(): ProfileModelContext {
     const resolved = this.profile.resolveModelContext();
     return {
       ...resolved,
       modelCapabilities: {
         ...resolved.modelCapabilities,
-        max_context_tokens: this.getEffectiveMaxContextTokens(),
+        max_context_tokens: this.profile.getEffectiveMaxContextTokens(),
       },
     };
   }
@@ -296,7 +285,7 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
     const statusError = findAPIStatusError(error);
     if (statusError instanceof APIContextOverflowError) return true;
     if (statusError === undefined || statusError.statusCode !== 413) return false;
-    const effectiveMax = this.getEffectiveMaxContextTokens();
+    const effectiveMax = this.profile.getEffectiveMaxContextTokens();
     return (
       effectiveMax > 0 &&
       estimatedRequestTokens >= effectiveMax * OVERFLOW_STATUS_RECOVERY_RATIO
@@ -305,15 +294,11 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
 
   private observeContextOverflow(estimatedRequestTokens: number): void {
     if (!Number.isFinite(estimatedRequestTokens) || estimatedRequestTokens <= 0) return;
-    const modelAlias = this.profile.data().modelAlias;
-    if (modelAlias === undefined) return;
     const observed = Math.max(
       1,
       Math.floor(estimatedRequestTokens * OVERFLOW_CONTEXT_SAFETY_RATIO),
     );
-    const current = this.getEffectiveMaxContextTokens();
-    if (current > 0 && observed >= current) return;
-    this.observedMaxContextTokensByModel.set(modelAlias, observed);
+    this.profile.observeMaxContextTokens(observed);
   }
 
   begin(input: FullCompactionInput): boolean {
@@ -481,7 +466,7 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
     if (this.context.get().length === 0) return;
     const nextMax = context.nextMaxContextTokens;
     if (nextMax === undefined || nextMax <= 0) return;
-    const currentMax = this.getEffectiveMaxContextTokens();
+    const currentMax = this.profile.getEffectiveMaxContextTokens();
     if (nextMax !== currentMax) {
       // The post-compaction floor and the futile flag were calibrated against
       // the outgoing window; they cannot vouch for a different one.

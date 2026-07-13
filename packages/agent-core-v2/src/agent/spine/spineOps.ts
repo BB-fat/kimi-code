@@ -33,6 +33,7 @@ export interface SpineNode {
   readonly memory?: string;
   readonly archivePath?: string;
   readonly baselineTokens?: number;
+  readonly finalTokens?: number;
   readonly children: readonly string[];
 }
 
@@ -114,6 +115,7 @@ export interface SpineClosePayload {
   readonly closedAt: number;
   readonly memory: string;
   readonly archivePath?: string;
+  readonly finalTokens?: number;
 }
 
 export const spineClose = defineOp(SpineModel, 'spine.close', {
@@ -131,6 +133,7 @@ export const spineClose = defineOp(SpineModel, 'spine.close', {
           closedAt: p.closedAt,
           memory: p.memory,
           archivePath: p.archivePath,
+          finalTokens: p.finalTokens,
         },
       },
       openStack: s.openStack.slice(0, -1),
@@ -143,6 +146,7 @@ export interface SpineNextPayload {
   readonly closedAt: number;
   readonly memory: string;
   readonly archivePath?: string;
+  readonly finalTokens?: number;
   readonly openedId: string;
   readonly summary: string;
   readonly baselineTokens?: number;
@@ -179,6 +183,7 @@ export const spineNext = defineOp(SpineModel, 'spine.next', {
           closedAt: p.closedAt,
           memory: p.memory,
           archivePath: p.archivePath,
+          finalTokens: p.finalTokens,
         },
         [p.openedId]: opened,
         [parentId]: { ...parent, children: [...parent.children, p.openedId] },

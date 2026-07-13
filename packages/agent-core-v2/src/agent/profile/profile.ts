@@ -201,6 +201,21 @@ export interface IAgentProfileService {
    */
   readonly provider: Model;
   getModelCapabilities(): ModelCapability;
+  /**
+   * `max_context_tokens` of the active model, clamped by the context ceiling
+   * learned from provider overflow rejections (see
+   * {@link observeMaxContextTokens}). The configured capability wins until an
+   * overflow proves the real window smaller; consumers that size budgets or
+   * triggers against the window must read this, not the raw capability.
+   */
+  getEffectiveMaxContextTokens(): number;
+  /**
+   * Record a context-window ceiling learned from a provider overflow rejection
+   * for the active model alias. Ignored when the value is not below the
+   * current effective max, so a stale or misattributed observation can never
+   * loosen the clamp.
+   */
+  observeMaxContextTokens(observed: number): void;
   getMaxOutputSize(): number | undefined;
   hasModel(): boolean;
   /** True when both a Profile and a Model are bound — i.e. the agent can run a turn. */
