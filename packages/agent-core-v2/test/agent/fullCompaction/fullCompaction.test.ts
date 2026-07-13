@@ -20,7 +20,7 @@ import { APIConnectionError, APIContextOverflowError, APIStatusError } from '#/a
 import { type Message, type StreamedMessagePart, type ToolCall } from '#/app/llmProtocol/message';
 import { generate as runKosongGenerate } from '#/app/llmProtocol/generate';
 import type { ChatProvider, StreamedMessage } from '#/app/llmProtocol/provider';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   DefaultCompactionStrategy,
@@ -46,6 +46,8 @@ import {
 } from '#/index';
 import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentContextSizeService } from '#/agent/contextSize/contextSize';
+import { spineClose, spineOpen } from '#/agent/spine/spineOps';
+import { IAgentWireService } from '#/wire/tokens';
 import { IAgentGoalService } from '#/agent/goal/goal';
 import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
 
@@ -2727,6 +2729,222 @@ describe('FullCompaction', () => {
       text: expect.stringContaining('The conversation so far has been compacted'),
     });
     await ctx.expectResumeMatches();
+  });
+
+  it('pauses auto compaction when the compacted shape still exceeds the threshold', async () => {
+    vi.stubEnv(MASTER_ENV, '0');
+    vi.stubEnv('KIMI_CODE_SPINE', '0');
+    // Reproduces the pre-fix defect: a history whose compacted shape stays
+    // above the trigger threshold (the kept real user messages alone exceed
+    // the small window) was compacted again on every turn — summarizing the
+    // summary forever.
+    const generate: GenerateFn = async (_provider, _system, _tools, history) => {
+      const last = history.at(-1);
+      const lastText = last?.content
+        .filter((part) => part.type === 'text')
+        .map((part) => part.text)
+        .join('\n');
+      return {
+        id: 'mock-futile',
+        message: {
+          role: 'assistant',
+          content: [
+            {
+              type: 'text',
+              text: lastText?.startsWith('You are about to run out of context.') === true ? 'SUMMARY' : 'ok',
+            },
+          ],
+          toolCalls: [],
+        },
+        usage: {
+          inputOther: estimateTokensForMessages(history),
+          output: 5,
+          inputCacheRead: 0,
+          inputCacheCreation: 0,
+        },
+        finishReason: 'completed',
+        rawFinishReason: 'stop',
+      };
+    };
+    const ctx = testAgent({ generate });
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: { ...CATALOGUED_MODEL_CAPABILITIES, max_context_tokens: 4_000 },
+    });
+    // 30 real user messages ~500 est tokens each: the handoff shape keeps
+    // real user messages (20k budget) — far above this small window.
+    for (let i = 0; i < 30; i++) {
+      ctx.appendExchange(
+        i + 1,
+        `u${String(i)} ${'x'.repeat(2000)}`,
+        `a${String(i)} ${'y'.repeat(2000)}`,
+        3900,
+      );
+    }
+
+    for (let turn = 0; turn < 3; turn++) {
+      await ctx.rpc.prompt({ input: [{ type: 'text', text: `turn ${String(turn)}` }] });
+      await ctx.untilTurnEnd();
+    }
+
+    const begins = ctx.recordHistory.filter((record) => record.type === 'full_compaction.begin');
+    expect(begins).toHaveLength(1);
+  });
+
+  it('resumes auto compaction after upshifting out of a futile window', async () => {
+    vi.stubEnv(MASTER_ENV, '0');
+    vi.stubEnv('KIMI_CODE_SPINE', '0');
+    // The futile pause is calibrated against the window that measured it;
+    // switching to a larger window must re-arm auto compaction.
+    const generate: GenerateFn = async (_provider, _system, _tools, history) => {
+      const last = history.at(-1);
+      const lastText = last?.content
+        .filter((part) => part.type === 'text')
+        .map((part) => part.text)
+        .join('\n');
+      return {
+        id: 'mock-futile-upshift',
+        message: {
+          role: 'assistant',
+          content: [
+            {
+              type: 'text',
+              text: lastText?.startsWith('You are about to run out of context.') === true ? 'SUMMARY' : 'ok',
+            },
+          ],
+          toolCalls: [],
+        },
+        usage: {
+          inputOther: estimateTokensForMessages(history),
+          output: 5,
+          inputCacheRead: 0,
+          inputCacheCreation: 0,
+        },
+        finishReason: 'completed',
+        rawFinishReason: 'stop',
+      };
+    };
+    const ctx = testAgent({ generate });
+    ctx.configure({
+      provider: SMALL_WINDOW_PROVIDER,
+      modelCapabilities: { ...CATALOGUED_MODEL_CAPABILITIES, max_context_tokens: 4_000 },
+    });
+    ctx.configureRuntimeModel(BIG_WINDOW_PROVIDER, {
+      ...CATALOGUED_MODEL_CAPABILITIES,
+      max_context_tokens: 6_000,
+    });
+    // configureRuntimeModel selects the alias it registers; bind back to the
+    // small model so the setModel below is the only window switch.
+    await ctx.get(IAgentProfileService).bind({
+      profile: DEFAULT_AGENT_PROFILE_NAME,
+      model: 'small-model',
+    });
+    for (let i = 0; i < 30; i++) {
+      ctx.appendExchange(
+        i + 1,
+        `u${String(i)} ${'x'.repeat(2000)}`,
+        `a${String(i)} ${'y'.repeat(2000)}`,
+        3900,
+      );
+    }
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'turn 0' }] });
+    await ctx.untilTurnEnd();
+    const begins = () =>
+      ctx.recordHistory.filter((record) => record.type === 'full_compaction.begin').length;
+    expect(begins()).toBe(1);
+
+    // The 6k window still cannot fit the ~15k kept shape, but the futile
+    // pause measured at 4k must not carry over.
+    await ctx.get(IAgentProfileService).setModel('big-model');
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'turn 1' }] });
+    await ctx.untilTurnEnd();
+
+    expect(begins()).toBe(2);
+  });
+
+  describe('spine-mode gauge caliber', () => {    beforeEach(() => {
+      vi.stubEnv(MASTER_ENV, '0');
+      vi.stubEnv('KIMI_CODE_SPINE', '1');
+    });
+
+    it('does not auto-compact after an undo when the folded view is small', async () => {
+      // Reproduces the "frequent compaction" defect: undo truncated the
+      // measured prefix and the rebase estimated the RAW stored history
+      // (~9k), poisoning the gauge past the threshold even though the folded
+      // view was ~1k — so the next turn blocked on a spurious compaction.
+      const window = 4_000;
+      const generate: GenerateFn = async () => textResult('ok');
+      const ctx = testAgent({ generate });
+      ctx.configure({
+        provider: CATALOGUED_PROVIDER,
+        modelCapabilities: { ...CATALOGUED_MODEL_CAPABILITIES, max_context_tokens: window },
+      });
+      for (let i = 0; i < 10; i++) {
+        ctx.appendExchange(
+          i + 1,
+          `u${String(i)} ${'x'.repeat(2000)}`,
+          `a${String(i)} ${'y'.repeat(2000)}`,
+          1000,
+        );
+      }
+      const wire = ctx.get(IAgentWireService);
+      wire.dispatch(spineOpen({ id: '1.1.1', parentId: '1.1', summary: 'seed node', openedAt: 0 }));
+      wire.dispatch(spineClose({ id: '1.1.1', closedAt: 15, memory: 'seed memory' }));
+
+      await ctx.rpc.undoHistory({ count: 1 });
+
+      // The rebase must be projection-caliber: folded view ~1k, far below 85%.
+      expect(ctx.get(IAgentContextSizeService).get().size).toBeLessThan(window * 0.85);
+
+      await ctx.rpc.prompt({ input: [{ type: 'text', text: 'next question' }] });
+      await ctx.untilTurnEnd();
+
+      expect(
+        ctx.recordHistory.filter((record) => record.type === 'full_compaction.begin'),
+      ).toHaveLength(0);
+    });
+
+    it('does not treat a provider 413 as context overflow when the projected view is small', async () => {
+      // Reproduces the pre-fix defect: the 413 heuristic estimated the RAW
+      // stored history (permanently above 50% of the window in spine mode),
+      // so every 413 triggered overflow recovery — three futile compactions,
+      // then a hard CONTEXT_OVERFLOW.
+      const generate: GenerateFn = async (_provider, _system, _tools, history) => {
+        const last = history.at(-1);
+        const lastText = last?.content
+          .filter((part) => part.type === 'text')
+          .map((part) => part.text)
+          .join('\n');
+        if (lastText?.startsWith('You are about to run out of context.') === true) {
+          return textResult('SUMMARY');
+        }
+        throw new APIStatusError(413, 'Request Entity Too Large', 'req-413');
+      };
+      const ctx = testAgent({ generate });
+      ctx.configure({
+        provider: CATALOGUED_PROVIDER,
+        modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+      });
+      // ~140k estimated raw tokens — above 50% of the 256k window — while the
+      // folded view (all but the last two exchanges closed) stays tiny.
+      for (let i = 0; i < 70; i++) {
+        ctx.appendExchange(
+          i + 1,
+          `u${String(i)} ${'x'.repeat(4000)}`,
+          `a${String(i)} ${'y'.repeat(4000)}`,
+          1000,
+        );
+      }
+      const wire = ctx.get(IAgentWireService);
+      wire.dispatch(spineOpen({ id: '1.1.1', parentId: '1.1', summary: 'seed node', openedAt: 0 }));
+      wire.dispatch(spineClose({ id: '1.1.1', closedAt: 135, memory: 'seed memory' }));
+
+      await ctx.rpc.prompt({ input: [{ type: 'text', text: 'go' }] });
+      const events = await ctx.untilTurnEnd();
+
+      expect(countEvents(events, 'compaction.started')).toBe(0);
+      expect(eventIndex(events, 'turn.ended')).toBeGreaterThanOrEqual(0);
+    });
   });
 });
 

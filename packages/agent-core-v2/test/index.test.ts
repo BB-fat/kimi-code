@@ -53,6 +53,7 @@ const V1_RECORD_TYPES: ReadonlySet<string> = new Set([
   'spine.close',
   'spine.next',
   'spine.root_compact',
+  'spine.truncate_repair',
   'plan_mode.enter',
   'plan_mode.cancel',
   'plan_mode.exit',

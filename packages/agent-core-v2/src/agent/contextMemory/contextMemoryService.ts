@@ -8,8 +8,10 @@
  * As the sole live mutation gateway for the history, it also cascades a
  * (non-persisted) `context_size.measured` Op alongside every mutation that
  * changes the measured prefix — `clear` resets it, `applyCompaction` adopts
- * `tokensAfter`, and `undo` rebases it (to an estimate when the measured
- * aggregate is truncated); `append` leaves the measured prefix untouched since
+ * `tokensAfter`, and `undo` rebases it (to a projection-caliber estimate
+ * computed through `contextProjector` when the measured aggregate is
+ * truncated, so a folded stored history never poisons the gauge); `append`
+ * leaves the measured prefix untouched since
  * new messages are the unmeasured tail (see `contextSizeService`). Every
  * mutation still fires `onSpliced` from the live path only (replay rebuilds
  * the Model silently and never invokes these methods), so existing subscribers
@@ -26,6 +28,7 @@ import { InstantiationType } from '#/_base/di/extensions';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
 import { estimateTokensForMessages } from '#/_base/utils/tokens';
 import { IEventBus } from '#/app/event/eventBus';
+import { IAgentContextProjectorService } from '#/agent/contextProjector/contextProjector';
 import { ContextSizeModel, contextSizeMeasured } from '#/agent/contextSize/contextSizeOps';
 import { IAgentWireService } from '#/wire/tokens';
 import type { Op } from '#/wire/op';
@@ -68,6 +71,7 @@ export class AgentContextMemoryService extends Disposable implements IAgentConte
   constructor(
     @IAgentWireService private readonly wire: IWireService,
     @IEventBus private readonly eventBus: IEventBus,
+    @IAgentContextProjectorService private readonly projector: IAgentContextProjectorService,
   ) {
     super();
   }
@@ -156,6 +160,11 @@ export class AgentContextMemoryService extends Disposable implements IAgentConte
    * the measured prefix, the measurement stays valid and nothing is emitted;
    * otherwise the prefix is rebased to an estimate of the surviving messages
    * (an aggregate measured count can't be truncated without per-message data).
+   * The gauge answers "what will the next request cost", so the estimate is
+   * projection-caliber. The prefix slice keeps fold semantics honest: it is
+   * index-aligned with the stored history the folds anchor on (a prefix never
+   * shifts positions), and the pre-repair tree folds it into the same shape
+   * the post-repair tree would.
    */
   private sizeOpsForCut(cutIndex: number, history: readonly ContextMessage[]): Op[] {
     const model = this.wire.getModel(ContextSizeModel);
@@ -163,7 +172,7 @@ export class AgentContextMemoryService extends Disposable implements IAgentConte
     return [
       contextSizeMeasured({
         length: cutIndex,
-        tokens: estimateTokensForMessages(history.slice(0, cutIndex)),
+        tokens: this.projector.estimateProjectedTokens(history.slice(0, cutIndex)),
         kind: 'estimate',
       }),
     ];

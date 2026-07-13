@@ -19,11 +19,15 @@ import {
   IAgentSpineService,
   IAgentWireRecordService,
   IAgentWireService,
+  SPINE_STARTUP_OPENED_AT,
   SpineModel,
   spineClose,
   spineNext,
   spineOpen,
+  spineRootCompact,
+  spineTruncateRepair,
 } from '#/index';
+import type { Message } from '#/app/llmProtocol/message';
 
 import {
   agentService,
@@ -31,6 +35,7 @@ import {
   InMemoryWireRecordPersistence,
   testAgent,
   type TestAgentContext,
+  type TestAgentOptions,
 } from '../harness';
 
 const SPINE_ENV = 'KIMI_CODE_SPINE';
@@ -119,6 +124,60 @@ describe('Spine reducers (via wire)', () => {
     expect(state.nodes['1.1.1']?.closedAt).toBe(5);
     expect(state.nodes['1.1.1']?.memory).toBe('did A');
     expect(before).not.toBe(state);
+  });
+
+  it('repairs spans and the epoch boundary at a truncation cut', () => {
+    const ctx = testAgent();
+    const wire = ctx.get(IAgentWireService);
+    wire.dispatch(spineOpen({ id: '1.1.1', summary: 'task A', parentId: '1.1', openedAt: 2 }));
+    wire.dispatch(spineClose({ id: '1.1.1', closedAt: 9, memory: 'did A' }));
+    wire.dispatch(spineOpen({ id: '1.1.2', summary: 'task B', parentId: '1.1', openedAt: 10 }));
+    wire.dispatch(spineClose({ id: '1.1.2', closedAt: 14, memory: 'did B' }));
+    wire.dispatch(spineOpen({ id: '1.1.3', summary: 'task C', parentId: '1.1', openedAt: 15 }));
+    wire.dispatch(spineRootCompact({ epoch: 2, epochStartAt: 20, epochMemoryAt: 19 }));
+
+    wire.dispatch(spineTruncateRepair({ cut: 8 }));
+
+    const state = readSpine(ctx);
+    // Straddling span [2, 9]: fold only the surviving prefix.
+    expect(state.nodes['1.1.1']?.closedAt).toBe(7);
+    // Span fully inside the truncated range: voided (fold-excluded).
+    expect(state.nodes['1.1.2']?.openedAt).toBe(SPINE_STARTUP_OPENED_AT);
+    // Open span whose start was truncated: restarted at the cut.
+    expect(state.nodes['1.1.3']?.openedAt).toBe(8);
+    // The cut removed the epoch summary anchor: the boundary falls back to 0
+    // (no-loss) so the surviving history stays fully visible.
+    expect(state.epochStartAt).toBe(0);
+    expect(state.epochMemoryAt).toBeUndefined();
+  });
+
+  it('keeps the epoch boundary when the cut stays after it', () => {
+    const ctx = testAgent();
+    const wire = ctx.get(IAgentWireService);
+    wire.dispatch(spineOpen({ id: '1.1.1', summary: 'task A', parentId: '1.1', openedAt: 22 }));
+    wire.dispatch(spineClose({ id: '1.1.1', closedAt: 30, memory: 'did A' }));
+    wire.dispatch(spineRootCompact({ epoch: 2, epochStartAt: 20, epochMemoryAt: 19 }));
+    const before = readSpine(ctx);
+
+    wire.dispatch(spineTruncateRepair({ cut: 25 }));
+
+    const state = readSpine(ctx);
+    expect(state.epochStartAt).toBe(20);
+    expect(state.epochMemoryAt).toBe(19);
+    // Only the straddling span is repaired; the boundary is untouched.
+    expect(state.nodes['1.1.1']?.closedAt).toBe(24);
+    expect(state).not.toBe(before);
+  });
+
+  it('keeps a same-shape state on a repair that changes nothing', () => {
+    const ctx = testAgent();
+    const wire = ctx.get(IAgentWireService);
+    wire.dispatch(spineOpen({ id: '1.1.1', summary: 'task A', parentId: '1.1', openedAt: 2 }));
+    const before = readSpine(ctx);
+
+    wire.dispatch(spineTruncateRepair({ cut: 8 }));
+
+    expect(readSpine(ctx)).toBe(before);
   });
 
   it('rejects closing a root epoch (no-op, same reference)', () => {
@@ -248,6 +307,89 @@ describe('Spine control tools', () => {
     expect(state.nodes['1.1.1']?.closedAt).toBeDefined();
     expect(state.nodes['1.1.1']?.memory).toBe('did A');
     expect(state.openStack).toEqual(['1', '1.1']);
+  });
+
+  it('commits a spine transition after an undo shrank the history', async () => {
+    // Reproduces the pre-fix defect: undo truncated the context below
+    // `lastObservedIndex`, so the next transition's evidence search started
+    // past the end of the history, found nothing, and dropped the transition
+    // even though the accepted receipt landed in the transcript.
+    const ctx = loopContext();
+    await configureLoop(ctx);
+    for (let i = 0; i < 3; i++) ctx.appendExchange(i + 1, `seed u${i}`, `seed a${i}`, 100);
+    ctx.mockNextResponse(toolCallPart('call_open_1', 'spine_open', { summary: 'task A' }));
+    ctx.mockNextResponse({ type: 'text', text: 'done' });
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'start' }] });
+    await ctx.untilTurnEnd();
+    expect(readSpine(ctx).nodes['1.1.1']?.summary).toBe('task A');
+
+    await ctx.rpc.undoHistory({ count: 1 });
+
+    ctx.mockNextResponse(toolCallPart('call_open_2', 'spine_open', { summary: 'task B' }));
+    ctx.mockNextResponse({ type: 'text', text: 'done' });
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'continue' }] });
+    await ctx.untilTurnEnd();
+
+    const state = readSpine(ctx);
+    expect(state.nodes['1.1.1.1']?.summary).toBe('task B');
+    expect(state.openStack).toEqual(['1', '1.1', '1.1.1', '1.1.1.1']);
+  });
+
+  it('keeps post-undo messages out of a truncated closed span', async () => {
+    // Reproduces the pre-fix defect: undo cutting into a closed span left its
+    // indices dangling; the fold emitted the stale memory at `openedAt` and
+    // jumped past the end of the truncated history, swallowing every message
+    // appended after the undo — the model never saw the fresh prompt.
+    let lastRequestText = '';
+    const generate: GenerateFn = async (_provider, _system, _tools, history) => {
+      lastRequestText = historyText(history);
+      return textResult('answer');
+    };
+    const ctx = testAgent(execEnvServices({ hostFs: recordingHostFs().fs }), { generate });
+    await configureLoop(ctx);
+    for (let i = 0; i < 10; i++) ctx.appendExchange(i + 1, `u${String(i)}`, `a${String(i)}`, 100);
+    const wire = ctx.get(IAgentWireService);
+    wire.dispatch(spineOpen({ id: '1.1.1', parentId: '1.1', summary: 'old work', openedAt: 2 }));
+    wire.dispatch(spineClose({ id: '1.1.1', closedAt: 9, memory: 'old memory' }));
+
+    // Cut lands at index 8 — inside the closed span [2, 9].
+    await ctx.rpc.undoHistory({ count: 6 });
+    expect(readSpine(ctx).nodes['1.1.1']?.closedAt).toBe(7);
+
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'FRESH-PROMPT-MARKER' }] });
+    await ctx.untilTurnEnd();
+
+    expect(lastRequestText).toContain('FRESH-PROMPT-MARKER');
+    expect(lastRequestText).toContain('old memory');
+  });
+
+  it('keeps the rebuilt history visible after /clear with a dangling epoch boundary', async () => {
+    // Reproduces the pre-fix defect: /clear emptied the context while the tree
+    // kept its epoch boundary, so the fold dropped every rebuilt message
+    // (`i < epochStartAt`) and the model saw nothing but the status line.
+    let lastRequestText = '';
+    const generate: GenerateFn = async (_provider, _system, _tools, history) => {
+      lastRequestText = historyText(history);
+      return textResult('answer');
+    };
+    const ctx = testAgent(execEnvServices({ hostFs: recordingHostFs().fs }), { generate });
+    await configureLoop(ctx);
+    for (let i = 0; i < 11; i++) ctx.appendExchange(i + 1, `u${String(i)}`, `a${String(i)}`, 100);
+    const wire = ctx.get(IAgentWireService);
+    wire.dispatch(spineRootCompact({ epoch: 2, epochStartAt: 22, epochMemoryAt: 21 }));
+
+    await ctx.rpc.clearContext({});
+
+    const state = readSpine(ctx);
+    expect(state.epochStartAt).toBe(0);
+    expect(state.epochMemoryAt).toBeUndefined();
+    // The old epochs stay in the tree for their archives.
+    expect(state.nodes['2']).toBeDefined();
+
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'AFTER-CLEAR-MARKER' }] });
+    await ctx.untilTurnEnd();
+
+    expect(lastRequestText).toContain('AFTER-CLEAR-MARKER');
   });
 
   it('commits next atomically across a single step', async () => {
@@ -536,6 +678,26 @@ function toolCallPart(
   readonly arguments: string;
 } {
   return { type: 'function', id, name, arguments: JSON.stringify(args) };
+}
+
+type GenerateFn = NonNullable<TestAgentOptions['generate']>;
+
+function textResult(text: string): Awaited<ReturnType<GenerateFn>> {
+  return {
+    id: 'mock-spine-text',
+    message: { role: 'assistant', content: [{ type: 'text', text }], toolCalls: [] },
+    usage: { inputOther: 1, output: 1, inputCacheRead: 0, inputCacheCreation: 0 },
+    finishReason: 'completed',
+    rawFinishReason: 'stop',
+  };
+}
+
+function historyText(history: readonly Message[]): string {
+  return history
+    .flatMap((message) => message.content)
+    .filter((part) => part.type === 'text')
+    .map((part) => part.text)
+    .join('\n');
 }
 
 function textOf(message: { content?: readonly { type: string; text?: string }[] } | undefined): string {

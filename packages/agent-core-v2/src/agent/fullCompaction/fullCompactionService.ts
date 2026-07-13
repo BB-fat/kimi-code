@@ -18,6 +18,7 @@ import {
 import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import type { ContextMessage } from '#/agent/contextMemory/types';
+import { IAgentContextProjectorService } from '#/agent/contextProjector/contextProjector';
 import { IAgentContextSizeService } from '#/agent/contextSize/contextSize';
 import { contextSizeMeasured } from '#/agent/contextSize/contextSizeOps';
 import { SPINE_FLAG_ID } from '#/agent/spine/flag';
@@ -149,8 +150,18 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
   // Token count right after the last successful compaction. While nothing new
   // has been appended, the history is already in its minimal compacted form;
   // re-compacting would only summarize the summary again, so
-  // checkAutoCompaction skips in that case.
+  // checkAutoCompaction skips in that case. Retained across turns — the
+  // "nothing new since compaction" condition does not change at a turn
+  // boundary; reset when the history is materially replaced or the model
+  // (and with it the window) downshifts.
   private lastCompactedTokenCount: number | null = null;
+  // Set when a completed compaction still exceeds the trigger threshold: the
+  // compacted shape cannot fit the window, so further AUTO compaction is
+  // futile — it would summarize the summary every turn while the kept user
+  // messages only grow. Manual compaction and overflow recovery bypass it;
+  // cleared when the history is materially replaced (clear / undo /
+  // apply_compaction) or the model downshifts.
+  private compactionFutile = false;
   // Counts provider-overflow recoveries in this turn that have not yet been
   // followed by a successful step. Trips maxOverflowCompactionAttempts to
   // stop an overflow -> compact -> overflow loop when compaction can no
@@ -175,12 +186,20 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
     @ILogService private readonly log: ILogService,
     @IFlagService private readonly flags: IFlagService,
     @IAgentLoopService private readonly loopService: IAgentLoopService,
+    @IAgentContextProjectorService private readonly projector: IAgentContextProjectorService,
   ) {
     super();
     this.strategy = new RuntimeCompactionStrategy(() => this.resolveModelContextWithEffectiveMax());
     this._register(this.wire.onRestored(() => this.normalizeAfterReplay()));
     this._register(
       this.eventBus.subscribe('turn.started', () => this.resetForTurn()),
+    );
+    this._register(
+      this.eventBus.subscribe('context.spliced', (event) => {
+        if (event.deleteCount === 0) return;
+        this.lastCompactedTokenCount = null;
+        this.compactionFutile = false;
+      }),
     );
     this._register(
       this.profile.hooks.onWillSetModel.register('full-compaction', async (ctx, next) => {
@@ -235,14 +254,24 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
   }
 
   private estimateCurrentRequestTokens(): number {
-    return this.estimateRequestTokens(this.context.get());
+    // Overflow heuristics guard against provider-reported rejections, which
+    // bill the projected request — estimate that view, not the raw stored
+    // history (append-only under folds such as spine, where a raw estimate
+    // keeps the 413 heuristic permanently armed).
+    return (
+      this.requestOverheadTokens() +
+      this.projector.estimateProjectedTokens(this.context.get())
+    );
   }
 
   private estimateRequestTokens(messages: readonly Message[]): number {
+    return this.requestOverheadTokens() + estimateTokensForMessages(messages);
+  }
+
+  private requestOverheadTokens(): number {
     return (
       estimateTokens(this.profile.getSystemPrompt()) +
-      estimateTokensForTools(this.defaultTools().filter((tool) => tool.deferred !== true)) +
-      estimateTokensForMessages(messages)
+      estimateTokensForTools(this.defaultTools().filter((tool) => tool.deferred !== true))
     );
   }
 
@@ -391,7 +420,6 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
 
   private resetForTurn(): void {
     this.compactionCountInTurn = 0;
-    this.lastCompactedTokenCount = null;
     this.consecutiveOverflowCompactions = 0;
   }
 
@@ -453,7 +481,14 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
     if (this.context.get().length === 0) return;
     const nextMax = context.nextMaxContextTokens;
     if (nextMax === undefined || nextMax <= 0) return;
-    if (nextMax >= this.getEffectiveMaxContextTokens()) return;
+    const currentMax = this.getEffectiveMaxContextTokens();
+    if (nextMax !== currentMax) {
+      // The post-compaction floor and the futile flag were calibrated against
+      // the outgoing window; they cannot vouch for a different one.
+      this.lastCompactedTokenCount = null;
+      this.compactionFutile = false;
+    }
+    if (nextMax >= currentMax) return;
     if (!this.strategy.shouldCompactForWindow(this.tokenCountWithPending(), nextMax)) return;
     this.begin({ source: 'auto' });
     try {
@@ -483,6 +518,7 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
   }
 
   private checkAutoCompaction(throwOnLimit = true): boolean {
+    if (this.compactionFutile) return false;
     if (this._compacting) return true;
     if (
       this.lastCompactedTokenCount !== null &&
@@ -568,6 +604,15 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
       // "nothing new since compaction" guard and checkAutoCompaction could
       // re-trigger against a shape that cannot shrink.
       this.lastCompactedTokenCount = this.tokenCountWithPending();
+      this.compactionFutile = this.strategy.shouldCompact(this.tokenCountWithPending());
+      if (this.compactionFutile) {
+        this.log.warn(
+          'Compaction could not bring the context under the auto-compaction threshold; ' +
+            'the kept messages alone exceed the window, so further auto compaction would ' +
+            'only summarize the summary. Pausing auto compaction until the history is ' +
+            'replaced or the model changes.',
+        );
+      }
       if (!this.markCompleted(active)) {
         throw compactionCancelledReason(active);
       }
@@ -608,6 +653,14 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
     const startedAt = Date.now();
     const originalHistory = [...this.context.get()];
     const tokensBefore = estimateTokensForMessages(originalHistory);
+    // In spine mode the stored history is append-only across epochs and every
+    // earlier epoch is already folded behind its summary + archive, so the
+    // summary request only covers the current epoch (with the previous
+    // epoch's summary chained for continuity); `originalHistory` stays the
+    // drift-check / accounting reference.
+    const historyToSummarize = this.flags.enabled(SPINE_FLAG_ID)
+      ? this.epochScopedHistory(originalHistory)
+      : originalHistory;
     let retryCount = 0;
 
     try {
@@ -630,7 +683,7 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
 
       const delays = retryBackoffDelays(MAX_COMPACTION_RETRY_ATTEMPTS);
       let attempt: CompactionAttemptResult | undefined;
-      let historyForModel: readonly ContextMessage[] = stripDynamicToolContext(originalHistory);
+      let historyForModel: readonly ContextMessage[] = stripDynamicToolContext(historyToSummarize);
       let droppedCount = 0;
       let overflowShrinkCount = 0;
       let emptyOrTruncatedShrinkCount = 0;
@@ -846,6 +899,26 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
     // in the wire and needs no re-injection.
     if (this.flags.enabled(SPINE_FLAG_ID)) return [];
     return this.todo.getTodos();
+  }
+
+  /**
+   * The summary request's input in spine mode: the current epoch's messages,
+   * with the previous epoch's summary message chained in front for
+   * continuity. Earlier epochs are already folded behind summary + archive,
+   * so re-summarizing the append-only full history would spend the whole
+   * window (observed at 700k–1M tokens per request) and eventually overflow
+   * the shrink ladder.
+   */
+  private epochScopedHistory(
+    history: readonly ContextMessage[],
+  ): readonly ContextMessage[] {
+    const spineState = this.wire.getModel(SpineModel);
+    const start = Math.min(spineState.epochStartAt, history.length);
+    const scoped = history.slice(start);
+    const summaryAt = spineState.epochMemoryAt;
+    const priorSummary =
+      summaryAt !== undefined && summaryAt < start ? history[summaryAt] : undefined;
+    return priorSummary === undefined ? scoped : [priorSummary, ...scoped];
   }
 
   private tokenCountWithPending(): number {

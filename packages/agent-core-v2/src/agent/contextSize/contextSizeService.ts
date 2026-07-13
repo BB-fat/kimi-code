@@ -43,6 +43,7 @@ export class AgentContextSizeService extends Disposable implements IAgentContext
   declare readonly _serviceBrand: undefined;
 
   private lastEmittedTokens = 0;
+  private estimatingProjected = false;
 
   constructor(
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
@@ -82,8 +83,31 @@ export class AgentContextSizeService extends Disposable implements IAgentContext
       from === 0 && measuredEnd === model.length
         ? model.tokens
         : measuredSubRange(context, model.snapshots, from, measuredEnd);
-    const estimated = estimateTokensForMessages(context.slice(estimatedStart, to));
+    // Before the first measured exchange (e.g. right after a resume — the Op
+    // is live-only), a raw estimate of the stored history overstates the next
+    // request's cost whenever a fold is registered: the model only sees the
+    // projected view, so estimate that instead.
+    const neverMeasured = model.length === 0 && model.snapshots.length === 0;
+    const tail = context.slice(estimatedStart, to);
+    const estimated =
+      neverMeasured && from === 0 && to === context.length
+        ? this.estimateProjected(tail)
+        : estimateTokensForMessages(tail);
     return { size: measured + estimated, measured, estimated };
+  }
+
+  private estimateProjected(messages: readonly ContextMessage[]): number {
+    // Projecting runs the registered folds, and a fold (spine's status line)
+    // may read the gauge back through `get()` — which would re-enter this
+    // method and never terminate. Fall back to a raw estimate on re-entry;
+    // the outer estimate stays projection-caliber.
+    if (this.estimatingProjected) return estimateTokensForMessages(messages);
+    this.estimatingProjected = true;
+    try {
+      return this.projector.estimateProjectedTokens(messages);
+    } finally {
+      this.estimatingProjected = false;
+    }
   }
 
   rawSize(): number {

@@ -37,7 +37,15 @@
  * into `llmRequester` (spine → projector / llmRequester, never the reverse);
  * the prompt contribution self-gates per request, so only turn requests whose
  * tool list can act on the protocol (i.e. that offer `spine_open`) carry it —
- * sub-agents and operations such as compaction never see it. Self-checks the
+ * sub-agents and operations such as compaction never see it. Repairs the tree
+ * when the stored history shrinks beneath it (`context.spliced` with a nonzero
+ * delete count): an undo truncation clamps straddling closed spans to the cut,
+ * voids fully-truncated ones, restarts truncated open spans there, and clamps
+ * the epoch boundary (and its summary anchor) into the surviving range
+ * (`spine.truncate_repair`) — a `/clear` is the cut-at-zero case of the same
+ * repair — so post-truncation messages are never folded against dangling
+ * indices and the observation cursor (`lastObservedIndex`) is re-anchored to
+ * the cut. Self-checks the
  * `KIMI_CODE_SPINE` gate at construction, so a disabled spine never observes
  * history. Bound at Agent scope.
  */
@@ -60,6 +68,7 @@ import {
   type PersistedWireRecord,
 } from '#/agent/wireRecord/wireRecord';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
+import { IEventBus } from '#/app/event/eventBus';
 import { IFlagService } from '#/app/flag/flag';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
@@ -89,6 +98,7 @@ import {
   spineClose,
   spineNext,
   spineOpen,
+  spineTruncateRepair,
   type SpineNode,
   type SpineState,
 } from './spineOps';
@@ -151,6 +161,7 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     @IAgentLoopService loop: IAgentLoopService,
     @IAgentContextProjectorService projector: IAgentContextProjectorService,
     @IAgentLLMRequesterService llmRequester: IAgentLLMRequesterService,
+    @IEventBus private readonly eventBus: IEventBus,
   ) {
     super();
     if (this.enabled) {
@@ -192,6 +203,38 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
         this.pending = null;
         if (this.enabled) this.reportLostCommits();
       }),
+    );
+    this._register(
+      this.eventBus.subscribe('context.spliced', (event) => {
+        if (!this.enabled) return;
+        if (event.deleteCount === 0) return;
+        // The stored history shrank beneath the tree (undo / clear / full
+        // replacement): re-anchor the observation cursor to the cut and clamp
+        // dangling spans and the epoch boundary into the surviving range, so
+        // post-truncation messages are never folded against stale indices.
+        const cut = event.start;
+        this.lastObservedIndex = Math.min(this.lastObservedIndex, cut);
+        // Invariant (today): deleteCount > 0 splices are tail truncations
+        // (undo) or full clears/replacements at 0, so `start` equals the
+        // surviving prefix length. A future mid-history deletion would shift
+        // later messages down and needs index translation, not clamping —
+        // skip the repair rather than void spans that actually survive.
+        if (this.context.get().length !== cut) return;
+        const state = this.state();
+        if (this.needsTruncateRepair(state, cut)) {
+          this.wire.dispatch(spineTruncateRepair({ cut }));
+        }
+      }),
+    );
+  }
+
+  private needsTruncateRepair(state: SpineState, cut: number): boolean {
+    if (state.epochStartAt > cut) return true;
+    if (state.epochMemoryAt !== undefined && state.epochMemoryAt >= cut) return true;
+    return Object.values(state.nodes).some(
+      (node) =>
+        node.openedAt >= 0 &&
+        (node.openedAt >= cut || (node.closedAt !== undefined && node.closedAt >= cut)),
     );
   }
 
@@ -366,7 +409,14 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     if (pending === null) return;
 
     const history = this.context.get();
-    const evidence = findEvidence(history, this.lastObservedIndex, pending.toolCallId);
+    // Undo / clear may have shrunk the history below the last observation;
+    // clamp the search start so a legitimate post-truncation transition is
+    // not dropped as evidence-less.
+    const evidence = findEvidence(
+      history,
+      Math.min(this.lastObservedIndex, history.length),
+      pending.toolCallId,
+    );
     this.lastObservedIndex = history.length;
     if (evidence === null) {
       this.dropPending(pending, 'the step ended without tool-result evidence');

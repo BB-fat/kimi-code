@@ -59,6 +59,14 @@ export interface IAgentContextProjectorService {
   projectStrict(messages: readonly ContextMessage[], options?: ProjectOptions): readonly Message[];
 
   /**
+   * Token estimate of the projected view of `messages` — the caliber a real
+   * request would cost under the registered folds. Falls back to a raw
+   * estimate when projection fails. Use this for gauge / trigger arithmetic;
+   * `project` + `estimateTokensForMessages` inline at each call site drifts.
+   */
+  estimateProjectedTokens(messages: readonly ContextMessage[]): number;
+
+  /**
    * Register a fold applied to every projection; returns a disposable that
    * unregisters it. With no folds registered the projection passes the stored
    * history through unchanged.

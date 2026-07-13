@@ -1,0 +1,31 @@
+version: 0
+root: root
+
+repositories:
+  project:
+    path: .
+    commit: 4ade2ee9b7528e9a888b190709de5b5b6a444005
+    branch: spine-v2
+    dirty: true
+    captured_at: "2026-07-13 17:05 CST"
+
+nodes:
+  root:
+    path: nodes/root/node.md
+    status: active
+    version: 0.1.0
+    children:
+      - spine_compaction
+      - undo_spine_compaction
+
+  spine_compaction:
+    path: nodes/spine-compaction/node.md
+    parent: root
+    status: active
+    version: 0.1.2
+
+  undo_spine_compaction:
+    path: nodes/undo-spine-compaction/node.md
+    parent: root
+    status: active
+    version: 0.2.1

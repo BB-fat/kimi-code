@@ -10,10 +10,17 @@ import {
   spineRootCompact,
 } from '#/index';
 
-import { execEnvServices, logServices, testAgent, type TestAgentContext } from '../harness';
+import {
+  execEnvServices,
+  logServices,
+  testAgent,
+  type TestAgentContext,
+  type TestAgentOptions,
+} from '../harness';
 
 const SPINE_ENV = 'KIMI_CODE_SPINE';
 const MINUTE = 60 * 1000;
+type GenerateFn = NonNullable<TestAgentOptions['generate']>;
 
 const CATALOGUED_PROVIDER = {
   type: 'kimi',
@@ -178,6 +185,43 @@ describe('Spine / compaction interaction', () => {
     expect(tree).toContain('task A');
     expect(tree).toContain('archive: /work/spine/agent-0/1-1-1.md');
     expect(tree).toContain('2 [open]');
+  });
+
+  it('summarizes only the current epoch and chains the previous epoch summary', async () => {
+    // Reproduces the pre-fix defect: the summary request covered the
+    // append-only full history (every epoch since session start), spending
+    // the whole window on content that was already folded behind a summary.
+    const summaryInputs: string[] = [];
+    const generate: GenerateFn = async (_provider, _system, _tools, history) => {
+      const text = history.map((message) => textOf(message)).join('\n');
+      if (text.includes('You are about to run out of context.')) summaryInputs.push(text);
+      return {
+        id: 'mock-epoch-summary',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'epoch summary' }], toolCalls: [] },
+        usage: { inputOther: 1, output: 1, inputCacheRead: 0, inputCacheCreation: 0 },
+        finishReason: 'completed',
+        rawFinishReason: 'stop',
+      };
+    };
+    const ctx = testAgent({ generate });
+    ctx.configure({ provider: CATALOGUED_PROVIDER, modelCapabilities: CATALOGUED_MODEL_CAPABILITIES });
+
+    ctx.appendExchange(1, 'EPOCH-ONE-MARKER old user', 'old assistant', 20);
+    const first = ctx.once('full_compaction.complete');
+    await ctx.rpc.beginCompaction({});
+    await first;
+
+    ctx.appendExchange(2, 'EPOCH-TWO-MARKER new user', 'new assistant', 20);
+    summaryInputs.length = 0;
+    const second = ctx.once('full_compaction.complete');
+    await ctx.rpc.beginCompaction({});
+    await second;
+
+    expect(summaryInputs).toHaveLength(1);
+    const input = summaryInputs[0]!;
+    expect(input).toContain('EPOCH-TWO-MARKER');
+    expect(input).toContain('epoch summary');
+    expect(input).not.toContain('EPOCH-ONE-MARKER');
   });
 });
 

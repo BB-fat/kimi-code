@@ -16,12 +16,16 @@
  * fold order, registration order within the same order) before every
  * projection over the live history — projections over an explicit message
  * list skip folds — and knows nothing about spine or toolSelect.
+ * `estimateProjectedTokens` is the shared gauge-caliber estimate (folded view
+ * first, raw fallback) so trigger arithmetic does not re-implement it per
+ * call site.
  */
 
 import { InstantiationType } from '#/_base/di/extensions';
 import { toDisposable, type IDisposable } from '#/_base/di/lifecycle';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
 import { ILogService } from '#/_base/log/log';
+import { estimateTokensForMessages } from '#/_base/utils/tokens';
 import { renderToolResultForModel } from '#/agent/contextMemory/toolResultRender';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { ErrorCodes, Error2 } from '#/errors';
@@ -70,6 +74,14 @@ export class AgentContextProjectorService implements IAgentContextProjectorServi
 
   projectStrict(messages: readonly ContextMessage[], options?: ProjectOptions): readonly Message[] {
     return this.projectWithTrace(this.historyForProjection(messages, options), projectStrict);
+  }
+
+  estimateProjectedTokens(messages: readonly ContextMessage[]): number {
+    try {
+      return estimateTokensForMessages(this.project(messages));
+    } catch {
+      return estimateTokensForMessages(messages);
+    }
   }
 
   private historyForProjection(
