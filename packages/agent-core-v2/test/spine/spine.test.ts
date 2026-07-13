@@ -19,7 +19,7 @@ import {
   IAgentSpineService,
   IAgentWireRecordService,
   IAgentWireService,
-  SPINE_STARTUP_OPENED_AT,
+  SPINE_VOID_OPENED_AT,
   SpineModel,
   spineClose,
   spineNext,
@@ -126,6 +126,18 @@ describe('Spine reducers (via wire)', () => {
     expect(before).not.toBe(state);
   });
 
+  it('closes the startup node like any work node', () => {
+    const ctx = testAgent();
+    const wire = ctx.get(IAgentWireService);
+
+    wire.dispatch(spineClose({ id: '1.1', closedAt: 3, memory: 'startup done' }));
+
+    const state = readSpine(ctx);
+    expect(state.openStack).toEqual(['1']);
+    expect(state.nodes['1.1']?.closedAt).toBe(3);
+    expect(state.nodes['1.1']?.memory).toBe('startup done');
+  });
+
   it('repairs spans and the epoch boundary at a truncation cut', () => {
     const ctx = testAgent();
     const wire = ctx.get(IAgentWireService);
@@ -142,7 +154,7 @@ describe('Spine reducers (via wire)', () => {
     // Straddling span [2, 9]: fold only the surviving prefix.
     expect(state.nodes['1.1.1']?.closedAt).toBe(7);
     // Span fully inside the truncated range: voided (fold-excluded).
-    expect(state.nodes['1.1.2']?.openedAt).toBe(SPINE_STARTUP_OPENED_AT);
+    expect(state.nodes['1.1.2']?.openedAt).toBe(SPINE_VOID_OPENED_AT);
     // Open span whose start was truncated: restarted at the cut.
     expect(state.nodes['1.1.3']?.openedAt).toBe(8);
     // The cut removed the epoch summary anchor: the boundary falls back to 0
@@ -392,6 +404,84 @@ describe('Spine control tools', () => {
     expect(lastRequestText).toContain('AFTER-CLEAR-MARKER');
   });
 
+  it('folds a closed startup node memory into the next projection', async () => {
+    let lastRequestText = '';
+    const generate: GenerateFn = async (_provider, _system, _tools, history) => {
+      lastRequestText = historyText(history);
+      return textResult('answer');
+    };
+    const ctx = testAgent(execEnvServices({ hostFs: recordingHostFs().fs }), { generate });
+    await configureLoop(ctx);
+
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'STARTUP-PHASE-PROMPT' }] });
+    await ctx.untilTurnEnd();
+    ctx
+      .get(IAgentWireService)
+      .dispatch(
+        spineClose({
+          id: '1.1',
+          closedAt: ctx.context.get().length - 1,
+          memory: 'STARTUP-MEMORY-MARKER',
+        }),
+      );
+
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'AFTER-STARTUP-CLOSE' }] });
+    await ctx.untilTurnEnd();
+
+    expect(lastRequestText).toContain('<spine_memory>');
+    expect(lastRequestText).toContain('STARTUP-MEMORY-MARKER');
+    expect(lastRequestText).toContain('AFTER-STARTUP-CLOSE');
+    expect(lastRequestText).not.toContain('STARTUP-PHASE-PROMPT');
+  });
+
+  it('compiles the closing span user requests into the memory body', async () => {
+    const ctx = loopContext();
+    await configureLoop(ctx);
+    ctx.mockNextResponse(toolCallPart('call_open', 'spine_open', { summary: 'task A' }));
+    ctx.mockNextResponse({ type: 'text', text: 'working' });
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'start the work' }] });
+    await ctx.untilTurnEnd();
+
+    ctx.mockNextResponse(
+      toolCallPart('call_close', 'spine_close', { memory: 'did A per [U2]' }),
+    );
+    ctx.mockNextResponse({ type: 'text', text: 'finished' });
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'MID-SPAN-REQUEST' }] });
+    await ctx.untilTurnEnd();
+
+    const memory = readSpine(ctx).nodes['1.1.1']?.memory ?? '';
+    expect(memory).toContain('## User Message [U2]');
+    expect(memory).toContain('MID-SPAN-REQUEST');
+    expect(memory).not.toContain('start the work');
+    expect(memory).toContain('## Node Memory');
+    expect(memory).toContain('did A per [U2]');
+  });
+
+  it('keeps [U#] anchors stable when a span folds', async () => {
+    let lastRequestText = '';
+    const generate: GenerateFn = async (_provider, _system, _tools, history) => {
+      lastRequestText = historyText(history);
+      return textResult('answer');
+    };
+    const ctx = testAgent(execEnvServices({ hostFs: recordingHostFs().fs }), { generate });
+    await configureLoop(ctx);
+    for (let i = 0; i < 5; i++) {
+      ctx.appendExchange(i + 1, `seed-u${String(i)}`, `seed-a${String(i)}`, 100);
+    }
+    const wire = ctx.get(IAgentWireService);
+    wire.dispatch(spineOpen({ id: '1.1.1', parentId: '1.1', summary: 'old work', openedAt: 2 }));
+    wire.dispatch(spineClose({ id: '1.1.1', closedAt: 5, memory: 'old memory' }));
+
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'NUMBER-CHECK-PROMPT' }] });
+    await ctx.untilTurnEnd();
+
+    expect(lastRequestText).toContain('[U1] seed-u0');
+    expect(lastRequestText).toContain('[U4] seed-u3');
+    expect(lastRequestText).toContain('[U6] NUMBER-CHECK-PROMPT');
+    expect(lastRequestText).toContain('old memory');
+    expect(lastRequestText).not.toContain('seed-u1');
+  });
+
   it('commits next atomically across a single step', async () => {
     const ctx = loopContext();
     await configureLoop(ctx);
@@ -432,7 +522,11 @@ describe('Spine control tools', () => {
     expect(rejectedToolMessage?.isError).toBe(true);
   });
 
-  it('rejects close memory that references a nonexistent [U#] anchor', async () => {
+  it('accepts close memory that references an unknown [U#] anchor', async () => {
+    // Upstream parity: citations are not validated at accept time. User
+    // requests inside the closing span are compiled into the memory body at
+    // commit, and a reference to an anchor that exists nowhere stays
+    // tolerable rather than blocking the transition.
     const ctx = loopContext();
     await configureLoop(ctx);
     ctx.mockNextResponse(toolCallPart('call_open', 'spine_open', { summary: 'task A' }));
@@ -445,12 +539,9 @@ describe('Spine control tools', () => {
     await ctx.untilTurnEnd();
 
     const state = readSpine(ctx);
-    expect(state.nodes['1.1.1']?.closedAt).toBeUndefined();
-    const rejectedToolMessage = ctx.context
-      .get()
-      .find((m) => m.role === 'tool' && m.toolCallId === 'call_close');
-    expect(rejectedToolMessage?.isError).toBe(true);
-    expect(textOf(rejectedToolMessage)).toContain('[U9]');
+    expect(state.nodes['1.1.1']?.closedAt).toBeDefined();
+    const receipt = ctx.context.get().find((m) => m.role === 'tool' && m.toolCallId === 'call_close');
+    expect(receipt?.isError).not.toBe(true);
   });
 
   it('accepts close memory that references an existing [U#] anchor', async () => {
@@ -470,7 +561,7 @@ describe('Spine control tools', () => {
     expect(state.nodes['1.1.1']?.memory).toContain('wrapped up per [U1]');
   });
 
-  it('rejects next memory that references a nonexistent [U#] anchor', async () => {
+  it('accepts next memory that references an unknown [U#] anchor', async () => {
     const ctx = loopContext();
     await configureLoop(ctx);
     ctx.mockNextResponse(toolCallPart('call_open', 'spine_open', { summary: 'task A' }));
@@ -483,13 +574,10 @@ describe('Spine control tools', () => {
     await ctx.untilTurnEnd();
 
     const state = readSpine(ctx);
-    expect(state.nodes['1.1.1']?.closedAt).toBeUndefined();
-    expect(state.nodes['1.1.2']).toBeUndefined();
-    const rejectedToolMessage = ctx.context
-      .get()
-      .find((m) => m.role === 'tool' && m.toolCallId === 'call_next');
-    expect(rejectedToolMessage?.isError).toBe(true);
-    expect(textOf(rejectedToolMessage)).toContain('[U7]');
+    expect(state.nodes['1.1.1']?.closedAt).toBeDefined();
+    expect(state.nodes['1.1.2']?.summary).toBe('task B');
+    const receipt = ctx.context.get().find((m) => m.role === 'tool' && m.toolCallId === 'call_next');
+    expect(receipt?.isError).not.toBe(true);
   });
 
   it('renders the current tree through spine.tree', async () => {

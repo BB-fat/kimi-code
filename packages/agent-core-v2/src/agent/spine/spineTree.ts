@@ -4,13 +4,20 @@
  *
  * Owns the spine node-id grammar (`<epoch>` for a root epoch,
  * `<epoch>.<n>[.<n>…]` for work nodes), the continuation-memory body layout
- * (`## Child Memory` from already-closed children followed by `## Node Memory`
+ * (`## User Message [U#]` sections carrying the closing span's real user
+ * requests verbatim so `[U#]` citations stay resolvable after the span folds,
+ * then `## Child Memory` from already-closed children, then `## Node Memory`
  * from the closing model call), and the read-only `spine.tree` rendering.
- * Holds no state and performs no IO; consumed by `spineOps` (reducers),
- * `spineService` (commit orchestration) and `spineFold` (projection).
+ * Also owns `SPINE_VOID_OPENED_AT`, the sentinel `openedAt` for nodes that
+ * must never produce a fold span: the synthetic root-epoch node (never
+ * closable) and work nodes whose closed span a truncation repair voided. The
+ * startup node does NOT use it — it opens at the real epoch boundary and
+ * closes like any other work node. Holds no state and performs no IO;
+ * consumed by `spineOps` (reducers), `spineService` (commit orchestration)
+ * and `spineFold` (projection).
  */
 
-export const SPINE_STARTUP_OPENED_AT = -1;
+export const SPINE_VOID_OPENED_AT = -1;
 
 export function nodeDepth(id: string): number {
   return id.split('.').length;
@@ -37,20 +44,31 @@ export function epochStartupNodeId(epoch: number): string {
   return `${String(epoch)}.1`;
 }
 
+export interface SpineMemoryUserRequest {
+  readonly anchor: number;
+  readonly body: string;
+}
+
 export interface SpineMemoryAssemblyInput {
+  readonly userRequests: readonly SpineMemoryUserRequest[];
   readonly childMemories: readonly string[];
   readonly nodeMemory: string;
 }
 
 export function assembleMemoryBody(input: SpineMemoryAssemblyInput): string {
+  const sections: string[] = [];
+  for (const request of input.userRequests) {
+    sections.push(`## User Message [U${String(request.anchor)}]\n\n${request.body}`);
+  }
   const child = input.childMemories
     .map((body) => body.trim())
     .filter((body) => body.length > 0)
     .join('\n\n');
+  if (child.length > 0) sections.push(`## Child Memory\n\n${child}`);
   const node = input.nodeMemory.trim();
-  if (child.length === 0) return node;
-  if (node.length === 0) return `## Child Memory\n\n${child}`;
-  return `## Child Memory\n\n${child}\n\n## Node Memory\n\n${node}`;
+  if (sections.length === 0) return node;
+  if (node.length > 0) sections.push(`## Node Memory\n\n${node}`);
+  return sections.join('\n\n');
 }
 
 export interface SpineTreeNodeView {

@@ -22,7 +22,7 @@ import { defineOp } from '#/wire/op';
 import {
   epochStartupNodeId,
   isRootEpoch,
-  SPINE_STARTUP_OPENED_AT,
+  SPINE_VOID_OPENED_AT,
 } from './spineTree';
 
 export interface SpineNode {
@@ -48,24 +48,24 @@ function syntheticEpochNode(epoch: number, archivePath?: string): SpineNode {
   return {
     id: String(epoch),
     summary: `root epoch ${String(epoch)}`,
-    openedAt: SPINE_STARTUP_OPENED_AT,
+    openedAt: SPINE_VOID_OPENED_AT,
     archivePath,
     children: [epochStartupNodeId(epoch)],
   };
 }
 
-function syntheticStartupNode(epoch: number): SpineNode {
+function syntheticStartupNode(epoch: number, openedAt: number): SpineNode {
   return {
     id: epochStartupNodeId(epoch),
     summary: 'startup',
-    openedAt: SPINE_STARTUP_OPENED_AT,
+    openedAt,
     children: [],
   };
 }
 
 function initialSpineState(): SpineState {
   const epoch = syntheticEpochNode(1);
-  const startup = syntheticStartupNode(1);
+  const startup = syntheticStartupNode(1, 0);
   return {
     nodes: { [epoch.id]: epoch, [startup.id]: startup },
     openStack: [epoch.id, startup.id],
@@ -197,7 +197,7 @@ export const spineRootCompact = defineOp(SpineModel, 'spine.root_compact', {
     if (p.epoch !== s.rootEpoch + 1) return s;
     if (p.epochStartAt < 0) return s;
     const epoch = syntheticEpochNode(p.epoch, p.archivePath);
-    const startup = syntheticStartupNode(p.epoch);
+    const startup = syntheticStartupNode(p.epoch, p.epochStartAt);
     return {
       nodes: { ...s.nodes, [epoch.id]: epoch, [startup.id]: startup },
       openStack: [epoch.id, startup.id],
@@ -229,7 +229,7 @@ export const spineTruncateRepair = defineOp(SpineModel, 'spine.truncate_repair',
             // Closed span fully inside the truncated range: void it (excluded
             // from the fold; the node stays in the tree with its memory and
             // archive path for reference).
-            next = { ...node, openedAt: SPINE_STARTUP_OPENED_AT };
+            next = { ...node, openedAt: SPINE_VOID_OPENED_AT };
           }
         } else if (node.closedAt !== undefined && node.closedAt >= cut) {
           // Closed span straddling the cut: fold only the surviving prefix, so

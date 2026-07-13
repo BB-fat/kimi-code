@@ -7,11 +7,11 @@
  * transition; the `loop.afterStep` hook then commits it (`spine.open` /
  * `spine.close` / `spine.next`) once the matching assistant tool-call and tool
  * result have both landed in `contextMemory`, so the tree moves only on
- * observed evidence. Acceptance validates non-empty bodies, the cursor
- * position, and — as the minimal provenance check — that every `[U#]`
- * citation in a close / next memory resolves to a real user request in the
- * current projected view, so a fabricated or folded-away anchor can never
- * enter the tree. Reads the cursor and node layout through
+ * observed evidence. Acceptance validates non-empty bodies and the cursor
+ * position. At commit the closing span's real user requests are compiled into
+ * the memory body as `## User Message [U#]` sections (with the fold's stable
+ * ordinals), so `[U#]` citations stay resolvable after the span folds away.
+ * Reads the cursor and node layout through
  * `wire.getModel(SpineModel)`, writes through `wire.dispatch(spineOpen(...))`
  * etc., records each node's provider-token baseline via `contextSize`,
  * assembles continuation memory with `spineTree.assembleMemoryBody`, archives
@@ -92,7 +92,7 @@ import {
   writeNodeArchive,
   type SpineEpochArchiveInput,
 } from './spineArchive';
-import { countUserAnchors, foldSpine, type SpineFoldStatus } from './spineFold';
+import { collectSpanUserRequests, foldSpine, type SpineFoldStatus } from './spineFold';
 import {
   SpineModel,
   spineClose,
@@ -257,8 +257,6 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     const trimmed = memory.trim();
     if (trimmed.length === 0) return reject('close memory must not be empty.');
     if (isRootEpoch(this.cursorId())) return REJECT_ROOT_EPOCH;
-    const anchorGuard = this.anchorReferenceGuard('close', trimmed);
-    if (anchorGuard !== null) return anchorGuard;
     this.pending = { kind: 'close', toolCallId, memory: trimmed, stepSignal: this.stepSignal };
     return { accepted: true };
   }
@@ -271,8 +269,6 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     if (trimmedSummary.length === 0) return reject('next summary must not be empty.');
     if (trimmedMemory.length === 0) return reject('next memory must not be empty.');
     if (isRootEpoch(this.cursorId())) return REJECT_ROOT_EPOCH;
-    const anchorGuard = this.anchorReferenceGuard('next', trimmedMemory);
-    if (anchorGuard !== null) return anchorGuard;
     this.pending = {
       kind: 'next',
       toolCallId,
@@ -348,30 +344,6 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     if (!this.enabled) return REJECT_DISABLED;
     if (this.pending !== null) return REJECT_CONFLICT;
     return null;
-  }
-
-  /**
-   * Provenance check for `[U#]` citations in a continuation memory: the fold
-   * numbers surviving real user requests in the projected view, so a citation
-   * is only resolvable (for the model now and for whatever reads the memory
-   * later) if it points at an anchor that exists in the current projection.
-   * Counting happens over the folded view, not the raw history — user requests
-   * already folded into a `<spine_memory>` or a previous epoch carry no anchor.
-   */
-  private anchorReferenceGuard(kind: 'close' | 'next', memory: string): SpineTransitionResult | null {
-    const maxAnchor = countUserAnchors(this.fold(this.context.get()));
-    const invalid = invalidAnchorReferences(memory, maxAnchor);
-    if (invalid.length === 0) return null;
-    const refs = invalid.map((n) => `[U${String(n)}]`).join(', ');
-    const available =
-      maxAnchor === 0
-        ? 'no numbered user requests'
-        : `only [U1] through [U${String(maxAnchor)}]`;
-    return reject(
-      `${kind} memory references ${refs}, but the current view contains ${available}. ` +
-        `[U#] references must point at user requests visible in the current projection; ` +
-        `describe folded-away context by content or via the node's archive path instead.`,
-    );
   }
 
   private state(): SpineState {
@@ -480,6 +452,7 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     const node = state.nodes[id];
     if (node === undefined || isRootEpoch(id)) return;
     const assembled = assembleMemoryBody({
+      userRequests: collectSpanUserRequests(this.context.get(), node.openedAt, closedAt),
       childMemories: closedChildMemories(state, node),
       nodeMemory: memory,
     });
@@ -501,6 +474,7 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     if (parent === undefined) return;
     const openedId = childNodeId(parentId, nextChildIndex(parent.children));
     const assembled = assembleMemoryBody({
+      userRequests: collectSpanUserRequests(this.context.get(), closing.openedAt, closedAt),
       childMemories: closedChildMemories(state, closing),
       nodeMemory: memory,
     });
@@ -699,15 +673,6 @@ function kindOfToolName(name: string): SpineTransitionKind | undefined {
 
 function toolMessageText(message: ContextMessage): string {
   return message.content.map((part) => (part.type === 'text' ? part.text : '')).join('');
-}
-
-function invalidAnchorReferences(memory: string, maxAnchor: number): readonly number[] {
-  const invalid = new Set<number>();
-  for (const match of memory.matchAll(/\[U(\d+)\]/g)) {
-    const n = Number.parseInt(match[1] ?? '', 10);
-    if (!Number.isFinite(n) || n < 1 || n > maxAnchor) invalid.add(n);
-  }
-  return [...invalid].sort((a, b) => a - b);
 }
 
 function reject(reason: string): SpineTransitionResult {

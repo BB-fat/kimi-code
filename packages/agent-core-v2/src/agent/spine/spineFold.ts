@@ -6,10 +6,13 @@
  * epoch (keeping the epoch summary), replaces each outermost closed node's raw
  * message span with a single `<spine_memory>` user message (nested closed nodes
  * ride inside their nearest closed ancestor's span, so nothing is folded twice),
- * numbers surviving real user requests with `[U#]` anchors, and appends a
- * synthetic `<spine_status>` orientation line. The stored history is never
- * mutated; token numbers for the status line are precomputed by the `spine`
- * service and passed in. Consumed by `spineService.fold`.
+ * numbers real user requests with stable `[U#]` anchors — every user request in
+ * the stored history consumes its ordinal even when the epoch boundary or a
+ * closed span folds it away, so a surviving request keeps the same anchor
+ * across projections and across the close that compiles it into a memory — and
+ * appends a synthetic `<spine_status>` orientation line. The stored history is
+ * never mutated; token numbers for the status line are precomputed by the
+ * `spine` service and passed in. Consumed by `spineService.fold`.
  *
  * Span-firing invariants: a span closed entirely before the current root
  * epoch is owned by the epoch summary and is skipped silently — left queued,
@@ -22,17 +25,18 @@
  * current message still goes through normal handling instead of being
  * skipped.
  *
- * `countUserAnchors` counts the real user requests in a (projected) message
- * list — i.e. the highest `[U#]` anchor a model looking at that view can
- * legitimately cite, since the fold numbers surviving user requests
- * `[U1]..[Un]` in order.
+ * `collectSpanUserRequests` is the commit-side mirror of that numbering: it
+ * tags each real user request inside a closing node's inclusive span with its
+ * fold ordinal and renders its content (text joined, media replaced by
+ * omission markers), so `spineService` compiles the citation definitions into
+ * the continuation memory body.
  */
 
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import type { ContentPart } from '#/app/llmProtocol/message';
 
 import type { SpineNode, SpineState } from './spineOps';
-import { parentNodeId } from './spineTree';
+import { parentNodeId, type SpineMemoryUserRequest } from './spineTree';
 
 export interface SpineFoldStatus {
   readonly cursorId: string;
@@ -76,6 +80,9 @@ export function foldSpine(
     const message = messages[i];
     if (message === undefined) continue;
 
+    const request = isUserRequest(message);
+    if (request) userAnchor += 1;
+
     if (i < input.state.epochStartAt) {
       if (
         input.epochSummaryMessage !== undefined &&
@@ -97,13 +104,17 @@ export function foldSpine(
       if (memoryMessage !== undefined) out.push(memoryMessage);
       spanIndex += 1;
       if (span.closedAt >= i) {
+        const skippedEnd = Math.min(span.closedAt, messages.length - 1);
+        for (let j = i + 1; j <= skippedEnd; j++) {
+          const skipped = messages[j];
+          if (skipped !== undefined && isUserRequest(skipped)) userAnchor += 1;
+        }
         i = span.closedAt;
         continue;
       }
     }
 
-    if (isUserRequest(message)) {
-      userAnchor += 1;
+    if (request) {
       out.push(annotateUserRequest(message, userAnchor));
     } else {
       out.push(message);
@@ -164,8 +175,44 @@ export function isUserRequest(message: ContextMessage): boolean {
   return message.role === 'user' && message.origin?.kind === 'user';
 }
 
-export function countUserAnchors(messages: readonly ContextMessage[]): number {
-  return messages.filter(isUserRequest).length;
+export function collectSpanUserRequests(
+  messages: readonly ContextMessage[],
+  openedAt: number,
+  closedAt: number,
+): SpineMemoryUserRequest[] {
+  const start = Math.max(0, openedAt);
+  const requests: SpineMemoryUserRequest[] = [];
+  let anchor = 0;
+  for (let i = 0; i < messages.length && i <= closedAt; i++) {
+    const message = messages[i];
+    if (message === undefined || !isUserRequest(message)) continue;
+    anchor += 1;
+    if (i >= start) requests.push({ anchor, body: renderUserRequestBody(message) });
+  }
+  return requests;
+}
+
+function renderUserRequestBody(message: ContextMessage): string {
+  const parts: string[] = [];
+  for (const part of message.content) {
+    switch (part.type) {
+      case 'text': {
+        const text = part.text.replaceAll(/^\n+|\n+$/g, '');
+        if (text.length > 0) parts.push(text);
+        break;
+      }
+      case 'image_url':
+        parts.push('<image omitted>');
+        break;
+      case 'audio_url':
+        parts.push('<audio omitted>');
+        break;
+      case 'video_url':
+        parts.push('<video omitted>');
+        break;
+    }
+  }
+  return parts.length === 0 ? '<empty user message>' : parts.join('\n');
 }
 
 function annotateUserRequest(message: ContextMessage, anchorNumber: number): ContextMessage {
