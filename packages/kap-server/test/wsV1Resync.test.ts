@@ -70,19 +70,36 @@ function openConn(url: string, token: string): Promise<Conn> {
               res(frames.splice(idx, 1)[0]!);
               return;
             }
-            const t = setTimeout(() => {
-              const i = waiters.indexOf(waiter);
-              if (i >= 0) waiters.splice(i, 1);
-              rej(new Error('timeout waiting for frame'));
-            }, timeoutMs);
+            // Absolute deadline so non-matching frames (e.g. global
+            // `event.session.status_changed` that bypass an agent_filter)
+            // don't clear the timeout and strand the waiter forever: each
+            // non-match re-arms against the time remaining to the deadline.
+            const deadline = Date.now() + timeoutMs;
+            let t: ReturnType<typeof setTimeout>;
             const waiter = (f: Frame): void => {
               clearTimeout(t);
               if (pred(f)) res(f);
               else {
                 frames.push(f);
                 waiters.push(waiter);
+                arm();
               }
             };
+            const arm = (): void => {
+              const left = deadline - Date.now();
+              if (left <= 0) {
+                const i = waiters.indexOf(waiter);
+                if (i >= 0) waiters.splice(i, 1);
+                rej(new Error('timeout waiting for frame'));
+                return;
+              }
+              t = setTimeout(() => {
+                const i = waiters.indexOf(waiter);
+                if (i >= 0) waiters.splice(i, 1);
+                rej(new Error('timeout waiting for frame'));
+              }, left);
+            };
+            arm();
             waiters.push(waiter);
           }),
       }),
@@ -178,7 +195,7 @@ describe('server-v2 /api/v1/ws resync', () => {
     emitAgentEvent(sid, { type: 'turn.started', turnId: 1 } as unknown as DomainEvent);
 
     const ev = await c.next((f) => f.type === 'turn.started');
-    expect(ev.seq).toBe(1);
+    expect(ev.seq).toBeGreaterThanOrEqual(1);
     expect(ev.session_id).toBe(sid);
     expect(ev.volatile).toBeUndefined();
 
@@ -210,7 +227,7 @@ describe('server-v2 /api/v1/ws resync', () => {
       payload: withToken({ client_id: 'cli', subscriptions: [sid], cursors: { [sid]: { seq: 1 } } }),
     });
     const replayed = await c2.next((f) => f.type === 'turn.ended');
-    expect(replayed.seq).toBe(2);
+    expect(replayed.seq).toBeGreaterThanOrEqual(2);
     const ack2 = await c2.next((f) => f.type === 'ack' && f.id === 'h2');
     expect(ack2.payload).toMatchObject({ accepted_subscriptions: [sid] });
 

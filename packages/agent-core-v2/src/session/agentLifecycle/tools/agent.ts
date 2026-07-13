@@ -26,9 +26,9 @@ import {
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
-import { IAgentTurnService } from '#/agent/turn/turn';
+import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentUserToolService } from '#/agent/userTool/userTool';
-import { isAbortError } from '#/agent/loop/errors';
+import { isAbortError } from '#/_base/utils/abort';
 import { ToolAccesses } from '#/agent/tool/tool-access';
 import type {
   BuiltinTool,
@@ -316,7 +316,7 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
     if (subagentParentAgentId(meta) !== this.callerAgentId) {
       throw new Error(`Agent instance "${agentId}" does not belong to this parent agent`);
     }
-    if (target.accessor.get(IAgentTurnService).getActiveTurn() !== undefined) {
+    if (target.accessor.get(IAgentLoopService).status().state === 'running') {
       throw new Error(`Agent instance "${agentId}" is already running and cannot run concurrently`);
     }
   }

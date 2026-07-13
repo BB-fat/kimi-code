@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { SyncDescriptor } from '#/_base/di/descriptors';
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { TestInstantiationService } from '#/_base/di/test';
+import { Event } from '#/_base/event';
 import { IEventBus } from '#/app/event/eventBus';
 import { EventBusService } from '#/app/event/eventBusService';
 import { IConfigService } from '#/app/config/config';
@@ -14,7 +15,6 @@ import { GoalModel } from '#/agent/goal/goalOps';
 import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentSystemReminderService } from '#/agent/systemReminder/systemReminder';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
-import { IAgentTurnService } from '#/agent/turn/turn';
 import { IAgentUsageService } from '#/agent/usage/usage';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { AppendLogStore } from '#/persistence/backends/node-fs/appendLogStore';
@@ -36,21 +36,10 @@ function hookSlot(): { register: () => { dispose: () => void } } {
   return { register: () => noopDisposable() };
 }
 
-function createTurnStub(): IAgentTurnService {
-  return {
-    _serviceBrand: undefined,
-    hooks: { onLaunched: hookSlot(), onEnded: hookSlot() },
-    getActiveTurn: () => undefined,
-    launch: () => {
-      throw new Error('not exercised');
-    },
-  } as unknown as IAgentTurnService;
-}
-
 function createLoopStub(): IAgentLoopService {
   return {
     _serviceBrand: undefined,
-    hooks: { beforeStep: hookSlot(), afterStep: hookSlot() },
+    hooks: { onWillBeginStep: hookSlot(), onDidFinishStep: hookSlot() },
   } as unknown as IAgentLoopService;
 }
 
@@ -80,13 +69,14 @@ function createTelemetryStub(): ITelemetryService {
   return {
     _serviceBrand: undefined,
     track: () => undefined,
+    track2: () => undefined,
   } as unknown as ITelemetryService;
 }
 
 function createToolExecutorStub(): IAgentToolExecutorService {
   return {
     _serviceBrand: undefined,
-    hooks: { onWillExecuteTool: hookSlot(), onDidExecuteTool: hookSlot() },
+    hooks: { onBeforeExecuteTool: hookSlot(), onDidExecuteTool: hookSlot() },
   } as unknown as IAgentToolExecutorService;
 }
 
@@ -114,10 +104,9 @@ function buildHost(key: string): {
   ix.set(IAppendLogStore, new SyncDescriptor(AppendLogStore));
   ix.set(IAgentWireService, new SyncDescriptor(WireService, [{ logScope: SCOPE, logKey: key }]));
   ix.set(IEventBus, new SyncDescriptor(EventBusService));
-  ix.stub(IAgentTurnService, createTurnStub());
   ix.stub(IAgentLoopService, createLoopStub());
   ix.stub(IAgentUsageService, {
-    hooks: { onDidRecord: hookSlot() },
+    onDidRecord: Event.None,
   } as unknown as IAgentUsageService);
   ix.stub(IAgentContextMemoryService, createContextStub());
   ix.stub(IAgentContextInjectorService, createInjectorStub());

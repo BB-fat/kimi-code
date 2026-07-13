@@ -19,7 +19,10 @@
  * `emitStatusUpdated` run live-only after the dispatch, so `wire.replay`
  * rebuilds the Models silently. `setModel` awaits the `onWillSetModel` hook
  * slot between resolving the target model and switching the alias, giving
- * consumers a window where the outgoing model is still the active provider.
+ * consumers a window where the outgoing model is still the active provider;
+ * the same live-only path mirrors the resolved model protocol into the
+ * ambient telemetry context (`provider_type` / `protocol`) whenever the model
+ * alias changes.
  * Bound at Agent scope.
  */
 
@@ -34,7 +37,7 @@ import { type KimiModelOverrides } from '#/app/model/modelOverrides';
 import { IModelResolver } from '#/app/model/modelResolver';
 import picomatch from 'picomatch';
 
-import { ErrorCodes, KimiError } from "#/errors";
+import { ErrorCodes, Error2 } from "#/errors";
 import { createHooks } from '#/hooks';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
@@ -50,6 +53,7 @@ import type { ResolvedAgentProfile, SystemPromptContext } from '#/agent/profile/
 
 import type { WarningEvent } from '@moonshot-ai/protocol';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
+import { IAgentTelemetryContextService } from '#/app/telemetry/agentTelemetryContext';
 import type { ToolSource } from '#/agent/tool/toolContract';
 import { IAgentWireService } from '#/wire/tokens';
 import type { IWireService } from '#/wire/wireService';
@@ -121,6 +125,7 @@ export class AgentProfileService implements IAgentProfileService {
     @IAgentWireService private readonly wire: IWireService,
     @IEventBus private readonly eventBus: IEventBus,
     @ITelemetryService private readonly telemetry: ITelemetryService,
+    @IAgentTelemetryContextService private readonly telemetryContext: IAgentTelemetryContextService,
     @IConfigService private readonly config: IConfigService,
     @IModelResolver private readonly modelFactory: IModelResolver,
     @IHostEnvironment private readonly env: IHostEnvironment,
@@ -195,7 +200,7 @@ export class AgentProfileService implements IAgentProfileService {
     const model = this.modelFactory.resolve(alias);
     if (this.profileName === undefined) {
       await this.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: alias });
-      this.telemetry.track('model_switch', { model: alias });
+      this.telemetry.track2('model_switch', { model: alias });
     } else if (this.modelAlias !== alias) {
       await this.hooks.onWillSetModel.run({
         currentAlias: this.modelAlias,
@@ -203,7 +208,7 @@ export class AgentProfileService implements IAgentProfileService {
         nextMaxContextTokens: model.capabilities.max_context_tokens,
       });
       this.update({ modelAlias: alias });
-      this.telemetry.track('model_switch', { model: alias });
+      this.telemetry.track2('model_switch', { model: alias });
     }
     return {
       model: alias,
@@ -216,7 +221,7 @@ export class AgentProfileService implements IAgentProfileService {
     this.update({ thinkingLevel: level });
     const effort = this.thinkingLevel;
     if (effort !== previousEffort) {
-      this.telemetry.track('thinking_toggle', {
+      this.telemetry.track2('thinking_toggle', {
         enabled: effort !== 'off',
         effort,
         from: previousEffort,
@@ -293,7 +298,7 @@ export class AgentProfileService implements IAgentProfileService {
   getProvider(): Model {
     const model = this.resolveModel();
     if (model === undefined) {
-      throw new KimiError(ErrorCodes.MODEL_NOT_CONFIGURED, 'Model not set');
+      throw new Error2(ErrorCodes.MODEL_NOT_CONFIGURED, 'Model not set');
     }
     return model;
   }
@@ -430,6 +435,13 @@ export class AgentProfileService implements IAgentProfileService {
     if (changed.cwd !== undefined) {
       void this.optionsValue.chdir?.(changed.cwd);
     }
+    if (changed.modelAlias !== undefined) {
+      // Mirror the resolved model protocol into the ambient telemetry context
+      // (v1 parity: both keys carry the protocol — v2 has no separate provider
+      // type). Unresolvable models yield undefined; never throw.
+      const protocol = this.tryResolveRawModel()?.protocol;
+      this.telemetryContext.set({ provider_type: protocol, protocol });
+    }
     this.emitStatusUpdated();
   }
 
@@ -465,7 +477,7 @@ export class AgentProfileService implements IAgentProfileService {
   private get model(): string {
     const modelAlias = this.modelAlias;
     if (modelAlias === undefined) {
-      throw new KimiError(ErrorCodes.MODEL_NOT_CONFIGURED, 'Model not set');
+      throw new Error2(ErrorCodes.MODEL_NOT_CONFIGURED, 'Model not set');
     }
     return modelAlias;
   }

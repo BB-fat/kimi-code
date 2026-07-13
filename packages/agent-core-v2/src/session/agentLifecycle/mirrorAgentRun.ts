@@ -10,10 +10,10 @@
  *
  * External hooks (`SubagentStart` / `SubagentStop`) fire by observation, like
  * every other external hook: this wrapper announces "a run is about to start"
- * / "...has stopped" through the `IAgentLifecycleService` agent-run hook slots
- * the lifecycle service hosts, and the Session-scope `externalHooks` adapter
- * registers its own listeners there to translate them into the configured
- * external hook commands.
+ * / "...has stopped" through the `IAgentLifecycleService` agent-run hook slot
+ * and stop event the lifecycle service hosts, and the Session-scope
+ * `externalHooks` adapter registers its own listeners there to translate them
+ * into the configured external hook commands.
  *
  * Wire shape note: the signals are still named `subagent.spawned / started /
  * completed / failed` and telemetry still tracks `subagent_created` so existing
@@ -34,7 +34,7 @@ import type {
   SubagentStartedEvent,
 } from '@moonshot-ai/protocol';
 import { IEventBus } from '#/app/event/eventBus';
-import { isAbortError } from '#/agent/loop/errors';
+import { isAbortError } from '#/_base/utils/abort';
 
 import { type AgentRunHandle, IAgentLifecycleService } from './agentLifecycle';
 
@@ -96,7 +96,7 @@ export function emitAgentRunSpawned(
     swarmIndex: meta.swarmIndex,
     runInBackground: meta.runInBackground ?? false,
   });
-  requester.accessor.get(ITelemetryService)?.track('subagent_created', {
+  requester.accessor.get(ITelemetryService)?.track2('subagent_created', {
     subagent_name: meta.profileName,
     run_in_background: meta.runInBackground ?? false,
   });
@@ -144,12 +144,10 @@ export async function mirrorAgentRun(
       usage: result.usage,
       contextTokens,
     });
-    void agentLifecycle?.hooks
-      .onDidStopAgentTask.run({
-        agentName: options.profileName,
-        response: result.summary,
-      })
-      .catch(() => {});
+    agentLifecycle?.notifyAgentTaskStopped({
+      agentName: options.profileName,
+      response: result.summary,
+    });
     return result;
   } catch (error) {
     if (!isAbortError(error) && !shouldSuppressFailure(options, error)) {

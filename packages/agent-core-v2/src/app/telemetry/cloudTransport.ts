@@ -8,6 +8,7 @@
 
 import { randomBytes } from 'node:crypto';
 
+import { isAbortError } from '#/_base/utils/abort';
 import type { IFileSystemStorageService } from '#/persistence/interface/storage';
 
 export type CloudPrimitive = boolean | number | string | undefined | null;
@@ -282,7 +283,9 @@ export function isCloudPrimitive(value: unknown): value is CloudPrimitive {
     value === undefined ||
     typeof value === 'boolean' ||
     typeof value === 'string' ||
-    (typeof value === 'number' && Number.isFinite(value))
+    (typeof value === 'number' &&
+      Number.isFinite(value) &&
+      Math.abs(value) <= Number.MAX_SAFE_INTEGER)
   );
 }
 
@@ -347,10 +350,6 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
     };
     signal?.addEventListener('abort', onAbort, { once: true });
   });
-}
-
-function isAbortError(error: unknown): boolean {
-  return error instanceof Error && error.name === 'AbortError';
 }
 
 function isSignalAborted(signal?: AbortSignal): boolean {

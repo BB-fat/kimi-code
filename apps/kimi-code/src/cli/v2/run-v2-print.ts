@@ -8,15 +8,14 @@
  *   - creates / resumes a session and its main agent via native services,
  *   - subscribes to the main agent's per-agent `IEventBus` and renders the
  *     native `DomainEvent` stream (payloads are already v1-protocol-shaped),
- *   - drives a turn through `IAgentPromptService.prompt()` and awaits
+ *   - drives a turn through `IAgentPromptService.enqueue()` and awaits
  *     `Turn.result` for authoritative completion,
  *   - drains background tasks (config-driven) before exiting.
  *
- * Selected by `runPrompt` when `KIMI_MODEL_EXPERIMENT_FLAG` is set.
+ * Selected by `runPrompt` when `KIMI_CODE_EXPERIMENTAL_FLAG` is set.
  */
 
 import {
-  CloudAppender,
   IAgentGoalService,
   IAgentLifecycleService,
   IAgentPermissionModeService,
@@ -26,12 +25,12 @@ import {
   IAuthSummaryService,
   IConfigService,
   IEventBus,
-  IFileSystemStorageService,
   IOAuthToolkit,
   ISessionIndex,
   ISessionLifecycleService,
   ITelemetryService,
   bootstrap,
+  createCloudAppender,
   ensureMainAgent,
   hostRequestHeadersSeed,
   logSeed,
@@ -113,7 +112,7 @@ export async function runV2Print(
   const identity = createKimiCodeHostIdentity(version);
   const hostHeaders = createKimiDefaultHeaders({ homeDir, ...identity });
 
-  const { app } = bootstrap({ homeDir }, [
+  const { app } = bootstrap({ homeDir, clientVersion: version }, [
     ...logSeed(logging),
     ...hostRequestHeadersSeed(hostHeaders),
   ]);
@@ -161,21 +160,18 @@ export async function runV2Print(
     telemetryService = app.accessor.get(ITelemetryService);
     if (telemetryEnabled) {
       telemetryService.setAppender(
-        new CloudAppender({
-          storage: app.accessor.get(IFileSystemStorageService),
+        createCloudAppender(app.accessor, {
           deviceId,
           appName: CLI_USER_AGENT_PRODUCT,
-          version,
           uiMode: PROMPT_UI_MODE,
           model: resolved.telemetryModel,
           getAccessToken: async () => (await auth.getCachedAccessToken()) ?? null,
-          env: process.env,
         }),
       );
     }
     telemetryService.setContext({ sessionId: resolved.session.id });
     if (firstLaunch) {
-      telemetryService.track('first_launch');
+      telemetryService.track2('first_launch');
     }
 
     const goalCreate = parseHeadlessGoalCreate(opts.prompt!);
@@ -203,7 +199,7 @@ export async function runV2Print(
     }
     writeResumeHint(resolved.session.id, outputFormat, stdout, stderr);
 
-    telemetryService.withContext({ sessionId: resolved.session.id }).track('exit', {
+    telemetryService.withContext({ sessionId: resolved.session.id }).track2('exit', {
       duration_ms: Date.now() - startedAt,
     });
   } finally {
@@ -340,14 +336,24 @@ async function runNativeTurn(
     dispatchNativeEvent(writer, event, stderr);
   });
   try {
-    const turn = await agent.accessor.get(IAgentPromptService).prompt({
-      role: 'user',
-      content: [{ type: 'text', text: prompt }],
-      toolCalls: [],
-      origin: { kind: 'user' },
+    const handle = await agent.accessor.get(IAgentPromptService).enqueue({
+      message: {
+        role: 'user',
+        content: [{ type: 'text', text: prompt }],
+        toolCalls: [],
+        origin: { kind: 'user' },
+      },
     });
+    const turn = await handle.launched;
     if (turn === undefined) {
-      throw new Error('Prompt turn could not be started');
+      // A prompt blocked by an onBeforeSubmitPrompt hook never launches a turn.
+      writer.finish();
+      const completion = await handle.completion;
+      throw new Error(
+        completion.state === 'blocked'
+          ? 'Prompt hook blocked the request.'
+          : 'Prompt turn could not be started',
+      );
     }
     const result = await turn.result;
 
@@ -355,17 +361,18 @@ async function runNativeTurn(
     // spawned has drained (config-bounded). Flush the buffered assistant
     // message first so a long drain does not withhold the final message.
     writer.flushAssistant();
-    if (result.type !== 'completed') {
+    if (result.type === 'completed') {
+      try {
+        await drainBackgroundTasks(app, session);
+      } catch {
+        // Draining is best-effort; a wedged background task must not fail the
+        // (already completed) turn. Swallow and proceed to finish.
+      }
       writer.finish();
-      throw new Error(formatNativeTurnFailure(result));
-    }
-    try {
-      await drainBackgroundTasks(app, session);
-    } catch {
-      // Draining is best-effort; a wedged background task must not fail the
-      // (already completed) turn. Swallow and proceed to finish.
+      return;
     }
     writer.finish();
+    throw new Error(formatNativeTurnFailure(result));
   } catch (error) {
     writer.finish();
     throw error instanceof Error ? error : new Error(String(error));
@@ -493,21 +500,18 @@ async function drainBackgroundTasks(app: Scope, session: ISessionScopeHandle): P
   if (allWaiters.length > 0) await Promise.all(allWaiters);
 }
 
-function formatNativeTurnFailure(
-  result: Exclude<LoopRunResult, { readonly type: 'completed' }>,
-): string {
-  if (result.type === 'cancelled') {
-    return `Prompt turn ended with reason: ${String(result.reason)}`;
+function formatNativeTurnFailure(result: LoopRunResult): string {
+  if (result.type === 'failed') {
+    const error = result.error as { readonly code?: string; readonly message?: string } | undefined;
+    if (error?.code === 'provider.filtered') {
+      return 'Provider safety policy blocked the response.';
+    }
+    if (error?.code !== undefined) {
+      return `${error.code}: ${error.message ?? ''}`.trimEnd();
+    }
+    if (result.error instanceof Error) {
+      return result.error.message;
+    }
   }
-  const error = result.error as { readonly code?: string; readonly message?: string } | undefined;
-  if (error?.code === 'provider.filtered') {
-    return 'Provider safety policy blocked the response.';
-  }
-  if (error?.code !== undefined) {
-    return `${error.code}: ${error.message ?? ''}`.trimEnd();
-  }
-  if (result.error instanceof Error) {
-    return result.error.message;
-  }
-  return 'Prompt turn failed.';
+  return `Prompt turn ended with reason: ${result.type}`;
 }

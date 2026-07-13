@@ -57,6 +57,7 @@ import {
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IHostProcessService } from '#/os/interface/hostProcess';
+import { unwrapErrorCause } from '#/_base/errors/errors';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { ToolAccesses } from '#/agent/tool/tool-access';
@@ -236,7 +237,7 @@ export class GlobTool implements BuiltinTool<GlobInput> {
       });
       rgPath = resolution.path;
       if (resolution.source !== 'system-path') {
-        this.telemetry.track('glob_tool_rg_fallback', {
+        this.telemetry.track2('glob_tool_rg_fallback', {
           source: resolution.source,
           outcome: 'resolved',
         });
@@ -245,7 +246,7 @@ export class GlobTool implements BuiltinTool<GlobInput> {
       if (signal.aborted) {
         return { isError: true, output: 'Glob aborted' };
       }
-      this.telemetry.track('glob_tool_rg_fallback', { outcome: 'failed' });
+      this.telemetry.track2('glob_tool_rg_fallback', { outcome: 'failed' });
       return { isError: true, output: rgUnavailableMessage(error) };
     }
 
@@ -448,8 +449,11 @@ function formatSpawnError(error: unknown): string {
 }
 
 function errorCode(error: unknown): string | undefined {
-  if (error !== null && typeof error === 'object' && 'code' in error) {
-    const code = (error as { code?: unknown }).code;
+  // hostFs / hostProcess translate raw errnos into coded errors; classify the
+  // unwrapped cause so boundary translation stays invisible here.
+  const unwrapped = unwrapErrorCause(error);
+  if (unwrapped !== null && typeof unwrapped === 'object' && 'code' in unwrapped) {
+    const code = (unwrapped as { code?: unknown }).code;
     return typeof code === 'string' ? code : undefined;
   }
   return undefined;

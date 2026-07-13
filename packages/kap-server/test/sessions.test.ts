@@ -62,7 +62,8 @@ describe('server-v2 /api/v1/sessions', () => {
       server = undefined;
     }
     if (home !== undefined) {
-      await rm(home, { recursive: true, force: true });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 } as never);
       home = undefined;
     }
   });
@@ -130,6 +131,25 @@ describe('server-v2 /api/v1/sessions', () => {
       metadata: { cwd: '/x' },
     });
     expect(body.code).toBe(40410);
+  });
+
+  it('rejects create when metadata.cwd does not exist (40409)', async () => {
+    const missing = join(home as string, 'never-created');
+    const { body } = await postJson<null>('/api/v1/sessions', { metadata: { cwd: missing } });
+    expect(body.code).toBe(40409);
+
+    // The failed create leaves no phantom workspace or session behind.
+    const workspaces = await getJson<{ items: unknown[] }>('/api/v1/workspaces');
+    expect(workspaces.body.data.items).toEqual([]);
+    const sessions = await getJson<PageWire>('/api/v1/sessions');
+    expect(sessions.body.data.items).toEqual([]);
+  });
+
+  it('rejects create when metadata.cwd is not a directory (40409)', async () => {
+    const file = join(home as string, 'a-file.txt');
+    await writeFile(file, 'hi', 'utf8');
+    const { body } = await postJson<null>('/api/v1/sessions', { metadata: { cwd: file } });
+    expect(body.code).toBe(40409);
   });
 
   it('creates a second session via workspace_id resolved from a prior cwd create', async () => {
@@ -362,7 +382,7 @@ describe('server-v2 /api/v1/sessions', () => {
     // (40911), not the pre-fix "session does not exist" (40401).
     expect(res.body.code).toBe(40911);
     expect(res.body.msg).toMatch(/nothing to undo/i);
-    // The thrown KimiError's stack is surfaced so operators can locate the
+    // The thrown Error2's stack is surfaced so operators can locate the
     // source — the precheck/throw now lives in the native prompt service.
     expect(res.body.stack).toEqual(expect.stringContaining('promptService'));
   });
@@ -752,6 +772,11 @@ describe('server-v2 /api/v1/sessions', () => {
 
   it('derives the session title from the first prompt submitted via /api/v1', async () => {
     const cwd = home as string;
+    await writeFile(join(cwd, 'config.toml'), [
+      'default_model = "stub"', '', '[providers.stub]', 'type = "openai"',
+      'base_url = "http://127.0.0.1:9999"', 'api_key = "stub"', '',
+      '[models.stub]', 'provider = "stub"', 'model = "stub"', 'max_context_size = 1000', '',
+    ].join('\n'), 'utf-8');
     const created = await postJson<SessionWire>('/api/v1/sessions', { metadata: { cwd } });
     const id = created.body.data.id;
     expect(created.body.data.title).toBe('');
@@ -819,7 +844,8 @@ describe('server-v2 /api/v1/sessions status context window', () => {
       server = undefined;
     }
     if (home !== undefined) {
-      await rm(home, { recursive: true, force: true });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 } as never);
       home = undefined;
     }
   });

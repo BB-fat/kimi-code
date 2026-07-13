@@ -4,14 +4,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { IAgentProfileService } from '#/index';
 import { IAgentLLMRequesterService, type LLMStreamTiming } from '#/agent/llmRequester/llmRequester';
-import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import { IAgentGoalService } from '#/agent/goal/goal';
-import { IAgentLoopService } from '#/agent/loop/loop';
-import { IAgentTurnService } from '#/agent/turn/turn';
+import { IAgentLoopService, type Turn } from '#/agent/loop/loop';
+import { ContinuationStepRequest, MessageStepRequest } from '#/agent/loop/stepRequest';
 import type { ExecutableTool } from '#/agent/tool/toolContract';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { IAgentUsageService } from '#/agent/usage/usage';
 import { IEventBus } from '#/app/event/eventBus';
+import { userCancellationReason } from '#/_base/utils/abort';
 
 import {
   agentService,
@@ -20,6 +20,7 @@ import {
   type TestAgentContext,
   type TestAgentOptions,
 } from '../../harness';
+import { recordingTelemetry, type TelemetryRecord } from '../../app/telemetry/stubs';
 
 type GenerateFn = NonNullable<TestAgentOptions['generate']>;
 
@@ -56,9 +57,9 @@ describe('Agent loop', () => {
       [wire] tools.set_active_tools      { "names": [], "time": "<time>" }
       [wire] turn.prompt                 { "input": [ { "type": "text", "text": "Hello" } ], "origin": { "kind": "user" }, "time": "<time>" }
       [emit] turn.started                { "turnId": 0, "origin": { "kind": "user" } }
-      [wire] context.append_message      { "message": { "role": "user", "content": [ { "type": "text", "text": "Hello" } ], "toolCalls": [], "origin": { "kind": "user" } }, "time": "<time>" }
+      [wire] context.append_message      { "message": { "role": "user", "content": [ { "type": "text", "text": "Hello" } ], "toolCalls": [], "origin": { "kind": "user" }, "id": "<msg-1>" }, "time": "<time>" }
       [emit] agent.status.updated        { "rawContextTokens": 3 }
-      [emit] context.spliced             { "start": 0, "deleteCount": 0, "messages": [ { "role": "user", "content": [ { "type": "text", "text": "Hello" } ], "toolCalls": [], "origin": { "kind": "user" } } ] }
+      [emit] context.spliced             { "start": 0, "deleteCount": 0, "messages": [ { "role": "user", "content": [ { "type": "text", "text": "Hello" } ], "toolCalls": [], "origin": { "kind": "user" }, "id": "<msg-1>" } ] }
       [emit] turn.step.started           { "turnId": 0, "step": 1, "stepId": "<uuid-1>" }
       [wire] context.append_loop_event   { "event": { "type": "step.begin", "uuid": "<uuid-1>", "turnId": "0", "step": 1 }, "time": "<time>" }
       [emit] agent.status.updated        { "rawContextTokens": 9 }
@@ -96,9 +97,9 @@ describe('Agent loop', () => {
     expect(await ctx.untilTurnEnd()).toMatchInlineSnapshot(`
       [wire] turn.prompt                 { "input": [ { "type": "text", "text": "Hello" } ], "origin": { "kind": "user" }, "time": "<time>" }
       [emit] turn.started                { "turnId": 0, "origin": { "kind": "user" } }
-      [wire] context.append_message      { "message": { "role": "user", "content": [ { "type": "text", "text": "Hello" } ], "toolCalls": [], "origin": { "kind": "user" } }, "time": "<time>" }
+      [wire] context.append_message      { "message": { "role": "user", "content": [ { "type": "text", "text": "Hello" } ], "toolCalls": [], "origin": { "kind": "user" }, "id": "<msg-1>" }, "time": "<time>" }
       [emit] agent.status.updated        { "rawContextTokens": 3 }
-      [emit] context.spliced             { "start": 0, "deleteCount": 0, "messages": [ { "role": "user", "content": [ { "type": "text", "text": "Hello" } ], "toolCalls": [], "origin": { "kind": "user" } } ] }
+      [emit] context.spliced             { "start": 0, "deleteCount": 0, "messages": [ { "role": "user", "content": [ { "type": "text", "text": "Hello" } ], "toolCalls": [], "origin": { "kind": "user" }, "id": "<msg-1>" } ] }
       [emit] turn.step.started           { "turnId": 0, "step": 1, "stepId": "<uuid-1>" }
       [wire] context.append_loop_event   { "event": { "type": "step.begin", "uuid": "<uuid-1>", "turnId": "0", "step": 1 }, "time": "<time>" }
       [emit] agent.status.updated        { "rawContextTokens": 9 }
@@ -134,7 +135,7 @@ describe('Agent loop', () => {
     });
 
     await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Hello' }] });
-    const turn = ctx.get(IAgentTurnService).getActiveTurn();
+    const turn = (loop as unknown as { activeTurnJob?: { turn: Turn } }).activeTurnJob?.turn;
     expect(turn).toBeDefined();
 
     await ctx.untilTurnEnd();
@@ -158,21 +159,58 @@ describe('Agent loop', () => {
     expect(turnEnded?.args).toMatchObject({ reason: 'completed' });
   });
 
-  it('lets onError recover a non-context loop error by retrying', async () => {
+  it('stops the turn when provider reports tool_calls without any tool call structure', async () => {
+    // Mirrors v1 turn-lifecycle "treats provider tool_calls without tool call
+    // structure as unknown": a bare 'tool_calls' signal with no tool calls must
+    // end the turn instead of looping on the bare signal until maxSteps.
+    profile.update({ activeToolNames: [] });
+    ctx.mockNextProviderResponse({
+      parts: [{ type: 'text', text: 'done' }],
+      finishReason: 'tool_calls',
+    });
+
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Hello' }] });
+    const turn = (loop as unknown as { activeTurnJob?: { turn: Turn } }).activeTurnJob?.turn;
+    expect(turn).toBeDefined();
+
+    await ctx.untilTurnEnd();
+    await expect(turn!.result).resolves.toEqual({
+      type: 'completed',
+      steps: 1,
+      truncated: false,
+    });
+
+    const stepCompleted = ctx.allEvents.find(
+      (event) => event.type === '[rpc]' && event.event === 'turn.step.completed',
+    );
+    expect(stepCompleted?.args).toMatchObject({
+      finishReason: 'other',
+      providerFinishReason: 'tool_calls',
+      rawFinishReason: 'tool_calls',
+    });
+  });
+
+  it('lets a loop error handler recover a non-context loop error by retrying', async () => {
     profile.update({ activeToolNames: [] });
     const seenErrors: Array<{ readonly step: number | undefined; readonly message: string }> = [];
 
-    loop.hooks.onError.register('test-recover-generate-error', async (hookCtx, next) => {
-      seenErrors.push({
-        step: hookCtx.step,
-        message: hookCtx.error instanceof Error ? hookCtx.error.message : String(hookCtx.error),
-      });
-      if (seenErrors.length === 1) {
-        ctx.mockNextResponse({ type: 'text', text: 'Recovered.' });
-        hookCtx.retry = true;
-        return;
-      }
-      await next();
+    loop.registerLoopErrorHandler({
+      id: 'test-recover-generate-error',
+      match: () => true,
+      handle: async (hookCtx) => {
+        seenErrors.push({
+          step: hookCtx.step,
+          message: hookCtx.error instanceof Error ? hookCtx.error.message : String(hookCtx.error),
+        });
+        if (seenErrors.length === 1) {
+          ctx.mockNextResponse({ type: 'text', text: 'Recovered.' });
+          if (hookCtx.failedDriver !== undefined) {
+            loop.enqueue(hookCtx.failedDriver, { at: 'head' });
+            return true;
+          }
+        }
+        return undefined;
+      },
     });
 
     await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Hello' }] });
@@ -189,11 +227,15 @@ describe('Agent loop', () => {
     );
   });
 
-  it('does not run onError for aborted turns', async () => {
+  it('does not run loop error handlers for aborted turns', async () => {
     let called = false;
-    loop.hooks.onError.register('test-abort-not-recoverable', async (_hookCtx, next) => {
-      called = true;
-      await next();
+    loop.registerLoopErrorHandler({
+      id: 'test-abort-not-recoverable',
+      match: () => {
+        called = true;
+        return true;
+      },
+      handle: async () => undefined,
     });
     const controller = new AbortController();
     controller.abort(new Error('stop'));
@@ -204,12 +246,17 @@ describe('Agent loop', () => {
     expect(called).toBe(false);
   });
 
-  it('fails with the onError handler error when recovery throws', async () => {
+  it('fails with the error handler error when recovery throws', async () => {
     const recoveryError = new Error('recovery failed');
-    loop.hooks.onError.register('test-throw-recovery-error', async () => {
-      throw recoveryError;
+    loop.registerLoopErrorHandler({
+      id: 'test-throw-recovery-error',
+      match: () => true,
+      handle: async () => {
+        throw recoveryError;
+      },
     });
 
+    loop.enqueue(new ContinuationStepRequest());
     const result = await loop.run({ turnId: 0 });
 
     expect(result.type).toBe('failed');
@@ -254,9 +301,9 @@ describe('Agent loop', () => {
       [wire] tools.set_active_tools          { "names": [ "Lookup" ], "time": "<time>" }
       [wire] turn.prompt                     { "input": [ { "type": "text", "text": "Look up moon" } ], "origin": { "kind": "user" }, "time": "<time>" }
       [emit] turn.started                    { "turnId": 0, "origin": { "kind": "user" } }
-      [wire] context.append_message          { "message": { "role": "user", "content": [ { "type": "text", "text": "Look up moon" } ], "toolCalls": [], "origin": { "kind": "user" } }, "time": "<time>" }
+      [wire] context.append_message          { "message": { "role": "user", "content": [ { "type": "text", "text": "Look up moon" } ], "toolCalls": [], "origin": { "kind": "user" }, "id": "<msg-1>" }, "time": "<time>" }
       [emit] agent.status.updated            { "rawContextTokens": 5 }
-      [emit] context.spliced                 { "start": 0, "deleteCount": 0, "messages": [ { "role": "user", "content": [ { "type": "text", "text": "Look up moon" } ], "toolCalls": [], "origin": { "kind": "user" } } ] }
+      [emit] context.spliced                 { "start": 0, "deleteCount": 0, "messages": [ { "role": "user", "content": [ { "type": "text", "text": "Look up moon" } ], "toolCalls": [], "origin": { "kind": "user" }, "id": "<msg-1>" } ] }
       [emit] turn.step.started               { "turnId": 0, "step": 1, "stepId": "<uuid-1>" }
       [wire] context.append_loop_event       { "event": { "type": "step.begin", "uuid": "<uuid-1>", "turnId": "0", "step": 1 }, "time": "<time>" }
       [emit] agent.status.updated            { "rawContextTokens": 11 }
@@ -317,18 +364,20 @@ describe('Agent loop', () => {
   it('lets non-external stop hooks continue a turn more than once', async () => {
     profile.update({ activeToolNames: [] });
     let continuations = 0;
-    loop.hooks.afterStep.register('test-repeat-stop-continuation', async (hookCtx, next) => {
+    loop.hooks.onDidFinishStep.register('test-repeat-stop-continuation', async (hookCtx, next) => {
       if (continuations < 2) {
         continuations += 1;
-        const prompt = `continue ${continuations}`;
-        const context = ctx.get(IAgentContextMemoryService);
-        context.append({
-          role: 'user',
-          content: [{ type: 'text', text: prompt }],
-          toolCalls: [],
-          origin: { kind: 'system_trigger', name: 'stop_hook' },
-        });
-        hookCtx.continue = true;
+        loop.enqueue(
+          new MessageStepRequest(
+            {
+              role: 'user',
+              content: [{ type: 'text', text: `continue ${continuations}` }],
+              toolCalls: [],
+              origin: { kind: 'system_trigger', name: 'stop_hook' },
+            },
+            { kind: 'stop_hook', mergeable: true },
+          ),
+        );
         return;
       }
       await next();
@@ -385,7 +434,7 @@ describe('Agent loop', () => {
     profile.update({ activeToolNames: ['Lookup'] });
     ctx.get(IAgentToolRegistryService).register(lookupTool);
 
-    loop.hooks.afterStep.register('test-stop-turn', async (hookCtx, next) => {
+    loop.hooks.onDidFinishStep.register('test-stop-turn', async (hookCtx, next) => {
       hookCtx.stopTurn = true;
       await next();
     });
@@ -394,7 +443,7 @@ describe('Agent loop', () => {
     ctx.mockNextResponse({ type: 'text', text: 'This step should not run.' });
 
     await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Look up moon' }] });
-    const turn = ctx.get(IAgentTurnService).getActiveTurn();
+    const turn = (loop as unknown as { activeTurnJob?: { turn: Turn } }).activeTurnJob?.turn;
     await ctx.untilApproval(true);
     await ctx.untilTurnEnd();
 
@@ -406,14 +455,14 @@ describe('Agent loop', () => {
     });
   });
 
-  it('lets stopTurn take precedence over a hook-set continue', async () => {
+  it('lets stopTurn take precedence over a queued continuation request', async () => {
     profile.update({ activeToolNames: [] });
 
-    loop.hooks.afterStep.register('test-continue-like-stop-hook', async (hookCtx, next) => {
-      hookCtx.continue = true;
+    loop.hooks.onDidFinishStep.register('test-continue-like-stop-hook', async (hookCtx, next) => {
+      loop.enqueue(new ContinuationStepRequest());
       await next();
     });
-    loop.hooks.afterStep.register('test-hard-stop', async (hookCtx, next) => {
+    loop.hooks.onDidFinishStep.register('test-hard-stop', async (hookCtx, next) => {
       hookCtx.stopTurn = true;
       await next();
     });
@@ -422,7 +471,7 @@ describe('Agent loop', () => {
     ctx.mockNextResponse({ type: 'text', text: 'This continuation should not run.' });
 
     await ctx.rpc.prompt({ input: [{ type: 'text', text: 'hello' }] });
-    const turn = ctx.get(IAgentTurnService).getActiveTurn();
+    const turn = (loop as unknown as { activeTurnJob?: { turn: Turn } }).activeTurnJob?.turn;
     await ctx.untilTurnEnd();
 
     expect(ctx.llmCalls).toHaveLength(1);
@@ -432,6 +481,234 @@ describe('Agent loop', () => {
       truncated: false,
     });
   });
+
+  it('queues consecutive nextTurn requests in FIFO order without overlapping turns', async () => {
+    const events: string[] = [];
+    const subscription = ctx.get(IEventBus).subscribe((event) => {
+      if (event.type === 'turn.started' || event.type === 'turn.ended') {
+        events.push(`${event.type}:${event.turnId}`);
+      }
+    });
+    ctx.mockNextResponse({ type: 'text', text: 'one' });
+    ctx.mockNextResponse({ type: 'text', text: 'two' });
+    ctx.mockNextResponse({ type: 'text', text: 'three' });
+
+    const first = (await loop.enqueue(nextTurnMessage('first')).assigned).turn;
+    const second = (await loop.enqueue(nextTurnMessage('second')).assigned).turn;
+    const third = (await loop.enqueue(nextTurnMessage('third')).assigned).turn;
+
+    expect([first.state, second.state, third.state]).toEqual(['running', 'queued', 'queued']);
+    await Promise.all([first.result, second.result, third.result]);
+    subscription.dispose();
+
+    expect(events).toEqual([
+      'turn.started:0',
+      'turn.ended:0',
+      'turn.started:1',
+      'turn.ended:1',
+      'turn.started:2',
+      'turn.ended:2',
+    ]);
+    expect(ctx.llmCalls).toHaveLength(3);
+  });
+
+  it('cancels a running step without cancelling its turn and continues the next step', async () => {
+    let releaseRunning!: () => void;
+    const running = new Promise<void>((resolve) => {
+      releaseRunning = resolve;
+    });
+    let stepStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      stepStarted = resolve;
+    });
+    loop.hooks.onWillBeginStep.register('test-running-step-cancel', async (hookCtx, next) => {
+      if (hookCtx.step === 2) {
+        stepStarted();
+        await Promise.race([
+          running,
+          new Promise<void>((_, reject) => {
+            hookCtx.signal.addEventListener('abort', () => reject(hookCtx.signal.reason), { once: true });
+          }),
+        ]);
+      }
+      await next();
+    });
+    ctx.mockNextResponse({ type: 'text', text: 'initial' });
+    ctx.mockNextResponse({ type: 'text', text: 'after cancellation' });
+
+    const turn = (await loop.enqueue(nextTurnMessage('start')).assigned).turn;
+    const cancelledStep = (await loop.enqueue(new ContinuationStepRequest()).assigned).step;
+    loop.enqueue(new ContinuationStepRequest());
+    await started;
+
+    expect(cancelledStep.state).toBe('running');
+    expect(cancelledStep.cancel(new Error('skip this step'))).toBe(true);
+    await expect(cancelledStep.result).resolves.toMatchObject({ type: 'cancelled' });
+    await expect(turn.result).resolves.toMatchObject({ type: 'completed', steps: 3 });
+    releaseRunning();
+
+    expect(turn.state).toBe('completed');
+    expect(ctx.llmCalls).toHaveLength(2);
+  });
+
+  it('disposes active and queued turns with all steps settled and never pumps again', async () => {
+    let stepStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      stepStarted = resolve;
+    });
+    loop.hooks.onWillBeginStep.register('test-dispose-loop', async (hookCtx, next) => {
+      stepStarted();
+      await new Promise<void>((_, reject) => {
+        hookCtx.signal.addEventListener('abort', () => reject(hookCtx.signal.reason), { once: true });
+      });
+      await next();
+    });
+
+    const active = (await loop.enqueue(nextTurnMessage('active')).assigned).turn;
+    const activeQueuedStep = (await loop.enqueue(new ContinuationStepRequest()).assigned).step;
+    const queued = (await loop.enqueue(nextTurnMessage('queued')).assigned).turn;
+    const queuedExtraStep = (await loop.enqueue(nextTurnMessage('queued-extra')).assigned).step;
+    await started;
+
+    (loop as IAgentLoopService & { dispose(): void }).dispose();
+
+    await expect(active.result).resolves.toMatchObject({ type: 'cancelled' });
+    await expect(queued.result).resolves.toMatchObject({ type: 'cancelled', steps: 0 });
+    await expect(activeQueuedStep.result).resolves.toMatchObject({ type: 'cancelled' });
+    await expect(queuedExtraStep.result).resolves.toMatchObject({ type: 'cancelled' });
+    expect(active.state).toBe('cancelled');
+    expect(queued.state).toBe('cancelled');
+    expect(ctx.llmCalls).toHaveLength(0);
+    expect(() => loop.enqueue(nextTurnMessage('rejected'))).toThrow();
+  });
+
+  it('cancels a queued turn without starting or materializing its initial request', async () => {
+    const started: number[] = [];
+    const subscription = ctx.get(IEventBus).subscribe('turn.started', (event) => {
+      started.push(event.turnId);
+    });
+    ctx.mockNextResponse({ type: 'text', text: 'one' });
+    ctx.mockNextResponse({ type: 'text', text: 'three' });
+
+    const first = (await loop.enqueue(nextTurnMessage('first')).assigned).turn;
+    const cancelledReceipt = loop.enqueue(nextTurnMessage('cancelled'));
+    const cancelledTurn = (await cancelledReceipt.assigned).turn;
+    const third = (await loop.enqueue(nextTurnMessage('third')).assigned).turn;
+
+    expect(cancelledReceipt.abort()).toBe(true);
+    await expect(cancelledTurn.result).resolves.toMatchObject({ type: 'cancelled', steps: 0 });
+    await Promise.all([first.result, third.result]);
+    subscription.dispose();
+
+    expect(started).toEqual([0, 2]);
+    expect(ctx.contextData().history).not.toContainEqual(
+      expect.objectContaining({ content: [{ type: 'text', text: 'cancelled' }] }),
+    );
+  });
+});
+
+describe('turn telemetry', () => {
+  it('emits turn_started and turn_ended with mode and protocol on completion', async () => {
+    const records: TelemetryRecord[] = [];
+    const local = createTestAgent({ telemetry: recordingTelemetry(records) });
+    try {
+      local.get(IAgentProfileService).update({ activeToolNames: [] });
+      local.mockNextResponse({ type: 'text', text: 'hi' });
+      await local.rpc.prompt({ input: [{ type: 'text', text: 'Hello' }] });
+      await local.untilTurnEnd();
+
+      expect(records).toContainEqual({
+        event: 'turn_started',
+        properties: { mode: 'agent', provider_type: 'kimi', protocol: 'kimi' },
+      });
+      expect(records).toContainEqual({
+        event: 'turn_ended',
+        properties: expect.objectContaining({
+          reason: 'completed',
+          duration_ms: expect.any(Number),
+          mode: 'agent',
+          provider_type: 'kimi',
+          protocol: 'kimi',
+        }),
+      });
+      expect(records.some((record) => record.event === 'turn_interrupted')).toBe(false);
+    } finally {
+      await local.dispose();
+    }
+  });
+
+  it('emits turn_interrupted with interrupt_reason filtered and turn_ended failed', async () => {
+    const records: TelemetryRecord[] = [];
+    const local = createTestAgent({ telemetry: recordingTelemetry(records) });
+    try {
+      local.mockNextProviderResponse({
+        parts: [{ type: 'text', text: 'blocked' }],
+        finishReason: 'filtered',
+      });
+      await local.rpc.prompt({ input: [{ type: 'text', text: 'Hello' }] });
+      await local.untilTurnEnd();
+
+      expect(records).toContainEqual({
+        event: 'turn_interrupted',
+        properties: expect.objectContaining({
+          at_step: 1,
+          mode: 'agent',
+          interrupt_reason: 'filtered',
+          provider_type: 'kimi',
+          protocol: 'kimi',
+        }),
+      });
+      expect(records).toContainEqual({
+        event: 'turn_ended',
+        properties: expect.objectContaining({ reason: 'failed', mode: 'agent' }),
+      });
+    } finally {
+      await local.dispose();
+    }
+  });
+
+  it.each([
+    ['user_cancelled', () => userCancellationReason()],
+    ['aborted', () => new Error('stop')],
+  ] as const)(
+    'emits turn_interrupted with interrupt_reason %s on cancellation',
+    async (expected, makeReason) => {
+      const records: TelemetryRecord[] = [];
+      const local = createTestAgent({ telemetry: recordingTelemetry(records) });
+      try {
+        const localLoop = local.get(IAgentLoopService);
+        let stepStarted!: () => void;
+        const started = new Promise<void>((resolve) => {
+          stepStarted = resolve;
+        });
+        localLoop.hooks.onWillBeginStep.register('test-hang', async (hookCtx, next) => {
+          stepStarted();
+          await new Promise<void>((_, reject) => {
+            hookCtx.signal.addEventListener('abort', () => reject(hookCtx.signal.reason), {
+              once: true,
+            });
+          });
+          await next();
+        });
+
+        const turn = (await localLoop.enqueue(nextTurnMessage('hang')).assigned).turn;
+        await started;
+        localLoop.cancel(turn.id, makeReason());
+        await expect(turn.result).resolves.toMatchObject({ type: 'cancelled' });
+
+        expect(records).toContainEqual({
+          event: 'turn_interrupted',
+          properties: expect.objectContaining({ interrupt_reason: expected, mode: 'agent' }),
+        });
+        expect(records).toContainEqual({
+          event: 'turn_ended',
+          properties: expect.objectContaining({ reason: 'cancelled' }),
+        });
+      } finally {
+        await local.dispose();
+      }
+    },
+  );
 });
 
 describe('step timing split propagation', () => {
@@ -473,8 +750,10 @@ describe('aborted step tool execution', () => {
       await goals.setBudgetLimits({ budgetLimits: { tokenBudget: 60 } });
       ctx.get(IEventBus).publish({ type: 'turn.started', turnId: 1, origin: { kind: 'user' } });
 
+      const loopService = ctx.get(IAgentLoopService);
+      loopService.enqueue(new ContinuationStepRequest());
       const controller = new AbortController();
-      const resultPromise = ctx.get(IAgentLoopService).run({
+      const resultPromise = loopService.run({
         turnId: 1,
         signal: controller.signal,
       });
@@ -520,8 +799,10 @@ describe('aborted step tool execution', () => {
 
     try {
       const slowToolStarted = registerAbortableWorkTool(ctx);
+      const loopService = ctx.get(IAgentLoopService);
+      loopService.enqueue(new ContinuationStepRequest());
       const controller = new AbortController();
-      const result = ctx.get(IAgentLoopService).run({
+      const result = loopService.run({
         turnId: 1,
         signal: controller.signal,
       });
@@ -539,6 +820,18 @@ describe('aborted step tool execution', () => {
     }
   });
 });
+
+function nextTurnMessage(text: string): MessageStepRequest {
+  return new MessageStepRequest(
+    {
+      role: 'user',
+      content: [{ type: 'text', text }],
+      toolCalls: [],
+      origin: { kind: 'user' },
+    },
+    { admission: 'newTurn' },
+  );
+}
 
 function createTimingRequester(): IAgentLLMRequesterService {
   const timing: LLMStreamTiming = {

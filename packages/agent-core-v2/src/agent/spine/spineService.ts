@@ -169,7 +169,7 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
       }),
     );
     this._register(
-      loop.hooks.beforeStep.register('spine', async (ctx, next) => {
+      loop.hooks.onWillBeginStep.register('spine', async (ctx, next) => {
         if (this.pending !== null) {
           this.dropPending(
             this.pending,
@@ -181,7 +181,7 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
       }),
     );
     this._register(
-      loop.hooks.afterStep.register('spine', async (_ctx, next) => {
+      loop.hooks.onDidFinishStep.register('spine', async (_ctx, next) => {
         await this.commitPending();
         await next();
       }),

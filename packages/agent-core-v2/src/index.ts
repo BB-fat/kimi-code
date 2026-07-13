@@ -24,6 +24,7 @@ export { type IWireService, type WireEmission } from '#/wire/wireService';
 export { defineDerivedModel, type DerivedModelDef } from '#/wire/model';
 export * from '#/session/sessionLog/sessionLogService';
 export * from '#/app/telemetry/telemetry';
+export * from '#/app/telemetry/events';
 export * from '#/app/telemetry/telemetryService';
 export * from '#/app/telemetry/agentTelemetryContext';
 export * from '#/app/telemetry/agentTelemetryContextService';
@@ -167,8 +168,6 @@ export * from '#/app/flag/flagService';
 import '#/app/multiServer/flag';
 export * from '#/app/multiServer/flag';
 
-import '#/agent/turn/turn';
-import '#/agent/turn/turnService';
 export * from '#/activity/activity';
 export * from '#/activity/activityOps';
 import '#/activity/agentActivityService';
@@ -316,6 +315,7 @@ export {
   READ_IMAGE_BYTE_BUDGET,
   resolveMaxImageEdgePx,
   resolveReadImageByteBudget,
+  setConfiguredMaxImageEdgePx,
   type ImageCompressionTelemetry,
 } from '#/_base/tools/support/image-compress';
 export {
@@ -369,10 +369,12 @@ export * from '#/agent/fullCompaction/types';
 export * from '#/agent/llmRequester/llmRequester';
 export * from '#/agent/llmRequester/llmRequesterService';
 export * from '#/agent/llmRequester/llmRequestOps';
-export * from '#/agent/llmRequester/retry';
+export * from '#/_base/utils/retry';
 import '#/agent/loop/configSection';
 export * from '#/agent/loop/loop';
 export * from '#/agent/loop/loopService';
+export * from '#/agent/loop/loopContinuation';
+export * from '#/agent/loop/loopContinuationService';
 export * from '#/agent/mcp/mcp';
 export * from '#/agent/mcp/mcpService';
 export * from '#/agent/mcp/mcpDiscoveryOps';
@@ -401,9 +403,6 @@ export * from '#/agent/profile/profileService';
 export * from '#/agent/profile/context';
 export * from '#/agent/prompt/prompt';
 export * from '#/agent/prompt/promptService';
-import '#/agent/promptLegacy/errors';
-export * from '#/agent/promptLegacy/promptLegacy';
-export * from '#/agent/promptLegacy/promptLegacyService';
 import '#/app/messageLegacy/errors';
 export * from '#/app/messageLegacy/messageLegacy';
 export * from '#/app/messageLegacy/messageLegacyService';
@@ -416,9 +415,15 @@ export * from '#/agent/shellCommand/shellCommandService';
 export * from '#/agent/rpc/rpc';
 export * from '#/agent/rpc/rpcService';
 export type { McpServerInfo } from '#/agent/rpc/core-api';
+export * from '#/agent/rpc/prompt-metadata';
 export * from '#/agent/scopeContext/scopeContext';
+export * from '#/agent/stepRetry/stepRetry';
+export * from '#/agent/stepRetry/stepRetryService';
 export * from '#/session/btw/btw';
 export * from '#/session/btw/btwService';
+export * from '#/session/sessionInit/sessionInit';
+export * from '#/session/sessionInit/sessionInitService';
+export * from '#/session/sessionInit/profile/init';
 export * from '#/session/swarm/sessionSwarm';
 export * from '#/session/swarm/sessionSwarmService';
 export * from '#/session/todo/todoItem';
@@ -441,10 +446,7 @@ import '#/agent/toolRegistry/toolRegistryService';
 export { IAgentBuiltinToolsRegistrar } from '#/agent/toolRegistry/builtinToolsRegistrar';
 export { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 export { registerTool } from '#/agent/toolRegistry/toolContribution';
-export type {
-  ToolContribution,
-  ToolContributionOptions,
-} from '#/agent/toolRegistry/toolContribution';
+export type { ToolContribution, ToolContributionOptions } from '#/agent/toolRegistry/toolContribution';
 export * from '#/agent/userTool/userTool';
 export * from '#/agent/userTool/userToolOps';
 export * from '#/agent/userTool/userToolService';

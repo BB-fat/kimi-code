@@ -31,12 +31,12 @@ class FakeTerminalProcess implements TerminalProcess {
   readonly resizes: Array<[number, number]> = [];
   killed = false;
 
-  readonly onData = (listener: (data: string) => void): { dispose(): void } => {
+  readonly onProcessData = (listener: (data: string) => void): { dispose(): void } => {
     this.dataListeners.add(listener);
     return { dispose: () => this.dataListeners.delete(listener) };
   };
 
-  readonly onExit = (
+  readonly onProcessExit = (
     listener: (event: { exitCode: number | null }) => void,
   ): { dispose(): void } => {
     this.exitListeners.add(listener);

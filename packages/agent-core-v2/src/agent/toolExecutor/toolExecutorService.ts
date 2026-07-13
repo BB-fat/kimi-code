@@ -26,20 +26,22 @@ import {
 } from '#/_base/tools/args-validator';
 import { PathSecurityError } from '#/_base/tools/policies/path-access';
 import { isUserCancellation } from "#/_base/utils/abort";
-import { isAbortError } from '#/agent/loop/errors';
+import { isAbortError } from '#/_base/utils/abort';
 import { IEventBus } from '#/app/event/eventBus';
 import { ToolAccesses } from '#/agent/tool/tool-access';
 import type { ExecutableTool, ExecutableToolResult, RunnableToolExecution, ToolExecution, ToolResult, ToolUpdate } from '#/agent/tool/toolContract';
-import type { ToolDidExecuteContext, ToolWillExecuteContext } from '#/agent/tool/toolHooks';
+import type { ToolDidExecuteContext, ToolBeforeExecuteContext } from '#/agent/tool/toolHooks';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import type { ToolCall } from '#/app/llmProtocol/message';
 import { ILogService } from '#/_base/log/log';
+import type { ToolCallEvent } from '#/app/telemetry/events';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { OrderedHookSlot } from '#/hooks';
 import { IAgentToolResultTruncationService } from '#/agent/toolResultTruncation/toolResultTruncation';
 import {
   IAgentToolExecutorService,
   type MissingToolDescriber,
+  type ToolCallDupType,
   type ToolExecutionResult,
   type ToolExecutorExecuteOptions,
   type UnavailableToolDescriber,
@@ -93,12 +95,21 @@ type ToolExecutionStreamEvent =
 export class AgentToolExecutorService implements IAgentToolExecutorService {
   declare readonly _serviceBrand: undefined;
   readonly hooks = {
-    onWillExecuteTool: new OrderedHookSlot<ToolWillExecuteContext>(),
+    onBeforeExecuteTool: new OrderedHookSlot<ToolBeforeExecuteContext>(),
     onDidExecuteTool: new OrderedHookSlot<ToolDidExecuteContext>(),
   };
 
   private missingToolDescriber: MissingToolDescriber | undefined;
   private unavailableToolDescriber: UnavailableToolDescriber | undefined;
+  // Duplicate-call tags written by the `toolDedupe` plugin, consumed by
+  // `trackToolCall`. Pruned on turn change so entries from calls that never
+  // reached telemetry (e.g. an aborted batch) cannot leak across turns.
+  private readonly toolCallDupTypes = new Map<string, ToolCallDupType>();
+  private dupTypeTurnId: number | undefined;
+
+  recordDupType(toolCallId: string, dupType: ToolCallDupType): void {
+    this.toolCallDupTypes.set(toolCallId, dupType);
+  }
 
   registerUnavailableToolDescriber(describer: UnavailableToolDescriber) {
     this.unavailableToolDescriber = describer;
@@ -128,6 +139,10 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
     options: ToolExecutorExecuteOptions,
   ): AsyncIterable<ToolExecutionResult> {
     if (calls.length === 0) return;
+    if (options.turnId !== this.dupTypeTurnId) {
+      this.dupTypeTurnId = options.turnId;
+      this.toolCallDupTypes.clear();
+    }
 
     const preflighted = calls.map((call) =>
       preflightToolCall(
@@ -251,15 +266,19 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
     turnId: number,
   ): void {
     const outcome = toolTelemetryOutcome(result);
-    const properties: Record<string, unknown> = {
+    const toolCallId = call.toolCall.id;
+    const dupType = this.toolCallDupTypes.get(toolCallId) ?? 'normal';
+    this.toolCallDupTypes.delete(toolCallId);
+    const properties: ToolCallEvent = {
       turn_id: turnId,
-      tool_call_id: call.toolCall.id,
+      tool_call_id: toolCallId,
       tool_name: call.toolName,
       outcome,
       duration_ms: durationMs,
+      dup_type: dupType,
     };
     if (result.isError === true) properties['error_type'] = toolTelemetryErrorType(outcome);
-    this.telemetry.track('tool_call', properties);
+    this.telemetry.track2('tool_call', properties);
   }
 
   private async prepareToolCall(
@@ -333,7 +352,7 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
     }
 
     const willCtx = buildWillExecuteContext(call, execution, allCalls, options);
-    await this.hooks.onWillExecuteTool.run(willCtx);
+    await this.hooks.onBeforeExecuteTool.run(willCtx);
 
     const decision = willCtx.decision;
     if (decision?.block === true) {
@@ -619,7 +638,7 @@ function buildWillExecuteContext(
   execution: RunnableToolExecution,
   allCalls: readonly ToolCall[],
   options: ToolExecutorExecuteOptions,
-): ToolWillExecuteContext {
+): ToolBeforeExecuteContext {
   return {
     turnId: options.turnId,
     signal: options.signal,
@@ -814,7 +833,7 @@ function toolTelemetryOutcome(result: ToolResult): 'success' | 'error' | 'cancel
     : 'error';
 }
 
-function toolTelemetryErrorType(outcome: 'success' | 'error' | 'cancelled'): string {
+function toolTelemetryErrorType(outcome: 'success' | 'error' | 'cancelled'): 'cancelled' | 'error' {
   if (outcome === 'cancelled') return 'cancelled';
   return 'error';
 }

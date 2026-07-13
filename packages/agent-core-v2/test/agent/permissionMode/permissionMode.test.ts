@@ -85,12 +85,13 @@ async function runRegisteredInjection(): Promise<string | undefined> {
 }
 
 describe('AgentPermissionModeService (wire-backed)', () => {
-  it('setMode updates mode and fires onChanged with mode/previousMode', () => {
+  it('setMode updates mode and fires onDidChangeMode with mode/previousMode', () => {
     const changes: { mode: PermissionMode; previousMode: PermissionMode }[] = [];
-    svc.hooks.onChanged.register('test', (ctx, next) => {
-      changes.push({ mode: ctx.mode, previousMode: ctx.previousMode });
-      return next();
-    });
+    disposables.add(
+      svc.onDidChangeMode((ctx) => {
+        changes.push({ mode: ctx.mode, previousMode: ctx.previousMode });
+      }),
+    );
 
     expect(svc.mode).toBe('manual');
 
@@ -99,7 +100,7 @@ describe('AgentPermissionModeService (wire-backed)', () => {
     expect(changes).toEqual([{ mode: 'auto', previousMode: 'manual' }]);
 
     // Re-dispatching the current mode is a no-op: apply returns the same
-    // reference, so the wire emits no change and onChanged does not fire again.
+    // reference, so the wire emits no change and onDidChangeMode does not fire again.
     svc.setMode('auto');
     expect(changes).toEqual([{ mode: 'auto', previousMode: 'manual' }]);
   });

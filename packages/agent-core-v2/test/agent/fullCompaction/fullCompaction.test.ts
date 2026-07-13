@@ -44,7 +44,7 @@ import {
   type ResolvedAgentProfile,
   type ToolExecution,
 } from '#/index';
-import { IAgentTurnService } from '#/agent/turn/turn';
+import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentContextSizeService } from '#/agent/contextSize/contextSize';
 import { IAgentGoalService } from '#/agent/goal/goal';
 import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
@@ -306,8 +306,8 @@ describe('FullCompaction', () => {
         compacted_count: 6,
         retry_count: 0,
         thinking_effort: 'off',
-        input_other: 1110,
-        output: 9,
+        input_tokens: 1110,
+        output_tokens: 9,
         input_cache_read: 0,
         input_cache_creation: 0,
       }),
@@ -367,7 +367,7 @@ describe('FullCompaction', () => {
 
     await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Start the active turn' }] });
     const approval = await ctx.takeApprovalRequest();
-    expect(ctx.get(IAgentTurnService).getActiveTurn()).toBeDefined();
+    expect(ctx.get(IAgentLoopService).status().activeTurnId).toBeDefined();
 
     await expect(ctx.rpc.beginCompaction({})).rejects.toMatchObject({
       code: 'compaction.unable',
@@ -382,7 +382,7 @@ describe('FullCompaction', () => {
     ctx.mockNextResponse({ type: 'text', text: 'Turn done.' });
     approval.respond({ decision: 'rejected', selectedLabel: 'reject' });
     await ctx.untilTurnEnd();
-    expect(ctx.get(IAgentTurnService).getActiveTurn()).toBeUndefined();
+    expect(ctx.get(IAgentLoopService).status().activeTurnId).toBeUndefined();
   });
 
   it('projects the compacted prefix before sending the summary request', async () => {
@@ -1024,7 +1024,7 @@ describe('FullCompaction', () => {
           code: 'compaction.failed',
           message:
             'CompactionTruncatedError: Compaction response was truncated before producing a complete summary.',
-          name: 'KimiError',
+          name: 'Error2',
         }),
       }),
     );
@@ -1059,8 +1059,8 @@ describe('FullCompaction', () => {
       properties: expect.objectContaining({
         source: 'manual',
         tokens_before: 28,
-        duration_ms: expect.any(Number),
         round: 1,
+        duration_ms: expect.any(Number),
         retry_count: 4,
         error_type: 'APIConnectionError',
       }),
@@ -1366,11 +1366,11 @@ describe('FullCompaction', () => {
     );
     expect(countEvents(ctx.newEvents(), 'full_compaction.complete')).toBe(0);
     // A history-changed race cancel is not a user abort: it must be visible in
-    // telemetry as its own failure category instead of vanishing down the
-    // abort path.
+    // telemetry as a compaction failure instead of vanishing down the abort
+    // path (user aborts stay untracked).
     expect(telemetryRecords).toContainEqual({
       event: 'compaction_failed',
-      properties: expect.objectContaining({ error_category: 'history_changed' }),
+      properties: expect.objectContaining({ error_type: 'AbortError' }),
     });
     await ctx.expectResumeMatches();
   });
@@ -1397,7 +1397,6 @@ describe('FullCompaction', () => {
     expect(telemetryRecords).toContainEqual({
       event: 'compaction_failed',
       properties: expect.objectContaining({
-        error_category: 'summary_generation',
         error_type: 'Error',
       }),
     });

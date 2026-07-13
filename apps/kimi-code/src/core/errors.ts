@@ -5,7 +5,7 @@
  * exposes one.
  */
 
-import { isKimiError } from '@moonshot-ai/agent-core-v2';
+import { isError2 } from '@moonshot-ai/agent-core-v2';
 
 export const CoreErrorCodes = {
   SESSION_NOT_FOUND: 'session.not_found',
@@ -44,23 +44,25 @@ export class CoreError extends Error {
 
 /**
  * Recognizes errors that carry a v1-style string `code`: the facade's own
- * `CoreError` plus the `KimiError` thrown by agent-core-v2 services. v2 reuses
+ * `CoreError` plus the `Error2` thrown by agent-core-v2 services. v2 reuses
  * the v1 code values verbatim (e.g. `session.not_found`), and the TUI matches
  * on those codes, so the guard must see through service errors instead of
  * forcing every call site into a separate fallback branch.
  *
- * v2 errors are identified via `isKimiError` (an `instanceof` guard), so this
+ * v2 errors are identified via `isError2` (an `instanceof` guard), so this
  * does not depend on v2's error `name`. Errors thrown through the node-sdk
  * auth/catalog bridge are a different class reference (same `name`, different
  * `instanceof`), so a string-`code` + `name` fallback keeps recognizing them
- * until that bridge is migrated (TODO(migrate)).
+ * until that bridge is migrated (TODO(migrate)). The `KimiError` name covers
+ * v1 (`@moonshot-ai/agent-core`) errors, which share the same code values —
+ * the CLI still runs v1 paths (`kimi -p`, ACP) whose errors surface here.
  */
 export function isCoreError(value: unknown): value is CoreError {
   if (value instanceof CoreError) return true;
-  if (isKimiError(value)) return true;
+  if (isError2(value)) return true;
   return (
     value instanceof Error &&
     typeof (value as { code?: unknown }).code === 'string' &&
-    (value.name === 'KimiError' || value.name === 'CoreError')
+    (value.name === 'Error2' || value.name === 'CoreError' || value.name === 'KimiError')
   );
 }

@@ -27,7 +27,6 @@ import type {
   GoalSnapshot,
   GoalStatus,
   GoalToolResult,
-  IAgentPromptLegacyService,
   IAgentRPCService,
   ModelCapability,
   PermissionData,
@@ -273,11 +272,24 @@ export interface ResumedSessionState {
 
 /**
  * v1-protocol content parts accepted by `CoreSession.prompt` / `steer` —
- * derived from `IAgentPromptLegacyService.submit` so the facade cannot drift
- * from the service it forwards to.
+ * mirrors the v1 wire `MessageContent` union (`@moonshot-ai/protocol`
+ * message.ts), which apps/kimi-code does not depend on directly; same
+ * mirroring pattern as `SessionWarning` below.
  */
-export type PromptContent = Parameters<IAgentPromptLegacyService['submit']>[0]['content'];
-export type PromptPart = PromptContent[number];
+export type PromptContent = PromptPart[];
+export type PromptPart =
+  | { type: 'text'; text: string }
+  | { type: 'tool_use'; tool_call_id: string; tool_name: string; input: unknown }
+  | { type: 'tool_result'; tool_call_id: string; output: unknown; is_error?: boolean }
+  | { type: 'image'; source: PromptPartMediaSource }
+  | { type: 'video'; source: PromptPartMediaSource }
+  | { type: 'file'; file_id: string; name: string; media_type: string; size: number }
+  | { type: 'thinking'; thinking: string; signature?: string };
+
+type PromptPartMediaSource =
+  | { kind: 'url'; url: string }
+  | { kind: 'base64'; media_type: string; data: string }
+  | { kind: 'file'; file_id: string };
 
 /** Result of `CoreSession.runShellCommand` (the v2 RPC facade's shape). */
 export type ShellCommandResult = Awaited<ReturnType<IAgentRPCService['runShellCommand']>>;

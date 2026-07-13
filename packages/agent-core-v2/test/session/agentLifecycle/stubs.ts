@@ -3,6 +3,7 @@ import type { IAgentScopeHandle } from '#/_base/di/scope';
 import { createHooks } from '#/hooks';
 import {
   type AgentTaskHooks,
+  type AgentTaskStopHookContext,
   IAgentLifecycleService,
 } from '#/session/agentLifecycle/agentLifecycle';
 
@@ -17,14 +18,13 @@ export function makeLifecycleStub(handles: readonly IAgentScopeHandle[] = []): L
   const onDidCreate = new Emitter<IAgentScopeHandle>();
   const onDidCreateMain = new Emitter<IAgentScopeHandle>();
   const onDidDispose = new Emitter<string>();
+  const onDidStopAgentTask = new Emitter<AgentTaskStopHookContext>();
   const byId = new Map(handles.map((h) => [h.id, h]));
 
   const service: IAgentLifecycleService = {
     _serviceBrand: undefined,
-    hooks: createHooks<AgentTaskHooks, keyof AgentTaskHooks>([
-      'onWillStartAgentTask',
-      'onDidStopAgentTask',
-    ]),
+    hooks: createHooks<AgentTaskHooks, keyof AgentTaskHooks>(['onWillStartAgentTask']),
+    onDidStopAgentTask: onDidStopAgentTask.event,
     onDidCreate: onDidCreate.event,
     onDidCreateMain: onDidCreateMain.event,
     onDidDispose: onDidDispose.event,
@@ -35,6 +35,7 @@ export function makeLifecycleStub(handles: readonly IAgentScopeHandle[] = []): L
     },
     ensureMcpReady: () => Promise.resolve(),
     notifyMainCreated: () => {},
+    notifyAgentTaskStopped: () => {},
     fork: async () => {
       throw new Error('not implemented');
     },

@@ -1,8 +1,8 @@
 /**
  * `toolDedupe` domain (L4) — `IAgentToolDedupeService` implementation.
  *
- * Self-wiring plugin: its constructor registers `loop` beforeStep/afterStep
- * hooks and `toolExecutor` onWillExecuteTool/onDidExecuteTool hooks to drive
+ * Self-wiring plugin: its constructor registers `loop` onWillBeginStep/onDidFinishStep
+ * hooks and `toolExecutor` onBeforeExecuteTool/onDidExecuteTool hooks to drive
  * same-step suppression and cross-step repeat reminders, and reports repeat
  * telemetry through `telemetry`. Constructed eagerly at Agent scope so the
  * hooks are installed without any other service injecting it.
@@ -16,7 +16,7 @@ import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
 import { canonicalTelemetryArgs } from '#/_base/utils/canonical-args';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { IAgentLoopService } from '#/agent/loop/loop';
-import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
+import { IAgentToolExecutorService, type ToolCallDupType } from '#/agent/toolExecutor/toolExecutor';
 import type { ContentPart } from '#/app/llmProtocol/message';
 import { IAgentToolDedupeService, type ToolDedupeResult } from './toolDedupe';
 
@@ -80,8 +80,6 @@ interface CheckedToolCall {
   readonly syntheticResult: ToolDedupeResult | null;
 }
 
-type ToolCallDupType = 'same_step' | 'cross_step';
-
 function appendReminder(result: ToolDedupeResult, reminderText: string): ToolDedupeResult {
   const output = result.output;
   let newOutput: string | ContentPart[];
@@ -124,18 +122,18 @@ export class AgentToolDedupeService extends Disposable implements IAgentToolDedu
   constructor(
     @ITelemetryService private readonly telemetry: ITelemetryService,
     @IAgentLoopService loop: IAgentLoopService,
-    @IAgentToolExecutorService toolExecutor: IAgentToolExecutorService,
+    @IAgentToolExecutorService private readonly toolExecutor: IAgentToolExecutorService,
   ) {
     super();
-    loop.hooks.beforeStep.register('toolDedupe', async (ctx, next) => {
+    loop.hooks.onWillBeginStep.register('toolDedupe', async (ctx, next) => {
       this.beginStep(ctx.turnId, ctx.step);
       await next();
     });
-    loop.hooks.afterStep.register('toolDedupe', async (_ctx, next) => {
+    loop.hooks.onDidFinishStep.register('toolDedupe', async (_ctx, next) => {
       this.endStep();
       await next();
     });
-    toolExecutor.hooks.onWillExecuteTool.register('toolDedupe', async (ctx, next) => {
+    toolExecutor.hooks.onBeforeExecuteTool.register('toolDedupe', async (ctx, next) => {
       const checked = this.checkToolCall(ctx.toolCall.id, ctx.toolCall.name, ctx.args);
       if (checked.syntheticResult !== null) {
         ctx.decision = { syntheticResult: checked.syntheticResult };
@@ -218,7 +216,10 @@ export class AgentToolDedupeService extends Disposable implements IAgentToolDedu
     args: unknown,
     dupType: ToolCallDupType,
   ): void {
-    this.telemetry.track('tool_call_dedupe_detected', {
+    // Tag the call so the executor's `tool_call` telemetry can carry dup_type;
+    // both same_step (placeholder path) and cross_step dups reach trackToolCall.
+    this.toolExecutor.recordDupType(toolCallId, dupType);
+    this.telemetry.track2('tool_call_dedup_detected', {
       turn_id: this.activeTurnId ?? 0,
       step_no: this.activeStep,
       tool_call_id: toolCallId,
@@ -276,7 +277,7 @@ export class AgentToolDedupeService extends Disposable implements IAgentToolDedu
     }
 
     if (streak >= 2) {
-      this.telemetry.track('tool_call_repeat', {
+      this.telemetry.track2('tool_call_repeat', {
         tool_name: toolName,
         repeat_count: streak,
         action,

@@ -31,15 +31,7 @@ function createClocks(initial: number = WALL_ANCHOR): ClockHarness {
 }
 
 function spySteer(prompt: IAgentPromptService) {
-  return vi.spyOn(prompt, 'steer').mockImplementation((_message: ContextMessage) => ({
-    removeFromQueue: () => {},
-    launched: Promise.resolve({
-      id: 1,
-      signal: new AbortController().signal,
-      ready: Promise.resolve(),
-      result: Promise.resolve({ type: 'completed' as const, steps: 0, truncated: false }),
-    }),
-  }));
+  return vi.spyOn(prompt, 'inject').mockImplementation(async (_message: ContextMessage) => undefined);
 }
 
 describe('SessionCronService — P1.8 manual tick + SIGUSR1', () => {
@@ -64,6 +56,7 @@ describe('SessionCronService — P1.8 manual tick + SIGUSR1', () => {
       vi.stubEnv('KIMI_CRON_MANUAL_TICK', '1');
       harness = createClocks();
       ctx = createTestAgent(cronServices());
+      ctx.announceMain();
       cron = ctx.get(ISessionCronService);
       prompt = ctx.get(IAgentPromptService);
     });
@@ -104,6 +97,7 @@ describe('SessionCronService — P1.8 manual tick + SIGUSR1', () => {
       vi.stubEnv('KIMI_CRON_POLL_INTERVAL_MS', '50');
       harness = createClocks();
       ctx = createTestAgent(cronServices());
+      ctx.announceMain();
       cron = ctx.get(ISessionCronService);
       prompt = ctx.get(IAgentPromptService);
     });
@@ -141,6 +135,7 @@ describe('SessionCronService — P1.8 manual tick + SIGUSR1', () => {
         vi.stubEnv('KIMI_CRON_MANUAL_TICK', '1');
         listenerCountBeforeCreate = process.listenerCount('SIGUSR1');
         ctx = createTestAgent(cronServices());
+        ctx.announceMain();
         cron = ctx.get(ISessionCronService);
       });
 
@@ -214,6 +209,7 @@ describe('SessionCronService — P1.8 manual tick + SIGUSR1', () => {
         vi.stubEnv('KIMI_CRON_MANUAL_TICK', '1');
         vi.stubEnv('KIMI_CRON_DEBUG', '1');
         ctx = createTestAgent(cronServices());
+        ctx.announceMain();
         cron = ctx.get(ISessionCronService);
       });
 
@@ -250,6 +246,7 @@ describe('SessionCronService — P1.8 manual tick + SIGUSR1', () => {
 
       beforeEach(() => {
         ctx = createTestAgent(cronServices());
+        ctx.announceMain();
         cron = ctx.get(ISessionCronService);
       });
 

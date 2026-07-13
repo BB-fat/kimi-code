@@ -42,7 +42,7 @@ import type { Op } from '#/wire/op';
 import { IAgentWireService } from '#/wire/tokens';
 import { type DomainEvent, IEventBus } from '#/app/event/eventBus';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
-import { IAgentTurnService, type Turn } from '#/agent/turn/turn';
+import { IAgentLoopService, type Turn } from '#/agent/loop/loop';
 
 import { CronCreateTool } from './tools/cron-create';
 import { CronListTool } from './tools/cron-list';
@@ -312,8 +312,8 @@ export class SessionCronServiceImpl extends Disposable implements ISessionCronSe
     const mainHandle = this.agentLifecycle.getHandle('main');
     if (!mainHandle) return;
 
-    const turnService = mainHandle.accessor.get(IAgentTurnService);
-    if (turnService.getActiveTurn() !== undefined) return;
+    const loop = mainHandle.accessor.get(IAgentLoopService);
+    if (loop.status().state === 'running') return;
 
     const now = this.clocks.wallNow();
 
@@ -425,19 +425,19 @@ export class SessionCronServiceImpl extends Disposable implements ISessionCronSe
       toolCalls: [],
       origin,
     };
-    void promptService.steer(message).launched.catch(() => {});
-    this.telemetry.track(CRON_MISSED, { count: tasks.length });
+    void promptService.inject(message).catch(() => {});
+    this.telemetry.track2(CRON_MISSED, { count: tasks.length });
     return undefined;
   }
 
   emitScheduled(task: CronTask): void {
-    this.telemetry.track(CRON_SCHEDULED, {
+    this.telemetry.track2(CRON_SCHEDULED, {
       recurring: task.recurring !== false,
     });
   }
 
   emitDeleted(taskId: string): void {
-    this.telemetry.track(CRON_DELETED, { task_id: taskId });
+    this.telemetry.track2(CRON_DELETED, { task_id: taskId });
   }
 
   // —— fire delivery ——
@@ -481,11 +481,11 @@ export class SessionCronServiceImpl extends Disposable implements ISessionCronSe
       toolCalls: [],
       origin,
     };
-    const buffered = mainHandle.accessor.get(IAgentTurnService).getActiveTurn() !== undefined;
+    const buffered = mainHandle.accessor.get(IAgentLoopService).status().state === 'running';
 
     let launched: Promise<unknown>;
     try {
-      launched = promptService.steer(message).launched;
+      launched = promptService.inject(message);
     } catch (error) {
       this.debugLog(
         `steer threw for task ${task.id}: ${
@@ -502,7 +502,7 @@ export class SessionCronServiceImpl extends Disposable implements ISessionCronSe
     return launched.then(
       () => {
         this.signalCron({ type: 'cron.fired', origin, prompt: task.prompt });
-        this.telemetry.track(CRON_FIRED, {
+        this.telemetry.track2(CRON_FIRED, {
           recurring: task.recurring !== false,
           coalesced_count: ctx.coalescedCount,
           stale: origin.stale,

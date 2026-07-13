@@ -623,13 +623,13 @@ function spineWithCapturedStepHooks(): {
     _serviceBrand: undefined,
     run: async () => ({ type: 'completed' as const, steps: 0, truncated: false }),
     hooks: {
-      beforeStep: {
+      onWillBeginStep: {
         register: (name: string, fn: BeforeStepHook) => {
           beforeStep.set(name, fn);
           return Disposable.None;
         },
       },
-      afterStep: {
+      onDidFinishStep: {
         register: (name: string, fn: AfterStepHook) => {
           afterStep.set(name, fn);
           return Disposable.None;
@@ -637,6 +637,7 @@ function spineWithCapturedStepHooks(): {
       },
       onError: { register: () => Disposable.None },
     },
+    registerLoopErrorHandler: () => Disposable.None,
   } as unknown as IAgentLoopService;
   const reported: unknown[] = [];
   setUnexpectedErrorHandler((err) => {

@@ -21,7 +21,7 @@ import {
   IAgentPermissionModeService,
   IAgentPlanService,
   IAgentProfileService,
-  IAgentPromptLegacyService,
+  IAgentPromptService,
   IAgentRPCService,
   IAgentSwarmService,
   IAgentTaskService,
@@ -141,16 +141,25 @@ export class CoreSession {
 
   // -- Conversation flow ----------------------------------------------------
 
-  // `prompt` stays on the v1 Legacy service for its FIFO queue: a prompt sent
-  // while a turn is running is queued and drained in order. The native
-  // `IAgentRPCService.prompt` returns `undefined` (does not queue) when the
-  // agent is busy or a hook blocks it, which would drop back-to-back input.
+  // `prompt` goes through the v2 prompt queue (`IAgentPromptService.enqueue`):
+  // a prompt sent while a turn is running is queued and drained in order. The
+  // native `IAgentRPCService.prompt` returns `undefined` (does not queue) when
+  // the agent is busy or a hook blocks it, which would drop back-to-back input.
   // Everything else that mutates a turn (`steer`/`cancel`/`runShellCommand`/
   // `undoHistory`/`activateSkill`/`setPermission`/`getContext`/`cancelCompaction`)
   // goes through the native `IAgentRPCService`. The split is intentional.
   async prompt(parts: readonly PromptPart[], options?: { agentId?: string }): Promise<void> {
     const agent = await this.agent(options?.agentId);
-    await agent.accessor.get(IAgentPromptLegacyService).submit({ content: [...parts] });
+    // Same v1-wire → v2-native cast as `steer`: the public surface uses the
+    // v1 protocol parts (identical `text` shape), media parts are not
+    // converted here.
+    await agent.accessor.get(IAgentPromptService).enqueue({
+      message: {
+        role: 'user',
+        content: [...parts] as unknown as ContentPart[],
+        toolCalls: [],
+      },
+    });
   }
 
   async steer(parts: readonly PromptPart[], options?: { agentId?: string }): Promise<void> {

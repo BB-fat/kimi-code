@@ -90,6 +90,8 @@ import {
   IAgentSwarmService,
   AgentSwarmService,
   ITelemetryService,
+  IAgentStepRetryService,
+  IAgentLoopContinuationService,
   IHostTerminalService,
   IAgentToolRegistryService,
   IAgentBuiltinToolsRegistrar,
@@ -114,6 +116,7 @@ import {
   createAppScope,
   resolveBootstrapOptions,
   type IDisposable,
+  type PermissionModeChangedContext,
   type Scope,
   type ScopeSeed,
   type ServiceIdentifier,
@@ -639,7 +642,7 @@ function createSessionSkillCatalog(catalog: SkillCatalog): ISessionSkillCatalog 
     _serviceBrand: undefined,
     catalog,
     ready: Promise.resolve(),
-    onDidChange: Event.None as Event<void>,
+    onDidChange: Event.None as Event<string>,
     load: async () => { },
     reload: async () => { },
   };
@@ -1151,6 +1154,19 @@ export class AgentTestContext {
     return this.agent.accessor.get(id);
   }
 
+  /**
+   * Announce the harness agent as `main` to the real lifecycle. The harness
+   * builds the agent scope directly (bypassing `AgentLifecycleService.create`),
+   * so main-bound services (cron, which binds on `onDidCreateMain` /
+   * `getHandle('main')`) stay unbound unless a test announces it here. Kept
+   * opt-in so other tests' tool registries and timer state match upstream.
+   */
+  announceMain(): void {
+    this.session.accessor
+      .get(IAgentLifecycleService)
+      .notifyMainCreated(this.agent.toHandle() as IAgentScopeHandle);
+  }
+
   get modelResolver(): IModelResolver {
     return this.session.accessor.get(IModelResolver);
   }
@@ -1204,6 +1220,13 @@ export class AgentTestContext {
     // under a real Agent scope (see `AgentLifecycleService.create`).
     this.get(IAgentBuiltinToolsRegistrar);
     this.get(IAgentExternalHooksService);
+    // The step-retry plugin registers its loop error handler at construction;
+    // nothing pulls it lazily, so ignite it the way `AgentLifecycleService`
+    // does, or turns driven directly through `loop.run` would never retry.
+    this.get(IAgentStepRetryService);
+    // Same for the loop-continuation aspect: it only observes `afterStep`, so
+    // without ignition no tool-using turn would ever get its next step.
+    this.get(IAgentLoopContinuationService);
     const tasks = this.get(IAgentTaskService);
     const permission = this.get(IAgentPermissionGate);
     const swarm = this.get(IAgentSwarmService);
@@ -1905,10 +1928,6 @@ function createWorkspaceContextStub(
 
 function createPermissionModeService(initialMode: PermissionMode): IAgentPermissionModeService {
   let mode = initialMode;
-  const emptyHook = {
-    register: () => toDisposable(() => { }),
-    run: () => Promise.resolve(),
-  };
   return {
     _serviceBrand: undefined,
     get mode() {
@@ -1917,9 +1936,7 @@ function createPermissionModeService(initialMode: PermissionMode): IAgentPermiss
     setMode: (nextMode) => {
       mode = nextMode;
     },
-    hooks: {
-      onChanged: emptyHook,
-    } as unknown as IAgentPermissionModeService['hooks'],
+    onDidChangeMode: Event.None as Event<PermissionModeChangedContext>,
   };
 }
 
@@ -1946,8 +1963,8 @@ function createHostTerminalService(): IHostTerminalService {
   return {
     _serviceBrand: undefined,
     spawn: async () => ({
-      onData: Event.None as Event<string>,
-      onExit: Event.None as Event<{ exitCode: number | null }>,
+      onProcessData: Event.None as Event<string>,
+      onProcessExit: Event.None as Event<{ exitCode: number | null }>,
       write: () => { },
       resize: () => { },
       kill: () => { },
@@ -2074,7 +2091,15 @@ function taskNotificationKey(taskId: string, status: string): string {
 function configStateSnapshot(ctx: AgentTestContext): ResumeStateSnapshot['config'] {
   const profile = ctx.get(IAgentProfileService);
   const data = profile.data();
-  const model = profile.resolveModel();
+  // A restored alias may be unresolvable locally (the model is not in this
+  // config.toml); the resume comparison then carries no provider rather than
+  // failing the whole snapshot.
+  let model: ReturnType<IAgentProfileService['resolveModel']>;
+  try {
+    model = profile.resolveModel();
+  } catch {
+    model = undefined;
+  }
   const providerConfig =
     model === undefined ? undefined : ctx.get(IProviderService).get(model.providerName);
   return {
@@ -2088,7 +2113,15 @@ function configStateSnapshot(ctx: AgentTestContext): ResumeStateSnapshot['config
 }
 
 function emptyConfig(): KimiConfig {
-  return configWithProvider({ providers: {} }, MOCK_PROVIDER, undefined);
+  // Tests that bind the cron service to main (via `ctx.announceMain()`) read
+  // the `cron` section synchronously after `config.ready`, so the stub config
+  // must always carry it (production gets it from the section's registered
+  // `defaultValue`). The huge default poll interval keeps auto-tick inert in
+  // tests that do not stub `KIMI_CRON_POLL_INTERVAL_MS` themselves.
+  return {
+    ...configWithProvider({ providers: {} }, MOCK_PROVIDER, undefined),
+    cron: { ...DEFAULT_CRON_CONFIG, pollIntervalMs: 3_600_000 },
+  };
 }
 
 function applyTestAgentOptionsToConfig(config: KimiConfig, options: TestAgentOptions): KimiConfig {

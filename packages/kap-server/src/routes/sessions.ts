@@ -85,8 +85,8 @@ import {
   ISessionLegacyService,
   IEventService,
   IWorkspaceRegistry,
-  isKimiError,
-  KimiError,
+  isError2,
+  Error2,
   toProtocolMessage,
   type ContextMessage,
   type IAgentScopeHandle,
@@ -244,6 +244,7 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
       errors: {
         [ErrorCode.VALIDATION_FAILED]: { detailsSchema },
         [ErrorCode.WORKSPACE_NOT_FOUND]: {},
+        [ErrorCode.FS_PATH_NOT_FOUND]: {},
       },
       description: 'Create a new session',
       tags: ['sessions'],
@@ -297,25 +298,29 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
 
       // Ensure the workspace is registered so `metadata.cwd` is resolvable on
       // read (gap G3 — v2 does not store workDir on the session).
-      const touched = await registry.createOrTouch(workDir);
+      try {
+        const touched = await registry.createOrTouch(workDir);
 
-      const handle = await core.accessor.get(ISessionLifecycleService).create({
-        workDir,
-      });
-      if (typeof body.title === 'string') {
-        await handle.accessor.get(ISessionMetadata).setTitle(body.title);
+        const handle = await core.accessor.get(ISessionLifecycleService).create({
+          workDir,
+        });
+        if (typeof body.title === 'string') {
+          await handle.accessor.get(ISessionMetadata).setTitle(body.title);
+        }
+        const meta = await handle.accessor.get(ISessionMetadata).read();
+        const session = toWireSession(
+          { ...meta, workspaceId: touched.id },
+          touched.root,
+          handle.accessor.get(ISessionActivity).status(),
+        );
+        core.accessor.get(IEventService).publish({
+          type: 'event.session.created',
+          payload: { agentId: 'main', sessionId: session.id, session },
+        });
+        reply.send(okEnvelope(session, req.id));
+      } catch (error) {
+        sendMappedError(reply, req.id, error);
       }
-      const meta = await handle.accessor.get(ISessionMetadata).read();
-      const session = toWireSession(
-        { ...meta, workspaceId: touched.id },
-        touched.root,
-        handle.accessor.get(ISessionActivity).status(),
-      );
-      core.accessor.get(IEventService).publish({
-        type: 'event.session.created',
-        payload: { agentId: 'main', sessionId: session.id, session },
-      });
-      reply.send(okEnvelope(session, req.id));
     },
   );
   app.post(
@@ -704,7 +709,7 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
           // side-channel agent; matches v1's `startBtw` which resumes first.
           const session = await core.accessor.get(ISessionLifecycleService).resume(parsed.id);
           if (session === undefined) {
-            throw new KimiError(
+            throw new Error2(
               ErrorCodes.SESSION_NOT_FOUND,
               `session ${parsed.id} does not exist`,
             );
@@ -718,7 +723,7 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
         if (parsed.action === 'restore') {
           const restored = await core.accessor.get(ISessionLifecycleService).restore(parsed.id);
           if (restored === undefined) {
-            throw new KimiError(ErrorCodes.SESSION_NOT_FOUND, `session ${parsed.id} does not exist`);
+            throw new Error2(ErrorCodes.SESSION_NOT_FOUND, `session ${parsed.id} does not exist`);
           }
           const meta = await restored.accessor.get(ISessionMetadata).read();
           const ctx = restored.accessor.get(ISessionContext);
@@ -736,7 +741,7 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
         // is unknown or its workspace is gone, reported as `session.not_found`.
         const archived = await core.accessor.get(ISessionLifecycleService).resume(parsed.id);
         if (archived === undefined) {
-          throw new KimiError(ErrorCodes.SESSION_NOT_FOUND, `session ${parsed.id} does not exist`);
+          throw new Error2(ErrorCodes.SESSION_NOT_FOUND, `session ${parsed.id} does not exist`);
         }
         await core.accessor.get(ISessionLifecycleService).archive(parsed.id);
         reply.send(okEnvelope({ archived: true }, req.id));
@@ -774,7 +779,7 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
           core.accessor.get(ISessionLifecycleService).get(session_id) !== undefined ||
           (await core.accessor.get(ISessionIndex).get(session_id)) !== undefined;
         if (!exists) {
-          throw new KimiError(ErrorCodes.SESSION_NOT_FOUND, `session ${session_id} does not exist`);
+          throw new Error2(ErrorCodes.SESSION_NOT_FOUND, `session ${session_id} does not exist`);
         }
 
         // The index filters by the child markers (`parent_session_id` +
@@ -1030,7 +1035,7 @@ function resolveSessionStatus(core: Scope, sessionId: string): SessionStatus {
 async function resolveMainAgent(core: Scope, sessionId: string): Promise<IAgentScopeHandle> {
   const session = await core.accessor.get(ISessionLifecycleService).resume(sessionId);
   if (session === undefined) {
-    throw new KimiError(ErrorCodes.SESSION_NOT_FOUND, `session ${sessionId} does not exist`);
+    throw new Error2(ErrorCodes.SESSION_NOT_FOUND, `session ${sessionId} does not exist`);
   }
   return ensureMainAgent(session);
 }
@@ -1115,7 +1120,7 @@ function sendMappedError(
   requestId: string,
   err: unknown,
 ): void {
-  if (isKimiError(err)) {
+  if (isError2(err)) {
     switch (err.code) {
       case 'session.not_found':
       case 'agent.not_found':
@@ -1155,6 +1160,9 @@ function sendMappedError(
         reply.send(
           errEnvelope(ErrorCode.GOAL_OBJECTIVE_TOO_LONG, err.message, requestId, err.stack),
         );
+        return;
+      case ErrorCodes.FS_PATH_NOT_FOUND:
+        reply.send(errEnvelope(ErrorCode.FS_PATH_NOT_FOUND, err.message, requestId, err.stack));
         return;
       case 'request.invalid':
       case 'validation.failed':

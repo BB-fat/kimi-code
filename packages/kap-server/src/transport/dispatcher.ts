@@ -1,92 +1,112 @@
 /**
  * `/api/v2` dispatcher — resolves the scope + Service + method from a request
  * and calls it. No facade: Services are reached directly through the scope
- * tree, and the `actionMap` is the only thing binding a public action to an
- * internal Service.
+ * tree, the channel registry decides which Services are exposed at all, and the
+ * method is invoked by reflection (VS Code's `ProxyChannel.fromService` model).
  */
 
 import {
   ErrorCodes,
   IAgentLifecycleService,
   ISessionLifecycleService,
-  KimiError,
+  Error2,
   type IScopeHandle,
   type Scope,
 } from '@moonshot-ai/agent-core-v2';
 
-import { resolveAction } from './actionMap';
-import type { ActionTarget, ScopeKind, ServiceAction } from './channel';
+import type { ScopeKind } from './channel';
+import { resolveChannel } from './channelRegistry';
 import { assertSerializable } from './errors';
 import { MAIN_AGENT_ID, ensureMainAgent } from './mainAgent';
 
 /**
- * Resolve the scope a request targets. Returns `undefined` when the referenced
- * session / agent does not exist (caller maps to `40401`).
+ * Resolve the scope a request targets. Throws `Error2` when the referenced
+ * session or agent does not exist — `session.not_found` for a missing session,
+ * `agent.not_found` when the session exists but the agent scope is not
+ * materialized (e.g. a subagent created before the last server restart or
+ * session close: its metadata registry entry and wire log persist, but
+ * `resume` only re-materializes the main agent).
  */
 export async function resolveScope(
   core: Scope,
   scopeKind: ScopeKind,
   params: Record<string, string>,
-): Promise<Scope | IScopeHandle | undefined> {
+): Promise<Scope | IScopeHandle> {
   switch (scopeKind) {
     case 'core':
       return core;
     case 'session': {
       const sessionId = params['session_id'] ?? '';
-      return core.accessor.get(ISessionLifecycleService).get(sessionId);
+      const session = core.accessor.get(ISessionLifecycleService).get(sessionId);
+      if (session === undefined) {
+        throw new Error2(ErrorCodes.SESSION_NOT_FOUND, `session ${sessionId} not found`);
+      }
+      return session;
     }
     case 'agent': {
       const sessionId = params['session_id'] ?? '';
       const agentId = params['agent_id'] ?? '';
       const session = core.accessor.get(ISessionLifecycleService).get(sessionId);
-      if (session === undefined) return undefined;
+      if (session === undefined) {
+        throw new Error2(ErrorCodes.SESSION_NOT_FOUND, `session ${sessionId} not found`);
+      }
       if (agentId === MAIN_AGENT_ID) return ensureMainAgent(session);
-      return session.accessor.get(IAgentLifecycleService).getHandle(agentId);
+      const agent = session.accessor.get(IAgentLifecycleService).getHandle(agentId);
+      if (agent === undefined) {
+        throw new Error2(
+          ErrorCodes.AGENT_NOT_FOUND,
+          `agent ${agentId} not found in session ${sessionId}`,
+        );
+      }
+      return agent;
     }
   }
 }
 
 /**
- * Dispatch one call. Throws `KimiError` for expected failures (unknown action,
+ * Dispatch one call. Throws `Error2` for expected failures (unknown service,
  * scope not found, service not in scope, method missing); the route maps them
  * to the envelope. Unexpected errors propagate and become `50001`.
  */
-export async function dispatch(
+export async function resolveService(
   core: Scope,
   scopeKind: ScopeKind,
   params: Record<string, string>,
-  sa: ServiceAction,
-  arg: unknown,
-): Promise<unknown> {
+  serviceName: string,
+): Promise<object> {
   const scope = await resolveScope(core, scopeKind, params);
   if (scope === undefined) {
-    throw new KimiError(
+    throw new Error2(
       ErrorCodes.SESSION_NOT_FOUND,
       `session ${params['session_id'] ?? ''} not found`,
     );
   }
-
-  const target: ActionTarget | undefined = resolveAction(scopeKind, sa);
-  if (target === undefined) {
-    throw new KimiError(ErrorCodes.REQUEST_INVALID, `unknown action: ${sa.resource}:${sa.action}`);
+  const id = resolveChannel(serviceName);
+  if (id === undefined) {
+    throw new Error2(ErrorCodes.REQUEST_INVALID, `unknown service: ${serviceName}`);
   }
-
-  let service: unknown;
   try {
-    service = scope.accessor.get(target.service);
+    return scope.accessor.get(id) as object;
   } catch {
-    throw new KimiError(
+    throw new Error2(
       ErrorCodes.REQUEST_INVALID,
-      `service not available in ${scopeKind} scope: ${sa.resource}`,
+      `service not available in ${scopeKind} scope: ${serviceName}`,
     );
   }
+}
 
-  const member = (service as Record<string, unknown>)[target.method];
+export async function dispatch(
+  core: Scope,
+  scopeKind: ScopeKind,
+  params: Record<string, string>,
+  serviceName: string,
+  method: string,
+  arg: unknown,
+): Promise<unknown> {
+  const service = await resolveService(core, scopeKind, params, serviceName);
+  const member = (service as Record<string, unknown>)[method];
   if (member === undefined) {
-    throw new KimiError(
-      ErrorCodes.REQUEST_INVALID,
-      `method not found: ${sa.resource}:${sa.action}`,
-    );
+    throw new Error2(ErrorCodes.REQUEST_INVALID, `method not found: ${serviceName}.${method}`);
   }
 
   // Property read (e.g. `mode`, `rules`, `isActive`) — return as-is.

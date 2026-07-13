@@ -209,7 +209,7 @@ describe('AgentLifecycleService', () => {
     ix.stub(IAgentToolExecutorService, {
       _serviceBrand: undefined,
       hooks: {
-        onWillExecuteTool: { register: () => ({ dispose: () => {} }) },
+        onBeforeExecuteTool: { register: () => ({ dispose: () => {} }) },
         onDidExecuteTool: { register: () => ({ dispose: () => {} }) },
       },
     } as unknown as IAgentToolExecutorService);

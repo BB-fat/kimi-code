@@ -5,7 +5,7 @@
  * API. Coding the print-mode driver against these narrow interfaces — instead of
  * the concrete SDK classes — lets the same driver run on either the v1 engine
  * (`createKimiHarness`, the default) or the experimental agent-core-v2 engine
- * (`createPromptHarnessV2`, gated by `KIMI_MODEL_EXPERIMENT_FLAG`). Both the
+ * (`createPromptHarnessV2`, gated by `KIMI_CODE_EXPERIMENTAL_FLAG`). Both the
  * v1 `KimiHarness` / `Session` and the v2 harness structurally satisfy these
  * interfaces, so no adapter wrappers are needed on the v1 path.
  */
@@ -16,6 +16,7 @@ import type {
   CreateGoalInput,
   CreateSessionOptions,
   Event,
+  GetCronTasksResult,
   GoalSnapshot,
   GoalToolResult,
   KimiAuthFacade,
@@ -58,6 +59,8 @@ export interface PromptSession {
   onEvent(listener: (event: Event) => void): Unsubscribe;
   prompt(input: string | PromptInput): Promise<void>;
   waitForBackgroundTasksOnPrint(): Promise<void>;
+  handlePrintMainTurnCompleted?(): Promise<'finish' | 'continue'>;
   createGoal(input: CreateGoalInput): Promise<GoalSnapshot>;
   getGoal(): Promise<GoalToolResult>;
+  getCronTasks(): Promise<GetCronTasksResult>;
 }

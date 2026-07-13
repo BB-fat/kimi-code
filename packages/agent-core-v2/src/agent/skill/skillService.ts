@@ -21,11 +21,11 @@ import type { ContextMessage, SkillActivationOrigin } from '#/agent/contextMemor
 import { renderUserSlashSkillPrompt } from './prompt';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { Disposable } from '#/_base/di/lifecycle';
-import { ErrorCodes, KimiError } from '#/errors';
+import { ErrorCodes, Error2 } from '#/errors';
 import { isUserActivatableSkillType, type SkillDefinition } from '#/app/skillCatalog/types';
 import { IAgentPromptService } from '#/agent/prompt/prompt';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
-import type { Turn } from '#/agent/turn/turn';
+import type { Turn } from '#/agent/loop/loop';
 import { IAgentWireService } from '#/wire/tokens';
 import type { IWireService } from '#/wire/wireService';
 import { IAgentSkillService, type SkillActivationInput } from './skill';
@@ -49,10 +49,10 @@ export class AgentSkillService extends Disposable implements IAgentSkillService 
     await this.skillCatalog.ready;
     const skill = this.skillCatalog.catalog.getSkill(input.name);
     if (skill === undefined) {
-      throw new KimiError(ErrorCodes.SKILL_NOT_FOUND, `Skill "${input.name}" was not found`);
+      throw new Error2(ErrorCodes.SKILL_NOT_FOUND, `Skill "${input.name}" was not found`);
     }
     if (!isUserActivatableSkillType(skill.metadata.type)) {
-      throw new KimiError(
+      throw new Error2(
         ErrorCodes.SKILL_TYPE_UNSUPPORTED,
         `Skill "${skill.name}" cannot be activated by the user`,
       );
@@ -87,7 +87,7 @@ export class AgentSkillService extends Disposable implements IAgentSkillService 
       content,
     );
     if (turn === undefined) {
-      throw new KimiError(
+      throw new Error2(
         ErrorCodes.TURN_AGENT_BUSY,
         'Cannot activate skill while another turn is active',
       );
@@ -113,7 +113,7 @@ export class AgentSkillService extends Disposable implements IAgentSkillService 
       toolCalls: [],
       origin,
     };
-    return this.prompt.prompt(message);
+    return (await this.prompt.enqueue({ message })).launched;
   }
 
   private renderSkillPrompt(skill: SkillDefinition, rawArgs: string): string {
@@ -123,12 +123,12 @@ export class AgentSkillService extends Disposable implements IAgentSkillService 
   }
 
   private publishActivation(origin: SkillActivationOrigin): void {
-    this.telemetry.track('skill_invoked', {
+    this.telemetry.track2('skill_invoked', {
       skill_name: origin.skillName,
       trigger: origin.trigger,
     });
     if (origin.skillType === 'flow') {
-      this.telemetry.track('flow_invoked', {
+      this.telemetry.track2('flow_invoked', {
         flow_name: origin.skillName,
       });
     }

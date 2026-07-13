@@ -10,7 +10,7 @@ import { Event } from '#/_base/event';
 import { userCancellationReason } from '#/_base/utils/abort';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import { IAgentProfileService, type ProfileData } from '#/agent/profile/profile';
-import { IAgentTurnService } from '#/agent/turn/turn';
+import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentUserToolService } from '#/agent/userTool/userTool';
 import { IEventBus, type DomainEvent } from '#/app/event/eventBus';
 import { IAgentProfileCatalogService } from '#/app/agentProfileCatalog/agentProfileCatalog';
@@ -1099,10 +1099,10 @@ describe('SessionSwarmService metadata compatibility', () => {
       'agent-existing',
       agentHandle('agent-existing', lifecycle, eventBus, {}, new Map([
         [
-          IAgentTurnService,
+          IAgentLoopService,
           {
             _serviceBrand: undefined,
-            getActiveTurn: () => ({ id: 1 }),
+            status: () => ({ state: 'running', activeTurnId: 1, pendingTurnIds: [], hasPendingRequests: true }),
           },
         ],
       ])),
@@ -1161,13 +1161,11 @@ function lifecycleStub(
   handles: Map<string, IAgentScopeHandle>,
   eventBus: IEventBus,
 ): IAgentLifecycleService {
-  const hooks = createHooks<AgentTaskHooks, keyof AgentTaskHooks>([
-    'onWillStartAgentTask',
-    'onDidStopAgentTask',
-  ]);
+  const hooks = createHooks<AgentTaskHooks, keyof AgentTaskHooks>(['onWillStartAgentTask']);
   const lifecycle = {
     _serviceBrand: undefined,
     hooks,
+    onDidStopAgentTask: Event.None,
     onDidCreate: Event.None,
     onDidCreateMain: Event.None,
     onDidDispose: Event.None,
@@ -1184,6 +1182,7 @@ function lifecycleStub(
     }),
     ensureMcpReady: async () => {},
     notifyMainCreated: () => {},
+    notifyAgentTaskStopped: () => {},
     fork: vi.fn(),
     run: vi.fn(async (agentId: string) => ({
       agentId,
@@ -1219,7 +1218,7 @@ function agentHandle(
     _serviceBrand: undefined,
     mode: 'auto',
     setMode: () => {},
-    hooks: createHooks(['onChanged']),
+    onDidChangeMode: Event.None,
   } as IAgentPermissionModeService;
   return {
     id,
@@ -1230,11 +1229,11 @@ function agentHandle(
         if (service !== undefined) return service;
         if (serviceId === IAgentProfileService) return profile;
         if (serviceId === IAgentPermissionModeService) return permissionMode;
-        if (serviceId === IAgentTurnService) {
+        if (serviceId === IAgentLoopService) {
           return {
             _serviceBrand: undefined,
-            getActiveTurn: () => undefined,
-          } as IAgentTurnService;
+            status: () => ({ state: 'idle', pendingTurnIds: [], hasPendingRequests: false }),
+          } as unknown as IAgentLoopService;
         }
         if (serviceId === IAgentUserToolService) return userToolServiceStub();
         if (serviceId === IEventBus) return eventBus;

@@ -28,6 +28,11 @@ export interface IWorkspaceRegistry {
 
   list(): Promise<readonly Workspace[]>;
   get(id: string): Promise<Workspace | undefined>;
+  /**
+   * Register (or refresh `lastOpenedAt` for) a workspace rooted at `root`.
+   * Throws `fs.path_not_found` when `root` is missing or not a directory —
+   * callers opening a session must ensure the directory exists first.
+   */
   createOrTouch(root: string, name?: string): Promise<Workspace>;
   update(id: string, patch: WorkspaceUpdate): Promise<Workspace | undefined>;
   delete(id: string): Promise<void>;

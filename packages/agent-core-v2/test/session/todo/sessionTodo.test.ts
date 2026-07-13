@@ -126,6 +126,7 @@ function makeFakeAgent(agentId: string, options: FakeAgentOptions = {}): FakeAge
       }
       // Replay is silent: subscribers are NOT notified. onRestored fires after.
       for (const h of restoredHandlers) h();
+      return { unknownRecords: 0 };
     },
     signal: () => {},
     flush: async () => {},
@@ -172,7 +173,9 @@ function makeFakeAgent(agentId: string, options: FakeAgentOptions = {}): FakeAge
     reminderProviders,
     appended,
     subscribed: () => subscribedCount,
-    replay: (records) => wireStub.replay(...records),
+    replay: async (records) => {
+      await wireStub.replay(...records);
+    },
   };
 }
 

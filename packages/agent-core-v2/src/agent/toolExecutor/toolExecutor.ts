@@ -2,14 +2,14 @@
  * `toolExecutor` domain (L3) — Agent-scope tool execution contract.
  *
  * Defines the public execution surface for provider tool calls, will/did
- * execution hooks, tool-call result settlement, and preflight description
- * extension points. Bound at Agent scope.
+ * execution hooks, tool-call result settlement, duplicate-call tagging for
+ * telemetry, and preflight description extension points. Bound at Agent scope.
  */
 
 import { createDecorator } from '#/_base/di/instantiation';
 import type { IDisposable } from '#/_base/di/lifecycle';
 import type { ToolResult } from '#/agent/tool/toolContract';
-import type { ToolDidExecuteContext, ToolWillExecuteContext } from '#/agent/tool/toolHooks';
+import type { ToolDidExecuteContext, ToolBeforeExecuteContext } from '#/agent/tool/toolHooks';
 import type { ToolCall } from '#/app/llmProtocol/message';
 import type { OrderedHookSlot } from '#/hooks';
 
@@ -34,15 +34,26 @@ export interface ToolExecutionResult {
 export type MissingToolDescriber = (toolName: string) => string | undefined;
 export type UnavailableToolDescriber = (toolName: string) => string | undefined;
 
+/** How a duplicate tool call relates to its original (dedupe telemetry). */
+export type ToolCallDupType = 'same_step' | 'cross_step';
+
 export interface IAgentToolExecutorService {
   readonly _serviceBrand: undefined;
 
   execute(calls: ToolCall[], options: ToolExecutorExecuteOptions): AsyncIterable<ToolExecutionResult>;
 
   readonly hooks: {
-    readonly onWillExecuteTool: OrderedHookSlot<ToolWillExecuteContext>;
+    readonly onBeforeExecuteTool: OrderedHookSlot<ToolBeforeExecuteContext>;
     readonly onDidExecuteTool: OrderedHookSlot<ToolDidExecuteContext>;
   };
+
+  /**
+   * Record that a tool call is a duplicate so `tool_call` telemetry can tag
+   * it. Written by the `toolDedupe` plugin (which already injects this
+   * service — injecting the plugin here would cycle); the executor reads and
+   * clears the entry when the call's telemetry fires, defaulting to 'normal'.
+   */
+  recordDupType(toolCallId: string, dupType: ToolCallDupType): void;
 
   /**
    * Single-slot hook for the "registered but currently unavailable" preflight

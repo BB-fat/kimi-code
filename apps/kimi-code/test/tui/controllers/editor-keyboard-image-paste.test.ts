@@ -25,6 +25,7 @@ import {
 } from '#/tui/controllers/editor-keyboard';
 import { ImageAttachmentStore } from '#/tui/utils/image-attachment-store';
 import { parseImageMeta } from '#/utils/image/image-mime';
+import { setConfiguredMaxImageEdgePx } from '@moonshot-ai/agent-core-v2';
 
 // vitest hoists vi.mock/vi.hoisted above the imports above, so the mock still
 // applies to the editor-keyboard module that pulls in readClipboardMedia.
@@ -149,6 +150,28 @@ describe('clipboard image paste compression', () => {
     const dims = parseImageMeta(att.bytes);
     expect(dims).not.toBeNull();
     expect(Math.max(dims!.width, dims!.height)).toBeLessThanOrEqual(3000);
+  });
+
+  it('honors the configured [image] max_edge_px when pasting', async () => {
+    setConfiguredMaxImageEdgePx(800);
+    try {
+      const big = await solidPng(3600, 1800);
+      readClipboardMedia.mockResolvedValue({ kind: 'image', bytes: big, mimeType: 'image/png' });
+
+      const { store, pasteImage } = createPasteHarness();
+      await pasteImage();
+
+      const att = store.get(1);
+      if (att?.kind !== 'image') throw new Error('expected image attachment');
+      // The [image] config seam — not the built-in 2000px — drives ingestion.
+      expect(Math.max(att.width, att.height)).toBe(800);
+      expect(att.placeholder).toContain('800×400');
+      const dims = parseImageMeta(att.bytes);
+      expect(dims).not.toBeNull();
+      expect(Math.max(dims!.width, dims!.height)).toBe(800);
+    } finally {
+      setConfiguredMaxImageEdgePx(undefined);
+    }
   });
 
   it('records and persists the pre-compression original for an oversized paste', async () => {

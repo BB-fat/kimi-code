@@ -12,6 +12,9 @@ import {
 } from '#/_base/di/scope';
 import { createScopedTestHost, stubPair } from '#/_base/di/test';
 import { encodeWorkDirKey } from '#/_base/utils/workdir-slug';
+import { ErrorCodes, Error2 } from '#/errors';
+import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
+import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { JsonAtomicDocumentStore } from '#/persistence/backends/node-fs/atomicDocumentStore';
 import { FileStorageService } from '#/persistence/backends/node-fs/fileStorageService';
 import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
@@ -61,6 +64,7 @@ describe('WorkspaceRegistryService (file-backed)', () => {
     const host = createScopedTestHost([
       stubPair(IFileSystemStorageService, fileStorage),
       stubPair(IAtomicDocumentStore, new JsonAtomicDocumentStore(fileStorage)),
+      stubPair(IHostFileSystem, new HostFileSystem()),
     ]);
     currentHost = host;
     return host.app.accessor.get(IWorkspaceRegistry);
@@ -166,6 +170,32 @@ describe('WorkspaceRegistryService (file-backed)', () => {
 
     await build().delete(created.id);
     expect(await restart().get(created.id)).toBeUndefined();
+  });
+
+  it('rejects createOrTouch when the root directory does not exist', async () => {
+    const missing = join(homeDir, 'never-created');
+    await expect(build().createOrTouch(missing)).rejects.toMatchObject({
+      code: ErrorCodes.FS_PATH_NOT_FOUND,
+    });
+    // The phantom root must not be cataloged.
+    expect(await build().list()).toEqual([]);
+  });
+
+  it('rejects createOrTouch when the root is not a directory', async () => {
+    const file = join(homeDir, 'a-file.txt');
+    await fsp.writeFile(file, 'hi', 'utf8');
+    await expect(build().createOrTouch(file)).rejects.toMatchObject({
+      code: ErrorCodes.FS_PATH_NOT_FOUND,
+    });
+    expect(await build().list()).toEqual([]);
+  });
+
+  it('rejects createOrTouch when a parent of the root is not a directory', async () => {
+    const file = join(homeDir, 'a-file.txt');
+    await fsp.writeFile(file, 'hi', 'utf8');
+    await expect(build().createOrTouch(join(file, 'child'))).rejects.toMatchObject({
+      code: ErrorCodes.FS_PATH_NOT_FOUND,
+    });
   });
 
   it('collapses duplicate registered entries for the same root, preferring the canonical id', async () => {

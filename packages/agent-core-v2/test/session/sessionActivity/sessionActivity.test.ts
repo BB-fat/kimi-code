@@ -5,39 +5,29 @@ import type { ServiceIdentifier, ServicesAccessor } from '#/_base/di/instantiati
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { type IAgentScopeHandle, LifecycleScope } from '#/_base/di/scope';
 import { TestInstantiationService } from '#/_base/di/test';
+import { Event } from '#/_base/event';
 import { createHooks } from '#/hooks';
 import {
   type AgentTaskHooks,
+  type AgentTaskStopHookContext,
   IAgentLifecycleService,
 } from '#/session/agentLifecycle/agentLifecycle';
 import { ISessionInteractionService, type Interaction, type InteractionKind } from '#/session/interaction/interaction';
 import { ISessionActivity } from '#/session/sessionActivity/sessionActivity';
 import { SessionActivity } from '#/session/sessionActivity/sessionActivityService';
-import { IAgentTurnService, type Turn } from '#/agent/turn/turn';
-import { stubTurn } from '../../agent/turn/stubs';
+import { IAgentLoopService } from '#/agent/loop/loop';
+import { stubLoopWithHooks } from '../../agent/loop/stubs';
 
-function makeTurn(id: number): Turn {
-  return {
-    id,
-    signal: new AbortController().signal,
-    ready: Promise.resolve(),
-    result: Promise.resolve({ type: 'completed', steps: 0, truncated: false }),
-  };
+function makeTurnService(active: boolean): IAgentLoopService {
+  const base = stubLoopWithHooks({ hasActiveTurn: active });
+  if (active) base.startTurn();
+  return base;
 }
 
-function makeTurnService(active: boolean): IAgentTurnService {
-  const base = stubTurn();
-  const activeTurn = active ? makeTurn(1) : undefined;
-  return {
-    ...base,
-    getActiveTurn: () => activeTurn,
-  };
-}
-
-function makeAccessor(turn: IAgentTurnService): ServicesAccessor {
+function makeAccessor(turn: IAgentLoopService): ServicesAccessor {
   return {
     get<T>(id: ServiceIdentifier<T>): T {
-      if (id === (IAgentTurnService as unknown as ServiceIdentifier<T>)) {
+      if (id === (IAgentLoopService as unknown as ServiceIdentifier<T>)) {
         return turn as unknown as T;
       }
       throw new Error(`unexpected service request: ${String(id)}`);
@@ -58,14 +48,13 @@ function handle(id: string, active: boolean): IAgentScopeHandle {
 function lifecycle(handles: readonly IAgentScopeHandle[]): IAgentLifecycleService {
   return {
     _serviceBrand: undefined,
-    hooks: createHooks<AgentTaskHooks, keyof AgentTaskHooks>([
-      'onWillStartAgentTask',
-      'onDidStopAgentTask',
-    ]),
+    hooks: createHooks<AgentTaskHooks, keyof AgentTaskHooks>(['onWillStartAgentTask']),
+    onDidStopAgentTask: Event.None as Event<AgentTaskStopHookContext>,
     onDidCreate: () => ({ dispose: () => {} }),
     onDidDispose: () => ({ dispose: () => {} }),
     onDidCreateMain: () => ({ dispose: () => {} }),
     notifyMainCreated: () => {},
+    notifyAgentTaskStopped: () => {},
     create: () => Promise.resolve(handles[0]!),
     ensureMcpReady: () => Promise.resolve(),
     fork: () => Promise.resolve(handles[0]!),

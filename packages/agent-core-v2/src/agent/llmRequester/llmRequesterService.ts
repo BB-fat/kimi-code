@@ -35,6 +35,7 @@ import {
   APIConnectionError,
   APIContextOverflowError,
   APIEmptyResponseError,
+  APIProviderOverloadedError,
   APIStatusError,
   APITimeoutError,
   isContextOverflowStatusError,
@@ -44,13 +45,14 @@ import {
 import { type Message } from '#/app/llmProtocol/message';
 import { type ThinkingEffort } from '#/app/llmProtocol/thinkingEffort';
 import { type Tool } from '#/app/llmProtocol/tool';
-import { emptyUsage, type TokenUsage } from '#/app/llmProtocol/usage';
+import { emptyUsage, inputTotal, type TokenUsage } from '#/app/llmProtocol/usage';
 import { ILogService, type LogContext } from '#/_base/log/log';
 import type { Model, LLMEvent as ModelRequestEvent } from '#/app/model/modelInstance';
 import type { KimiModelOverrides } from '#/app/model/modelOverrides';
 import { MODELS_SECTION, type ModelsSection } from '#/app/model/model';
 import { applyCompletionBudget, resolveCompletionBudget } from '#/app/model/completionBudget';
 import type { Protocol } from '#/app/protocol/protocol';
+import type { ApiErrorEvent } from '#/app/telemetry/events';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { IAgentWireService } from '#/wire/tokens';
 import type { IWireService } from '#/wire/wireService';
@@ -74,6 +76,7 @@ import {
   type LlmRequestPayload,
   type LlmRequestToolSchema,
 } from './llmRequestOps';
+import { unwrapErrorCause } from '#/errors';
 import {
   DEFAULT_MAX_RETRY_ATTEMPTS,
   isAbortError,
@@ -233,15 +236,34 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     signal: AbortSignal | undefined,
   ): void {
     if (isAbortError(error) || signal?.aborted === true) return;
-    const properties: Record<string, unknown> = {
+    const modelAlias = this.profile.data().modelAlias;
+    // v1 parity: `model` carries the resolved model id with `alias` alongside,
+    // and both protocol keys carry the resolved model's protocol (v2 has no
+    // separate provider type). Resolution must never throw.
+    const model = this.tryGetProvider();
+    const properties: ApiErrorEvent = {
       error_type: apiErrorType(error),
-      model: this.profile.data().modelAlias ?? 'unknown',
+      model: model?.id ?? modelAlias ?? 'unknown',
+      alias: modelAlias,
+      provider_type: model?.protocol,
+      protocol: model?.protocol,
       retryable: isRetryableGenerateError(error),
       duration_ms: Math.max(0, Date.now() - startedAt),
     };
     const statusCode = apiStatusCode(error);
     if (statusCode !== undefined) properties['status_code'] = statusCode;
-    this.telemetry.track('api_error', properties);
+    // v1 parity: the current turn's accumulated total input tokens.
+    const currentTurn = this.usage.status().currentTurn;
+    if (currentTurn !== undefined) properties['input_tokens'] = inputTotal(currentTurn);
+    this.telemetry.track2('api_error', properties);
+  }
+
+  private tryGetProvider(): Model | undefined {
+    try {
+      return this.profile.getProvider();
+    } catch {
+      return undefined;
+    }
   }
 
   private async runRequest(
@@ -323,7 +345,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     try {
       return await run(false);
     } catch (error) {
-      if (signal?.aborted === true || !isRecoverableRequestStructureError(error)) throw error;
+      if (signal?.aborted === true || !isRecoverableRequestStructureError(unwrapErrorCause(error))) throw error;
       signal?.throwIfAborted();
       this.log.warn('provider rejected request structure; resending with strict projection', {
         model: request.model.name,
@@ -560,27 +582,43 @@ function fingerprint(content: string): string {
 }
 
 function apiErrorType(error: unknown): string {
-  if (error instanceof APIContextOverflowError) return 'context_overflow';
-  if (error instanceof APIStatusError) {
-    if (isContextOverflowStatusError(error.statusCode, error.message)) return 'context_overflow';
-    if (error.statusCode === 429) return 'rate_limit';
-    if (error.statusCode === 401 || error.statusCode === 403) return 'auth';
-    if (error.statusCode >= 500) return '5xx_server';
-    if (error.statusCode >= 400) return '4xx_client';
+  // Errors crossing the model boundary are coded `Error2`s with the raw
+  // provider error as `cause`; classify on the raw shape when available.
+  const raw = unwrapErrorCause(error);
+  if (raw instanceof APIContextOverflowError) return 'context_overflow';
+  if (raw instanceof APIProviderOverloadedError) return 'overloaded';
+  if (raw instanceof APIStatusError) {
+    if (isContextOverflowStatusError(raw.statusCode, raw.message)) return 'context_overflow';
+    if (raw.statusCode === 429) return 'rate_limit';
+    if (raw.statusCode === 529) return 'overloaded';
+    if (raw.statusCode === 401 || raw.statusCode === 403) return 'auth';
+    if (raw.statusCode >= 500) return '5xx_server';
+    if (raw.statusCode >= 400) return '4xx_client';
   }
-  if (error instanceof APIConnectionError) return 'network';
-  if (error instanceof APITimeoutError) return 'timeout';
-  if (error instanceof APIEmptyResponseError) return 'empty_response';
+  if (raw instanceof APIConnectionError) return 'network';
+  if (raw instanceof APITimeoutError) return 'timeout';
+  if (raw instanceof APIEmptyResponseError) return 'empty_response';
   return 'other';
 }
 
 function apiStatusCode(error: unknown): number | undefined {
-  if (error instanceof APIStatusError) return error.statusCode;
-  if (typeof error !== 'object' || error === null) return undefined;
-  const statusCode = (error as Record<string, unknown>)['statusCode'];
-  if (typeof statusCode === 'number') return statusCode;
-  const status = (error as Record<string, unknown>)['status'];
-  return typeof status === 'number' ? status : undefined;
+  const raw = unwrapErrorCause(error);
+  if (raw instanceof APIStatusError) return raw.statusCode;
+  if (typeof raw === 'object' && raw !== null) {
+    const statusCode = (raw as Record<string, unknown>)['statusCode'];
+    if (typeof statusCode === 'number') return statusCode;
+    const status = (raw as Record<string, unknown>)['status'];
+    if (typeof status === 'number') return status;
+  }
+  // Boundary-translated errors carry the HTTP status in `details`.
+  if (typeof error === 'object' && error !== null) {
+    const details = (error as Record<string, unknown>)['details'];
+    if (typeof details === 'object' && details !== null) {
+      const statusCode = (details as Record<string, unknown>)['statusCode'];
+      if (typeof statusCode === 'number') return statusCode;
+    }
+  }
+  return undefined;
 }
 
 registerScopedService(

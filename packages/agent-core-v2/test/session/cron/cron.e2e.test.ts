@@ -1,6 +1,6 @@
 /**
  * Session-level cron end-to-end smoke: exercises the full
- * `CronCreateTool → SessionCronService → agent.turn.steer` pipeline
+ * `CronCreateTool → SessionCronService → agent.prompt.inject` pipeline
  * through the real `AgentTestContext`, with Date.now controlled by
  * the test so the `coalescedCount = 3` calibration after a 15-minute advance is
  * deterministic regardless of host TZ.
@@ -58,6 +58,7 @@ describe('Cron — session E2E (P1.9)', () => {
     vi.stubEnv('KIMI_CRON_POLL_INTERVAL_MS', '0');
     harness = createClocks();
     ctx = createTestAgent(cronServices());
+    ctx.announceMain();
     cron = ctx.get(ISessionCronService);
     prompt = ctx.get(IAgentPromptService);
     await cron.start();
@@ -80,17 +81,9 @@ describe('Cron — session E2E (P1.9)', () => {
       readonly content: readonly unknown[];
       readonly origin: unknown;
     }> = [];
-    vi.spyOn(prompt, 'steer').mockImplementation((message: ContextMessage) => {
+    vi.spyOn(prompt, 'inject').mockImplementation(async (message: ContextMessage) => {
       steerCalls.push({ content: message.content, origin: message.origin });
-      return {
-        removeFromQueue: () => {},
-        launched: Promise.resolve({
-          id: 1,
-          signal: new AbortController().signal,
-          ready: Promise.resolve(),
-          result: Promise.resolve({ type: 'completed' as const, steps: 0, truncated: false }),
-        }),
-      };
+      return undefined;
     });
 
     // Schedule via the full tool surface — the scheduling path goes

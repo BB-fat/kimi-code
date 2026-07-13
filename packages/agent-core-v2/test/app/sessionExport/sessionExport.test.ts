@@ -26,7 +26,7 @@ import {
   type SessionLifecycleHooks,
 } from '#/app/sessionLifecycle/sessionLifecycle';
 import { IWorkspaceRegistry } from '#/app/workspaceRegistry/workspaceRegistry';
-import { KimiError } from '#/errors';
+import { Error2 } from '#/errors';
 import { createHooks } from '#/hooks';
 import {
   type AgentTaskHooks,
@@ -150,10 +150,10 @@ describe('sessionExport', () => {
         version: '1.0.0-test',
       }),
     ).rejects.toMatchObject({
-      name: 'KimiError',
+      name: 'Error2',
       code: 'session.not_found',
       details: { sessionId: 'ses_missing' },
-    } satisfies Partial<KimiError>);
+    } satisfies Partial<Error2>);
   });
 
   it('flushes live session and agent state before packaging', async () => {
@@ -414,16 +414,15 @@ function stubSessionMetadata(meta: SessionMeta): ISessionMetadata {
 function stubAgentLifecycle(agents: readonly IAgentScopeHandle[]): IAgentLifecycleService {
   return {
     _serviceBrand: undefined,
-    hooks: createHooks<AgentTaskHooks, keyof AgentTaskHooks>([
-      'onWillStartAgentTask',
-      'onDidStopAgentTask',
-    ]),
+    hooks: createHooks<AgentTaskHooks, keyof AgentTaskHooks>(['onWillStartAgentTask']),
+    onDidStopAgentTask: noopEvent,
     onDidCreate: noopEvent,
     onDidCreateMain: noopEvent,
     onDidDispose: noopEvent,
     create: async () => agents[0]!,
     ensureMcpReady: async () => {},
     notifyMainCreated: () => {},
+    notifyAgentTaskStopped: () => {},
     fork: async () => agents[0]!,
     run: async () => {
       throw new Error('run should not be called by session export');
@@ -445,8 +444,8 @@ function stubAgentWire(flush: () => Promise<void> = async () => {}): IAgentWireR
     flush,
     close: async () => {},
     hooks: {
-      onRestoredRecord: { run: async () => {} },
-      onResumeEnded: { run: async () => {} },
+      onDidRestoreRecord: { run: async () => {} },
     } as unknown as IAgentWireRecordService['hooks'],
+    onDidFinishResume: noopEvent,
   };
 }

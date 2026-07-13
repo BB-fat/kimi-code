@@ -11,6 +11,7 @@ import {
   IAgentLifecycleService,
   IEventBus,
   IEventService,
+  ISessionActivity,
   ISessionInteractionService,
   ISessionLifecycleService,
   SessionInteractionService,
@@ -76,6 +77,15 @@ class FakeLifecycle {
   readonly handles: FakeAgentHandle[] = [];
   /** Real interaction kernel — served at the session accessor. */
   readonly interactions = new SessionInteractionService();
+  baseStatus: 'idle' | 'running' = 'idle';
+  readonly activity = {
+    status: () => {
+      if (this.interactions.listPending('approval').length > 0) return 'awaiting_approval';
+      if (this.interactions.listPending('question').length > 0) return 'awaiting_question';
+      return this.baseStatus;
+    },
+    isIdle: () => this.activity.status() === 'idle',
+  };
   private createHandlers: Array<(h: IScopeHandle) => void> = [];
   private disposeHandlers: Array<(id: string) => void> = [];
   list(): readonly FakeAgentHandle[] {
@@ -117,6 +127,7 @@ function makeCore(sessions: Map<string, FakeLifecycle>, eventBus = new FakeEvent
             const sessionAccessor = {
               get: (t: unknown) => {
                 if (t === IAgentLifecycleService) return lifecycle;
+                if (t === ISessionActivity) return lifecycle.activity;
                 if (t === ISessionInteractionService) return lifecycle.interactions;
                 return undefined;
               },
@@ -178,10 +189,11 @@ describe('SessionEventBroadcaster', () => {
     main.bus.emit(agentEvent('turn.ended', { turnId: 1 }));
     await bc.getCursor('s1'); // drain
 
-    // `turn.started` now also emits a durable `event.session.status_changed`
-    // ahead of it (so the running status is journaled), hence three durable
-    // events: status_changed, turn.started, turn.ended.
-    expect(envelopes.map((e) => e.seq)).toEqual([1, 2, 3]);
+    // `turn.started` emits a durable `event.session.status_changed(running)`
+    // ahead of it and `turn.ended` emits a durable
+    // `event.session.status_changed(idle)` after it, hence four durable events:
+    // status_changed, turn.started, turn.ended, status_changed.
+    expect(envelopes.map((e) => e.seq)).toEqual([1, 2, 3, 4]);
     expect(envelopes.every((e) => e.epoch === envelopes[0]!.epoch)).toBe(true);
     expect(envelopes[0]!.volatile).toBeUndefined();
   });
@@ -220,10 +232,11 @@ describe('SessionEventBroadcaster', () => {
 
     const result = await bc.getBufferedSince('s1', { seq: 1 });
     expect(result.resyncRequired).toBe(false);
-    // seq 1 is the durable status_changed (emitted ahead of turn.started);
-    // events after it are turn.started (2) and turn.ended (3).
-    expect(result.events.map((e) => e.seq)).toEqual([2, 3]);
-    expect(result.currentSeq).toBe(3);
+    // seq 1 is the durable status_changed(running) (emitted ahead of
+    // turn.started); events after it are turn.started (2), turn.ended (3) and
+    // the durable status_changed(idle) (4) emitted on turn end.
+    expect(result.events.map((e) => e.seq)).toEqual([2, 3, 4]);
+    expect(result.currentSeq).toBe(4);
   });
 
   it('returns buffer_overflow when the gap exceeds the cap', async () => {
@@ -234,11 +247,11 @@ describe('SessionEventBroadcaster', () => {
     await bc.subscribe('s1', target);
 
     for (let i = 0; i < 5; i++) main.bus.emit(agentEvent('turn.started', { turnId: i }));
-    await bc.getCursor('s1'); // seq = 10 (each turn.started adds a durable status_changed + itself), maxBufferSize = 3
+    await bc.getCursor('s1'); // seq = 6 (one deduplicated running status + five turns), maxBufferSize = 3
 
     const result = await bc.getBufferedSince('s1', { seq: 0 });
     expect(result.resyncRequired).toBe('buffer_overflow');
-    expect(result.currentSeq).toBe(10);
+    expect(result.currentSeq).toBe(6);
   });
 
   it('returns epoch_changed for a mismatched epoch', async () => {
@@ -434,6 +447,62 @@ describe('SessionEventBroadcaster', () => {
     expect(envelopes[1]).toMatchObject({ type: 'turn.started', seq: 2 });
   });
 
+  it('emits a durable event.session.status_changed(idle) after turn.ended', async () => {
+    // Regression: v2 derives session status via ISessionActivity (a pure pull)
+    // and publishes nothing, and kimi-web's turn.ended projector deliberately
+    // does NOT synthesize a status flip — the daemon's
+    // `event.session.status_changed` is its only turn-end signal (it drives
+    // onSessionIdle queue flush and clears the Stop/loading state). Without
+    // this the session stayed `running` forever once a turn ended; most
+    // visibly for background tasks, where ISessionActivity keeps reporting
+    // non-idle while the detached task lives, so even a REST pull never
+    // corrected it. Emitted after turn.ended (same queue) so the web finishes
+    // the assistant message before flipping status.
+    const lc = new FakeLifecycle();
+    const main = lc.addAgent('main');
+    sessions.set('s1', lc);
+    const { target, envelopes } = collectingTarget();
+    await bc.subscribe('s1', target);
+
+    main.bus.emit(agentEvent('turn.started', { turnId: 1 }));
+    main.bus.emit(agentEvent('turn.ended', { turnId: 1, reason: 'completed' }));
+    await bc.getCursor('s1');
+
+    expect(envelopes).toHaveLength(4);
+    expect(envelopes[2]).toMatchObject({ type: 'turn.ended', seq: 3 });
+    expect(envelopes[3]).toMatchObject({
+      type: 'event.session.status_changed',
+      seq: 4,
+      session_id: 's1',
+      payload: {
+        type: 'event.session.status_changed',
+        status: 'idle',
+        previous_status: 'running',
+        agentId: 'main',
+        sessionId: 's1',
+      },
+    });
+    expect(envelopes[3]!.volatile).toBeUndefined();
+  });
+
+  it('emits event.session.status_changed(aborted) when a turn ends cancelled/failed/blocked', async () => {
+    const lc = new FakeLifecycle();
+    const main = lc.addAgent('main');
+    sessions.set('s1', lc);
+    const { target, envelopes } = collectingTarget();
+    await bc.subscribe('s1', target);
+
+    main.bus.emit(agentEvent('turn.started', { turnId: 1 }));
+    main.bus.emit(agentEvent('turn.ended', { turnId: 1, reason: 'cancelled' }));
+    await bc.getCursor('s1');
+
+    const statuses = envelopes.filter((e) => e.type === 'event.session.status_changed');
+    expect(statuses.map((e) => e.payload)).toMatchObject([
+      { status: 'running', previous_status: 'idle' },
+      { status: 'aborted', previous_status: 'running' },
+    ]);
+  });
+
   it('broadcasts question requested / answered as durable v1 events', async () => {
     const lc = new FakeLifecycle();
     lc.addAgent('main');
@@ -451,7 +520,7 @@ describe('SessionEventBroadcaster', () => {
     });
     await bc.getCursor('s1');
 
-    expect(envelopes).toHaveLength(1);
+    expect(envelopes).toHaveLength(2);
     expect(envelopes[0]).toMatchObject({
       type: 'event.question.requested',
       seq: 1,
@@ -466,22 +535,30 @@ describe('SessionEventBroadcaster', () => {
         questions: [{ id: 'q_0', question: 'Pick one', options: [{ id: 'opt_0_0', label: 'A' }, { id: 'opt_0_1', label: 'B' }] }],
       },
     });
+    expect(envelopes[1]).toMatchObject({
+      type: 'event.session.status_changed',
+      payload: { status: 'awaiting_question', previous_status: 'idle' },
+    });
     expect(envelopes[0]!.volatile).toBeUndefined();
 
     lc.interactions.respond('q1', { answers: { q_0: 'opt_0_0' }, method: 'enter' });
     await bc.getCursor('s1');
 
-    expect(envelopes).toHaveLength(2);
-    expect(envelopes[1]).toMatchObject({
+    expect(envelopes).toHaveLength(4);
+    expect(envelopes[2]).toMatchObject({
       type: 'event.question.answered',
-      seq: 2,
+      seq: 3,
       session_id: 's1',
       payload: {
         question_id: 'q1',
         answers: { q_0: 'opt_0_0' },
       },
     });
-    expect((envelopes[1]!.payload as { resolved_at?: string }).resolved_at).toBeTypeOf('string');
+    expect((envelopes[2]!.payload as { resolved_at?: string }).resolved_at).toBeTypeOf('string');
+    expect(envelopes[3]).toMatchObject({
+      type: 'event.session.status_changed',
+      payload: { status: 'idle', previous_status: 'awaiting_question' },
+    });
   });
 
   it('broadcasts question dismissed when resolved with null', async () => {
@@ -501,10 +578,12 @@ describe('SessionEventBroadcaster', () => {
 
     expect(envelopes.map((e) => e.type)).toEqual([
       'event.question.requested',
+      'event.session.status_changed',
       'event.question.dismissed',
+      'event.session.status_changed',
     ]);
-    expect(envelopes[1]!.payload).toMatchObject({ question_id: 'q1' });
-    expect((envelopes[1]!.payload as { dismissed_at?: string }).dismissed_at).toBeTypeOf('string');
+    expect(envelopes[2]!.payload).toMatchObject({ question_id: 'q1' });
+    expect((envelopes[2]!.payload as { dismissed_at?: string }).dismissed_at).toBeTypeOf('string');
   });
 
   it('broadcasts approval requested / resolved as durable v1 events', async () => {
@@ -527,7 +606,7 @@ describe('SessionEventBroadcaster', () => {
     });
     await bc.getCursor('s1');
 
-    expect(envelopes).toHaveLength(1);
+    expect(envelopes).toHaveLength(2);
     expect(envelopes[0]).toMatchObject({
       type: 'event.approval.requested',
       seq: 1,
@@ -542,14 +621,18 @@ describe('SessionEventBroadcaster', () => {
         tool_input_display: { kind: 'command', command: 'ls' },
       },
     });
+    expect(envelopes[1]).toMatchObject({
+      type: 'event.session.status_changed',
+      payload: { status: 'awaiting_approval', previous_status: 'idle' },
+    });
 
     lc.interactions.respond('a1', { decision: 'approved', scope: 'session' });
     await bc.getCursor('s1');
 
-    expect(envelopes).toHaveLength(2);
-    expect(envelopes[1]).toMatchObject({
+    expect(envelopes).toHaveLength(4);
+    expect(envelopes[2]).toMatchObject({
       type: 'event.approval.resolved',
-      seq: 2,
+      seq: 3,
       session_id: 's1',
       payload: {
         approval_id: 'a1',
@@ -557,7 +640,65 @@ describe('SessionEventBroadcaster', () => {
         scope: 'session',
       },
     });
-    expect((envelopes[1]!.payload as { resolved_at?: string }).resolved_at).toBeTypeOf('string');
+    expect((envelopes[2]!.payload as { resolved_at?: string }).resolved_at).toBeTypeOf('string');
+    expect(envelopes[3]).toMatchObject({
+      type: 'event.session.status_changed',
+      payload: { status: 'idle', previous_status: 'awaiting_approval' },
+    });
+  });
+
+  it('keeps parallel interaction priority, dedupes status, and globally fans status out', async () => {
+    const lc = new FakeLifecycle();
+    lc.baseStatus = 'running';
+    lc.addAgent('main');
+    sessions.set('s1', lc);
+    sessions.set('s2', new FakeLifecycle());
+
+    const s1View = collectingTarget();
+    const s2View = collectingTarget();
+    await bc.subscribe('s1', s1View.target);
+    await bc.subscribe('s2', s2View.target);
+
+    lc.interactions.enqueue({
+      id: 'q1',
+      kind: 'question',
+      payload: { questions: [{ question: 'Pick', options: [{ label: 'A' }] }] },
+    });
+    lc.interactions.enqueue({
+      id: 'a1',
+      kind: 'approval',
+      payload: { toolName: 'Bash', action: 'run' },
+    });
+    lc.interactions.respond('q1', { answers: { q_0: 'opt_0_0' } });
+    await bc.getCursor('s1');
+
+    expect(
+      s1View.envelopes
+        .filter((e) => e.type === 'event.session.status_changed')
+        .map((e) => e.payload),
+    ).toMatchObject([
+      { status: 'awaiting_question', previous_status: 'running' },
+      { status: 'awaiting_approval', previous_status: 'awaiting_question' },
+    ]);
+    // Resolving the question does not restore running while approval remains.
+    expect(s1View.envelopes.at(-1)!.type).toBe('event.question.answered');
+    expect(s2View.envelopes.map((e) => e.type)).toEqual([
+      'event.session.status_changed',
+      'event.session.status_changed',
+    ]);
+
+    lc.interactions.respond('a1', { decision: 'approved' });
+    await bc.getCursor('s1');
+
+    expect(s1View.envelopes.at(-1)).toMatchObject({
+      type: 'event.session.status_changed',
+      payload: { status: 'running', previous_status: 'awaiting_approval' },
+    });
+    expect(s2View.envelopes.at(-1)).toMatchObject({
+      type: 'event.session.status_changed',
+      session_id: 's1',
+      payload: { status: 'running', previous_status: 'awaiting_approval' },
+    });
   });
 
   it('does not re-announce interactions already pending at activation, but still broadcasts their resolution', async () => {
@@ -578,7 +719,55 @@ describe('SessionEventBroadcaster', () => {
 
     lc.interactions.respond('q0', { answers: { q_0: 'opt_0_0' } });
     await bc.getCursor('s1');
-    expect(envelopes.map((e) => e.type)).toEqual(['event.question.answered']);
+    expect(envelopes.map((e) => e.type)).toEqual([
+      'event.question.answered',
+      'event.session.status_changed',
+    ]);
+    expect(envelopes[1]!.payload).toMatchObject({
+      status: 'idle',
+      previous_status: 'awaiting_question',
+    });
+  });
+
+  it('fans out the legacy background.task.* alias alongside native task.* for v1 clients', async () => {
+    // v2 emits `task.started`/`task.terminated`; unchanged v1 consumers
+    // (kimi-code TUI / `kimi -p`, node-sdk) only understand
+    // `background.task.*`. The broadcaster must emit both spellings so web
+    // (handles `task.*`, ignores the alias) and TUI (handles the alias, ignores
+    // `task.*`) both work without consumer changes.
+    const lc = new FakeLifecycle();
+    const main = lc.addAgent('main');
+    sessions.set('s1', lc);
+    const { target, envelopes } = collectingTarget();
+    await bc.subscribe('s1', target);
+
+    const info = { taskId: 't1', status: 'running', description: 'ls' };
+    main.bus.emit(agentEvent('task.started', { info }));
+    main.bus.emit(agentEvent('task.terminated', { info: { ...info, status: 'completed' } }));
+    await bc.getCursor('s1');
+
+    expect(envelopes.map((e) => e.type)).toEqual([
+      'task.started',
+      'background.task.started',
+      'task.terminated',
+      'background.task.terminated',
+    ]);
+    // Alias carries the same payload, stamped with agentId/sessionId.
+    expect(envelopes[1]!.payload).toMatchObject({
+      type: 'background.task.started',
+      info,
+      agentId: 'main',
+      sessionId: 's1',
+    });
+    expect(envelopes[3]!.payload).toMatchObject({
+      type: 'background.task.terminated',
+      agentId: 'main',
+      sessionId: 's1',
+    });
+    // Native durability is preserved and the alias mirrors it (both journaled,
+    // monotonic seq), so reconnecting v1 clients rebuild task state from replay.
+    expect(envelopes.every((e) => e.volatile === undefined)).toBe(true);
+    expect(envelopes.map((e) => e.seq)).toEqual([1, 2, 3, 4]);
   });
 
   // -------------------------------------------------------------------------
@@ -594,12 +783,21 @@ describe('SessionEventBroadcaster', () => {
     const { target, envelopes } = collectingTarget();
     await bc.subscribe('s1', target, new Set(['main']));
 
+    main.bus.emit(agentEvent('turn.started', { turnId: 1 }));
     main.bus.emit(agentEvent('turn.ended', { turnId: 1 }));
     sub.bus.emit(agentEvent('turn.ended', { turnId: 1 }));
     await bc.getCursor('s1');
 
-    expect(envelopes).toHaveLength(1);
-    expect((envelopes[0]!.payload as { agentId: string }).agentId).toBe('main');
+    // Agent events are filtered: only main's turn events are delivered.
+    const agentEnvs = envelopes.filter((e) => e.type === 'turn.started' || e.type === 'turn.ended');
+    expect(agentEnvs).toHaveLength(2);
+    expect(
+      agentEnvs.every((e) => (e.payload as { agentId: string }).agentId === 'main'),
+    ).toBe(true);
+    // `event.session.status_changed` is global (`event.session.*`) and bypasses
+    // the agent filter. The redundant idle transition from the sub-agent is deduped.
+    const statusEnvs = envelopes.filter((e) => e.type === 'event.session.status_changed');
+    expect(statusEnvs).toHaveLength(2);
   });
 
   it('delivers every agent event when no filter is set', async () => {
@@ -615,7 +813,9 @@ describe('SessionEventBroadcaster', () => {
     sub.bus.emit(agentEvent('turn.ended', { turnId: 1 }));
     await bc.getCursor('s1');
 
-    const agentIds = envelopes.map((e) => (e.payload as { agentId: string }).agentId);
+    const agentIds = envelopes
+      .filter((e) => e.type === 'turn.ended')
+      .map((e) => (e.payload as { agentId: string }).agentId);
     expect(agentIds).toEqual(['main', 'agent-0']);
   });
 
@@ -648,20 +848,37 @@ describe('SessionEventBroadcaster', () => {
     const sub = lc.addAgent('agent-0');
     sessions.set('s1', lc);
 
-    // Activate the session and journal a mixed sequence before replaying.
-    const warm = collectingTarget();
-    await bc.subscribe('s1', warm.target);
-    main.bus.emit(agentEvent('turn.ended', { turnId: 1 })); // seq 1
-    sub.bus.emit(agentEvent('turn.ended', { turnId: 1 })); // seq 2
-    main.bus.emit(agentEvent('turn.ended', { turnId: 2 })); // seq 3
-    await bc.getCursor('s1');
+    // Dedicated broadcaster with a cap large enough to hold the full mixed
+    // turn/status sequence before the filter crop is exercised.
+    const dir2 = await mkdtemp(join(tmpdir(), 'kimi-broadcaster-test-'));
+    const bc2 = new SessionEventBroadcaster({
+      eventsDir: dir2,
+      core: makeCore(sessions, eventBus),
+      maxBufferSize: 20,
+    });
+    try {
+      // Activate the session and journal a mixed sequence before replaying.
+      const warm = collectingTarget();
+      await bc2.subscribe('s1', warm.target);
+      main.bus.emit(agentEvent('turn.started', { turnId: 1 }));
+      main.bus.emit(agentEvent('turn.ended', { turnId: 1 }));
+      sub.bus.emit(agentEvent('turn.started', { turnId: 1 }));
+      sub.bus.emit(agentEvent('turn.ended', { turnId: 1 }));
+      main.bus.emit(agentEvent('turn.started', { turnId: 2 }));
+      main.bus.emit(agentEvent('turn.ended', { turnId: 2 }));
+      await bc2.getCursor('s1');
 
-    const result = await bc.getBufferedSince('s1', { seq: 0 }, new Set(['main']));
-    expect(result.resyncRequired).toBe(false);
-    // Filtered view keeps the session's original seq offsets (with gaps).
-    expect(result.events.map((e) => e.seq)).toEqual([1, 3]);
-    expect(
-      result.events.every((e) => (e.envelope.payload as { agentId: string }).agentId === 'main'),
-    ).toBe(true);
+      const result = await bc2.getBufferedSince('s1', { seq: 0 }, new Set(['main']));
+      expect(result.resyncRequired).toBe(false);
+      // The sub-agent's turn events are cropped, while global status transitions
+      // retain their original positions in the session sequence.
+      expect(result.events.map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 8, 9, 10, 11, 12]);
+      expect(
+        result.events.every((e) => (e.envelope.payload as { agentId: string }).agentId === 'main'),
+      ).toBe(true);
+    } finally {
+      await bc2.close();
+      await rm(dir2, { recursive: true, force: true });
+    }
   });
 });

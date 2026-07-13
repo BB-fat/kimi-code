@@ -15,6 +15,8 @@ import type { IProcess } from '#/session/process/processRunner';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { IAgentTaskService } from '#/agent/task/task';
+import { IAgentLoopService } from '#/agent/loop/loop';
+import { TERMINAL_STATUSES } from '#/agent/task/types';
 import { ProcessTask } from '#/os/backends/node-local/tools/process-task';
 import {
   taskServices,
@@ -87,6 +89,40 @@ function registerForeground(
   });
 }
 
+/**
+ * Detached tasks that reached a terminal state enqueue a notification onto
+ * the loop, which auto-launches its own turn when idle (`activeOrNewTurn`).
+ * Resume-compare requires the notification materialized in the live context
+ * (the replayed side re-derives it from the persisted record) and the loop
+ * settled, so queue one response in case the turn's LLM request has not
+ * fired yet and wait for the notification turn to drain before
+ * `expectResumeMatches`.
+ */
+async function drainPendingNotifications(
+  ctx: TestAgentContext,
+  background: IAgentTaskService,
+): Promise<void> {
+  const expectsNotification = background
+    .list(false)
+    .some(
+      (task) =>
+        TERMINAL_STATUSES.has(task.status) &&
+        task.detached !== false &&
+        task.terminalNotificationSuppressed !== true,
+    );
+  if (!expectsNotification) return;
+  ctx.mockNextResponse({ type: 'text', text: 'notification drain ack' });
+  await vi.waitFor(() => {
+    const delivered = ctx.allEvents.filter((e) => e.event === 'task.notified').length;
+    expect(delivered).toBeGreaterThanOrEqual(1);
+  });
+  await vi.waitFor(() => {
+    const loop = ctx.get(IAgentLoopService);
+    expect(loop.status().state).toBe('idle');
+    expect(loop.hasPendingRequests()).toBe(false);
+  });
+}
+
 describe('AgentTaskService — foreground persistence', () => {
   let sessionDir: string;
   let persistence: ReturnType<typeof createAgentTaskPersistence>;
@@ -102,6 +138,7 @@ describe('AgentTaskService — foreground persistence', () => {
 
   afterEach(async () => {
     try {
+      await drainPendingNotifications(ctx, background);
       await ctx.expectResumeMatches();
     } finally {
       await ctx.dispose();

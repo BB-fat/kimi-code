@@ -6,6 +6,7 @@ import { join } from 'pathe';
 import type { IProcess } from '#/session/process/processRunner';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { IAgentTaskService } from '#/agent/task/task';
+import { IAgentLoopService } from '#/agent/loop/loop';
 import { TERMINAL_STATUSES } from '#/agent/task/types';
 import { TaskOutputTool } from '#/agent/task/tools/task-output';
 import { ProcessTask } from '#/os/backends/node-local/tools/process-task';
@@ -80,17 +81,30 @@ async function waitForTaskNotifications(
   );
   if (tasks.length === 0) return;
 
+  // Live notifications auto-launch their own turn when the loop is idle
+  // (`activeOrNewTurn` admission) and materialize when that turn pops them.
+  // Queue one response in case the turn's LLM request has not fired yet,
+  // then wait for every enqueue and for the notification turns to drain.
+  ctx.mockNextResponse({ type: 'text', text: 'notification drain ack' });
   await vi.waitFor(() => {
-    const origins = ctx.context.get().map((message) => message.origin);
-    for (const task of tasks) {
-      expect(origins).toContainEqual({
-        kind: 'task',
-        taskId: task.taskId,
-        status: task.status,
-        notificationId: `task:${task.taskId}:${task.status}`,
-      });
-    }
+    const delivered = ctx.allEvents.filter((e) => e.event === 'task.notified').length;
+    expect(delivered).toBeGreaterThanOrEqual(tasks.length);
   });
+  await vi.waitFor(() => {
+    const loop = ctx.get(IAgentLoopService);
+    expect(loop.status().state).toBe('idle');
+    expect(loop.hasPendingRequests()).toBe(false);
+  });
+
+  const origins = ctx.context.get().map((message) => message.origin);
+  for (const task of tasks) {
+    expect(origins).toContainEqual({
+      kind: 'task',
+      taskId: task.taskId,
+      status: task.status,
+      notificationId: `task:${task.taskId}:${task.status}`,
+    });
+  }
 }
 
 function immediateProcess(exitCode: number, stdoutText = ''): IProcess {

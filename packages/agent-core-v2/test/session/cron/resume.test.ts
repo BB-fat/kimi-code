@@ -60,12 +60,9 @@ interface SteerCall {
 
 function captureSteer(prompt: IAgentPromptService): SteerCall[] {
   const calls: SteerCall[] = [];
-  prompt.steer = (message: ContextMessage) => {
+  prompt.inject = async (message: ContextMessage) => {
     calls.push({ content: message.content, origin: message.origin as PromptOrigin });
-    return {
-      removeFromQueue: () => {},
-      launched: Promise.resolve(undefined),
-    };
+    return undefined;
   };
   return calls;
 }
@@ -91,7 +88,9 @@ function createCronAgent(
   sessionDir: string,
   cronOverride: ReturnType<typeof cronServices>,
 ): TestAgentContext {
-  return createTestAgent(homeDirServices(sessionDir), cronOverride);
+  const ctx = createTestAgent(homeDirServices(sessionDir), cronOverride);
+  ctx.announceMain();
+  return ctx;
 }
 
 function persistence(ctx: TestAgentContext): {
@@ -433,6 +432,7 @@ describe('SessionCronService — persistence and resume', () => {
       ctx = createTestAgent(
         cronServices(),
       );
+      ctx.announceMain();
       cron = ctx.get(ISessionCronService);
     });
 

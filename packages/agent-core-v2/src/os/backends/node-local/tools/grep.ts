@@ -29,6 +29,7 @@ import { registerTool } from '#/agent/toolRegistry/toolContribution';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IHostProcessService } from '#/os/interface/hostProcess';
+import { unwrapErrorCause } from '#/_base/errors/errors';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 import {
   resolvePathAccessPath,
@@ -246,7 +247,7 @@ export class GrepTool implements BuiltinTool<GrepInput> {
       });
       rgPath = resolution.path;
       if (resolution.source !== 'system-path') {
-        this.telemetry.track('grep_tool_rg_fallback', {
+        this.telemetry.track2('grep_tool_rg_fallback', {
           source: resolution.source,
           outcome: 'resolved',
         });
@@ -255,7 +256,7 @@ export class GrepTool implements BuiltinTool<GrepInput> {
       if (signal.aborted) {
         return { isError: true, output: 'Grep aborted' };
       }
-      this.telemetry.track('grep_tool_rg_fallback', { outcome: 'failed' });
+      this.telemetry.track2('grep_tool_rg_fallback', { outcome: 'failed' });
       return { isError: true, output: rgUnavailableMessage(error) };
     }
 
@@ -467,8 +468,11 @@ function formatSpawnError(error: unknown): string {
 }
 
 function errorCode(error: unknown): string | undefined {
-  if (error !== null && typeof error === 'object' && 'code' in error) {
-    const code = (error as { code?: unknown }).code;
+  // hostFs / hostProcess translate raw errnos into coded errors; classify the
+  // unwrapped cause so boundary translation stays invisible here.
+  const unwrapped = unwrapErrorCause(error);
+  if (unwrapped !== null && typeof unwrapped === 'object' && 'code' in unwrapped) {
+    const code = (unwrapped as { code?: unknown }).code;
     return typeof code === 'string' ? code : undefined;
   }
   return undefined;

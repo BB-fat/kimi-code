@@ -145,6 +145,22 @@ describe('server-v2 /api/v1 model/provider catalog', () => {
     ]);
   });
 
+  it('lists models without refreshing providers', async () => {
+    const refreshProviderModels = vi.fn(async () => ({
+      changed: [],
+      unchanged: [],
+      failed: [],
+    }));
+    const seeds = [[IModelCatalogService, catalogStub(refreshProviderModels)]] as unknown as ScopeSeed;
+    await boot(CATALOG_TOML, seeds);
+
+    const { status, body } = await getJson<{ items: unknown[] }>('/api/v1/models');
+    expect(status).toBe(200);
+    expect(body.code).toBe(0);
+    expect(body.data.items).toEqual([]);
+    expect(refreshProviderModels).not.toHaveBeenCalled();
+  });
+
   it('lists providers and returns a single provider by id', async () => {
     await boot(CATALOG_TOML);
     const list = await getJson<{ items: unknown[] }>('/api/v1/providers');

@@ -1,9 +1,5 @@
-import {
-  compressImageForModel,
-  persistOriginalImage,
-  sessionMediaOriginalsDir,
-  type CoreSession,
-} from '#/core/index';
+import { compressImageForModel } from '@moonshot-ai/agent-core-v2';
+import { persistOriginalImage, sessionMediaOriginalsDir, type CoreSession } from '#/core/index';
 import { ClipboardMediaError, readClipboardMedia } from '#/utils/clipboard/clipboard-image';
 import { parseImageMeta } from '#/utils/image/image-mime';
 import { editInExternalEditor, resolveEditorCommand } from '#/utils/process/external-editor';

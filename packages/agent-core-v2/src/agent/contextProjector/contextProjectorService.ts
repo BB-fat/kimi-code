@@ -8,7 +8,8 @@
  * result invented for a lost one, an orphan/duplicate dropped, leading
  * non-user messages dropped, consecutive assistants merged, blank text
  * dropped) are reported through an optional sink and surfaced once here as a
- * single deduped warning, so a silently-mangled history always leaves a trace.
+ * single deduped warning plus a `context_projection_repaired` telemetry event,
+ * so a silently-mangled history always leaves a trace.
  *
  * History-shaping features plug in through `registerContextFold` rather than
  * being imported here: the projector applies the registered folds (ascending
@@ -23,8 +24,9 @@ import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
 import { ILogService } from '#/_base/log/log';
 import { renderToolResultForModel } from '#/agent/contextMemory/toolResultRender';
 import type { ContextMessage } from '#/agent/contextMemory/types';
-import { ErrorCodes, KimiError } from '#/errors';
+import { ErrorCodes, Error2 } from '#/errors';
 import type { ContentPart, Message } from '#/app/llmProtocol/message';
+import { ITelemetryService } from '#/app/telemetry/telemetry';
 import {
   CONTEXT_FOLD_ORDER,
   IAgentContextProjectorService,
@@ -52,6 +54,7 @@ export class AgentContextProjectorService implements IAgentContextProjectorServi
 
   constructor(
     @ILogService private readonly log: ILogService,
+    @ITelemetryService private readonly telemetry: ITelemetryService,
   ) {}
 
   registerContextFold(id: string, fold: ContextFold, options?: ContextFoldOptions): IDisposable {
@@ -96,9 +99,9 @@ export class AgentContextProjectorService implements IAgentContextProjectorServi
 
   // Surface the projector's wire-repairs so a silently-mangled history leaves a
   // trace. Deduped by signature so a defect that recurs identically every send
-  // (e.g. a persistently lost result re-synthesized each turn) logs once, not per
-  // step. Trailing-tail synthesis is excluded — it is the expected close of an
-  // in-flight call, not a defect.
+  // (e.g. a persistently lost result re-synthesized each turn) surfaces once,
+  // not per step. Trailing-tail synthesis is excluded — it is the expected
+  // close of an in-flight call, not a defect.
   private reportProjectionRepairs(anomalies: readonly ProjectionAnomaly[]): void {
     const notable = anomalies.filter(
       (anomaly) => !(anomaly.kind === 'tool_result_synthesized' && anomaly.trailing),
@@ -147,6 +150,16 @@ export class AgentContextProjectorService implements IAgentContextProjectorServi
       assistantsMerged,
       whitespaceDropped,
       toolCallIds,
+    });
+    this.telemetry.track2('context_projection_repaired', {
+      reordered,
+      synthesized,
+      dropped_orphan: droppedOrphan,
+      duplicate_calls_dropped: duplicateCallsDropped,
+      duplicate_results_dropped: duplicateResultsDropped,
+      leading_dropped: leadingDropped,
+      assistants_merged: assistantsMerged,
+      whitespace_dropped: whitespaceDropped,
     });
   }
 }
@@ -459,7 +472,7 @@ function cleanContent(
     content = filtered;
   }
   if (source.role === 'tool' && content.length === 0) {
-    throw new KimiError(
+    throw new Error2(
       ErrorCodes.REQUEST_INVALID,
       'Tool result message content cannot be empty after removing empty text blocks.',
       { details: { toolCallId: source.toolCallId } },

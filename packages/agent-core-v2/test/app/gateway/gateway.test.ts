@@ -5,8 +5,10 @@ import type { ServiceIdentifier, ServicesAccessor } from '#/_base/di/instantiati
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { type IAgentScopeHandle, type ISessionScopeHandle, LifecycleScope } from '#/_base/di/scope';
 import { TestInstantiationService } from '#/_base/di/test';
+import { Event } from '#/_base/event';
 import {
   type AgentTaskHooks,
+  type AgentTaskStopHookContext,
   IAgentLifecycleService,
 } from '#/session/agentLifecycle/agentLifecycle';
 import type { ContextMessage } from '#/agent/contextMemory/types';
@@ -15,10 +17,10 @@ import { RestGateway } from '#/app/gateway/gatewayService';
 import { ILogService } from '#/_base/log/log';
 import { IAgentPromptService } from '#/agent/prompt/prompt';
 import { ISessionLifecycleService } from '#/app/sessionLifecycle/sessionLifecycle';
-import { IAgentTurnService } from '#/agent/turn/turn';
+import { IAgentLoopService } from '#/agent/loop/loop';
 import { createHooks } from '#/hooks';
 import { stubLog } from '../../_base/log/stubs';
-import { stubTurn } from '../../agent/turn/stubs';
+import { stubLoopWithHooks, type StubLoop } from '../../agent/loop/stubs';
 
 function textOf(message: ContextMessage): string {
   return message.content
@@ -43,28 +45,25 @@ describe('RestGateway', () => {
   let disposables: DisposableStore;
   let ix: TestInstantiationService;
   let promptCalls: ContextMessage[];
-  let turnService: IAgentTurnService;
+  let turnService: StubLoop;
 
   beforeEach(() => {
     disposables = new DisposableStore();
     ix = disposables.add(new TestInstantiationService());
     promptCalls = [];
-    turnService = stubTurn({ hasActiveTurn: true });
+    turnService = stubLoopWithHooks({ hasActiveTurn: true });
 
     const promptService: IAgentPromptService = {
       _serviceBrand: undefined,
-      prompt: (message) => {
-        promptCalls.push(message);
-        return Promise.resolve(undefined);
-      },
-      steer: () => ({
-        removeFromQueue: () => {},
-        launched: Promise.resolve(undefined),
-      }),
-      retry: () => undefined,
+      enqueue: ({ message }: { message: ContextMessage }) => { promptCalls.push(message); return Promise.resolve({ id: 'p', launched: Promise.resolve(undefined) } as never); },
+      steer: () => Promise.resolve([]),
+      list: () => ({ active: undefined, pending: [] }),
+      abort: () => true,
+      inject: () => Promise.resolve(undefined),
+      retry: () => Promise.resolve(undefined),
       undo: () => 0,
       clear: () => {},
-      hooks: createHooks(['onWillSubmitPrompt']) as IAgentPromptService['hooks'],
+      hooks: createHooks(['onBeforeSubmitPrompt']) as IAgentPromptService['hooks'],
     };
 
     const agentHandle: IAgentScopeHandle = {
@@ -72,20 +71,19 @@ describe('RestGateway', () => {
       kind: LifecycleScope.Agent,
       accessor: makeAccessor([
         [IAgentPromptService, promptService],
-        [IAgentTurnService, turnService],
+        [IAgentLoopService, turnService],
       ]),
       dispose: () => {},
     };
     const agents: IAgentLifecycleService = {
       _serviceBrand: undefined,
-      hooks: createHooks<AgentTaskHooks, keyof AgentTaskHooks>([
-        'onWillStartAgentTask',
-        'onDidStopAgentTask',
-      ]),
+      hooks: createHooks<AgentTaskHooks, keyof AgentTaskHooks>(['onWillStartAgentTask']),
+      onDidStopAgentTask: Event.None as Event<AgentTaskStopHookContext>,
       onDidCreate: () => ({ dispose: () => {} }),
       onDidDispose: () => ({ dispose: () => {} }),
       onDidCreateMain: () => ({ dispose: () => {} }),
       notifyMainCreated: () => {},
+      notifyAgentTaskStopped: () => {},
       create: () => Promise.resolve(agentHandle),
       ensureMcpReady: () => Promise.resolve(),
       fork: () => Promise.resolve(agentHandle),
@@ -126,7 +124,7 @@ describe('RestGateway', () => {
 
   it('aborts the active turn signal on cancel', async () => {
     const gw = ix.get(IRestGateway);
-    const turn = turnService.launch();
+    const turn = turnService.startTurn();
     await gw.cancel('s1', 'main', 'bye');
 
     expect(turn.signal.aborted).toBe(true);

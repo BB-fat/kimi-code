@@ -21,7 +21,7 @@ import { IAgentProfileService } from '#/agent/profile/profile';
 import { ToolAccesses } from '#/agent/tool/tool-access';
 import type { ExecutableTool } from '#/agent/tool/toolContract';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
-import { IAgentTurnService } from '#/agent/turn/turn';
+import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentUserToolService, type UserToolRegistration } from '#/agent/userTool/userTool';
 import {
   AgentSwarmToolInputSchema,
@@ -37,6 +37,7 @@ import {
   IAgentLifecycleService,
   type AgentRunHandle,
   type AgentRunRequest,
+  type AgentTaskStopHookContext,
   type RunAgentOptions,
 } from '#/session/agentLifecycle/agentLifecycle';
 import { IEventBus, type DomainEvent } from '#/app/event/eventBus';
@@ -195,10 +196,10 @@ function createAgentLifecycleStub(options: AgentLifecycleStubOptions = {}): Agen
             isToolActive: () => false,
           } as never;
         }
-        if (serviceId === IAgentTurnService) {
+        if (serviceId === IAgentLoopService) {
           return {
             _serviceBrand: undefined,
-            getActiveTurn: () => undefined,
+            status: () => ({ state: 'idle', pendingTurnIds: [], hasPendingRequests: false }),
           } as never;
         }
         if (serviceId === IAgentToolRegistryService) {
@@ -238,8 +239,8 @@ function createAgentLifecycleStub(options: AgentLifecycleStubOptions = {}): Agen
     _serviceBrand: undefined,
     hooks: {
       onWillStartAgentTask: hookSlot(),
-      onDidStopAgentTask: hookSlot(),
     },
+    onDidStopAgentTask: Event.None as KimiEvent<AgentTaskStopHookContext>,
     onDidCreate: Event.None as KimiEvent<IAgentScopeHandle>,
     onDidCreateMain: Event.None as KimiEvent<IAgentScopeHandle>,
     onDidDispose: Event.None as KimiEvent<string>,
@@ -258,6 +259,7 @@ function createAgentLifecycleStub(options: AgentLifecycleStubOptions = {}): Agen
     }),
     ensureMcpReady: vi.fn(async () => {}),
     notifyMainCreated: vi.fn(),
+    notifyAgentTaskStopped: vi.fn(),
     fork: vi.fn(async () => {
       throw new Error('unexpected fork');
     }),
@@ -796,10 +798,10 @@ describe('Agent tool execution contract', () => {
       'explore',
       new Map([
         [
-          IAgentTurnService,
+          IAgentLoopService,
           {
             _serviceBrand: undefined,
-            getActiveTurn: () => ({ id: 1 }),
+            status: () => ({ state: 'running', activeTurnId: 1, pendingTurnIds: [], hasPendingRequests: true }),
           },
         ],
       ]),
@@ -2219,9 +2221,9 @@ describe('Agent tools', () => {
         [wire] tools.register_user_tool    { "name": "Lookup", "description": "Look up a short test value.", "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": [ "query" ], "additionalProperties": false }, "time": "<time>" }
         [wire] turn.prompt                 { "input": [ { "type": "text", "text": "Look up moon" } ], "origin": { "kind": "user" }, "time": "<time>" }
         [emit] turn.started                { "turnId": 0, "origin": { "kind": "user" } }
-        [wire] context.append_message      { "message": { "role": "user", "content": [ { "type": "text", "text": "Look up moon" } ], "toolCalls": [], "origin": { "kind": "user" } }, "time": "<time>" }
+        [wire] context.append_message      { "message": { "role": "user", "content": [ { "type": "text", "text": "Look up moon" } ], "toolCalls": [], "origin": { "kind": "user" }, "id": "<msg-1>" }, "time": "<time>" }
         [emit] agent.status.updated        { "rawContextTokens": 5 }
-        [emit] context.spliced             { "start": 0, "deleteCount": 0, "messages": [ { "role": "user", "content": [ { "type": "text", "text": "Look up moon" } ], "toolCalls": [], "origin": { "kind": "user" } } ] }
+        [emit] context.spliced             { "start": 0, "deleteCount": 0, "messages": [ { "role": "user", "content": [ { "type": "text", "text": "Look up moon" } ], "toolCalls": [], "origin": { "kind": "user" }, "id": "<msg-1>" } ] }
         [wire] context.append_message      { "message": { "role": "user", "content": [ { "type": "text", "text": "<auto-mode-enter-reminder>" } ], "toolCalls": [], "origin": { "kind": "injection", "variant": "permission_mode" } }, "time": "<time>" }
         [emit] agent.status.updated        { "rawContextTokens": 87 }
         [emit] context.spliced             { "start": 1, "deleteCount": 0, "messages": [ { "role": "user", "content": [ { "type": "text", "text": "<auto-mode-enter-reminder>" } ], "toolCalls": [], "origin": { "kind": "injection", "variant": "permission_mode" } } ] }
@@ -2274,22 +2276,23 @@ describe('Agent tools', () => {
         [emit] turn.ended                  { "turnId": 0, "reason": "completed" }
       `);
       expect(ctx.lastLlmInput()).toMatchInlineSnapshot(`
-        messages:
-          <last>
-          assistant: text "I will look it up."  calls call_lookup:Lookup { "query": "moon" }
-          tool[call_lookup]: text "moon-result"
-      `);
+      messages:
+        <last>
+        assistant: text "I will look it up."  calls call_lookup:Lookup { "query": "moon" }
+        tool[call_lookup]: text "moon-result"
+    `);
       await ctx.rpc.unregisterTool({ name: 'Lookup' });
       ctx.mockNextResponse({ type: 'text', text: 'No lookup tool is available.' });
       await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Can you still use Lookup?' }] });
 
       expect(await ctx.untilTurnEnd()).toMatchInlineSnapshot(`
         [wire] tools.unregister_user_tool   { "name": "Lookup", "time": "<time>" }
+        [emit] prompt.completed             { "promptId": "<msg-1>", "finishedAt": "<time>", "reason": "completed" }
         [wire] turn.prompt                  { "input": [ { "type": "text", "text": "Can you still use Lookup?" } ], "origin": { "kind": "user" }, "time": "<time>" }
         [emit] turn.started                 { "turnId": 1, "origin": { "kind": "user" } }
-        [wire] context.append_message       { "message": { "role": "user", "content": [ { "type": "text", "text": "Can you still use Lookup?" } ], "toolCalls": [], "origin": { "kind": "user" } }, "time": "<time>" }
+        [wire] context.append_message       { "message": { "role": "user", "content": [ { "type": "text", "text": "Can you still use Lookup?" } ], "toolCalls": [], "origin": { "kind": "user" }, "id": "<msg-2>" }, "time": "<time>" }
         [emit] agent.status.updated         { "rawContextTokens": 125 }
-        [emit] context.spliced              { "start": 5, "deleteCount": 0, "messages": [ { "role": "user", "content": [ { "type": "text", "text": "Can you still use Lookup?" } ], "toolCalls": [], "origin": { "kind": "user" } } ] }
+        [emit] context.spliced              { "start": 5, "deleteCount": 0, "messages": [ { "role": "user", "content": [ { "type": "text", "text": "Can you still use Lookup?" } ], "toolCalls": [], "origin": { "kind": "user" }, "id": "<msg-2>" } ] }
         [emit] turn.step.started            { "turnId": 1, "step": 1, "stepId": "<uuid-6>" }
         [wire] context.append_loop_event    { "event": { "type": "step.begin", "uuid": "<uuid-6>", "turnId": "1", "step": 1 }, "time": "<time>" }
         [emit] agent.status.updated         { "rawContextTokens": 131 }

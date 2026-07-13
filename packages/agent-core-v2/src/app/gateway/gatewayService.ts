@@ -2,8 +2,8 @@
  * `gateway` domain (L7) — `IRestGateway` / `IWSGateway` implementations.
  *
  * Owns the REST/WS entry points; resolves sessions through `sessionLifecycle`,
- * agents through `agentLifecycle`, drives turns through `turn`, and flushes
- * logs through `log`. Bound at App scope.
+ * agents through `agentLifecycle`, drives turns through `prompt` / `loop`,
+ * and flushes logs through `log`. Bound at App scope.
  *
  * WS event fan-out (sequencing, journaling, replay, per-connection dispatch)
  * is a transport concern and lives in the edge package (`packages/kap-server`)
@@ -16,7 +16,7 @@ import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle'
 import { ILogService } from '#/_base/log/log';
 import { ISessionLifecycleService } from '#/app/sessionLifecycle/sessionLifecycle';
 import { IAgentPromptService } from '#/agent/prompt/prompt';
-import { IAgentTurnService } from '#/agent/turn/turn';
+import { IAgentLoopService } from '#/agent/loop/loop';
 
 import { IRestGateway, IWSGateway } from './gateway';
 
@@ -42,12 +42,15 @@ export class RestGateway implements IRestGateway {
     agentId: string,
     input: string,
   ): Promise<{ readonly turn_id: number } | undefined> {
-    const turn = await this.agent(sessionId, agentId).accessor.get(IAgentPromptService).prompt({
-      role: 'user',
-      content: [{ type: 'text', text: input }],
-      toolCalls: [],
-      origin: { kind: 'user' },
+    const handle = await this.agent(sessionId, agentId).accessor.get(IAgentPromptService).enqueue({
+      message: {
+        role: 'user',
+        content: [{ type: 'text', text: input }],
+        toolCalls: [],
+        origin: { kind: 'user' },
+      },
     });
+    const turn = await handle.launched;
     return turn === undefined ? undefined : { turn_id: turn.id };
   }
   async steer(
@@ -55,18 +58,19 @@ export class RestGateway implements IRestGateway {
     agentId: string,
     content: string,
   ): Promise<{ readonly turn_id: number } | undefined> {
-    const agent = this.agent(sessionId, agentId);
-    const steer = agent.accessor.get(IAgentPromptService).steer({
+    const service = this.agent(sessionId, agentId).accessor.get(IAgentPromptService);
+    const queued = await service.enqueue({ message: {
       role: 'user',
       content: [{ type: 'text', text: content }],
       toolCalls: [],
       origin: { kind: 'user' },
-    });
-    const turn = await steer.launched;
+    } });
+    const [steered] = await service.steer([queued.id]);
+    const turn = await steered?.launched;
     return turn === undefined ? undefined : { turn_id: turn.id };
   }
   cancel(sessionId: string, agentId: string, reason?: string): Promise<void> {
-    this.agent(sessionId, agentId).accessor.get(IAgentTurnService).cancel(undefined, reason);
+    this.agent(sessionId, agentId).accessor.get(IAgentLoopService).cancel(undefined, reason);
     return Promise.resolve();
   }
   getStatus(sessionId: string): Promise<unknown> {

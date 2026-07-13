@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { ISessionIndex, ISessionMetadata } from '@moonshot-ai/agent-core-v2';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { type RunningServer, startServer } from '../src/start';
@@ -58,7 +59,7 @@ describe('server-v2 /api/v2/ws', () => {
 
   it('performs a core call over WS', async () => {
     const client = new WsClient({ url: wsUrl, token });
-    const page = await client.call<{ items: unknown[] }>('core', 'sessions:list', {});
+    const page = await client.call<{ items: unknown[] }>('core', String(ISessionIndex), 'list', {});
     expect(Array.isArray(page.items)).toBe(true);
     client.close();
   });
@@ -66,7 +67,7 @@ describe('server-v2 /api/v2/ws', () => {
   it('performs a session call over WS', async () => {
     const id = await createSession(home as string);
     const client = new WsClient({ url: wsUrl, token });
-    const meta = await client.call<SessionMetaWire>('session', 'session:read', undefined, {
+    const meta = await client.call<SessionMetaWire>('session', String(ISessionMetadata), 'read', undefined, {
       sessionId: id,
     });
     expect(meta.id).toBe(id);
@@ -75,7 +76,7 @@ describe('server-v2 /api/v2/ws', () => {
 
   it('returns an error for an unknown action', async () => {
     const client = new WsClient({ url: wsUrl, token });
-    await expect(client.call('core', 'sessions:nope')).rejects.toMatchObject({
+    await expect(client.call('core', String(ISessionIndex), 'nope')).rejects.toMatchObject({
       code: 40001,
     });
     client.close();
@@ -111,6 +112,28 @@ describe('server-v2 /api/v2/ws', () => {
     client.close();
   });
 
+  it('streams a Service Event resolved by onUpperCase member name', async () => {
+    const id = await createSession(home as string);
+    const client = new WsClient({ url: wsUrl, token });
+    const { iterator, cancel } = client.listen<{ title?: string }>(
+      'session',
+      'onDidChangeMetadata',
+      { sessionId: id, service: String(ISessionMetadata) },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    await client.call('session', String(ISessionMetadata), 'setTitle', ['changed'], {
+      sessionId: id,
+    });
+    const next = await Promise.race([
+      iterator[Symbol.asyncIterator]().next(),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('no event')), 2000)),
+    ]);
+    expect(next.value).toMatchObject({ changed: expect.arrayContaining(['title']) });
+    cancel();
+    client.close();
+  });
+
   it('cancels a subscription', async () => {
     const client = new WsClient({ url: wsUrl, token });
     const { iterator, cancel } = client.listen('core', 'events');
@@ -124,7 +147,7 @@ describe('server-v2 /api/v2/ws', () => {
 
   it('rejects pending calls on close', async () => {
     const client = new WsClient({ url: wsUrl, token });
-    const pending = client.call('core', 'sessions:list', {});
+    const pending = client.call('core', String(ISessionIndex), 'list', {});
     client.close();
     await expect(pending).rejects.toThrow();
   });
@@ -161,14 +184,14 @@ describe('server-v2 /api/v2/ws auth', () => {
 
   it('accepts a call with the correct token', async () => {
     const client = new WsClient({ url: wsUrl, token });
-    const page = await client.call<{ items: unknown[] }>('core', 'sessions:list', {});
+    const page = await client.call<{ items: unknown[] }>('core', String(ISessionIndex), 'list', {});
     expect(Array.isArray(page.items)).toBe(true);
     client.close();
   });
 
   it('rejects a wrong token', async () => {
     const client = new WsClient({ url: wsUrl, token: 'wrong' });
-    await expect(client.call('core', 'sessions:list', {})).rejects.toThrow();
+    await expect(client.call('core', String(ISessionIndex), 'list', {})).rejects.toThrow();
     client.close();
   });
 });

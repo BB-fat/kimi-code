@@ -32,7 +32,7 @@ import {
 } from '#/_base/di/scope';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IEventBus } from '#/app/event/eventBus';
-import { ErrorCodes, KimiError, makeErrorPayload } from '#/errors';
+import { ErrorCodes, Error2, makeErrorPayload } from '#/errors';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { ILogService } from '#/_base/log/log';
 import { IAgentProfileCatalogService } from '#/app/agentProfileCatalog/agentProfileCatalog';
@@ -52,6 +52,8 @@ import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceCo
 import { IAgentScopeContext, makeAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentActivityService, ISessionActivityKernel } from '#/activity/activity';
 import { IAgentProfileService } from '#/agent/profile/profile';
+import { IAgentLoopContinuationService } from '#/agent/loop/loopContinuation';
+import { IAgentStepRetryService } from '#/agent/stepRetry/stepRetry';
 import { IAgentToolSelectService } from '#/agent/toolSelect/toolSelect';
 import { IAgentToolSelectAnnouncementsService } from '#/agent/toolSelect/toolSelectAnnouncements';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
@@ -83,6 +85,7 @@ import {
   type AgentRunHandle,
   type AgentRunRequest,
   type AgentTaskHooks,
+  type AgentTaskStopHookContext,
   type CreateAgentOptions,
   type ForkAgentOptions,
   IAgentLifecycleService,
@@ -94,14 +97,14 @@ let nextAgentId = 0;
 
 export class AgentLifecycleService extends Disposable implements IAgentLifecycleService {
   declare readonly _serviceBrand: undefined;
-  readonly hooks = createHooks<AgentTaskHooks, keyof AgentTaskHooks>([
-    'onWillStartAgentTask',
-    'onDidStopAgentTask',
-  ]);
+  readonly hooks = createHooks<AgentTaskHooks, keyof AgentTaskHooks>(['onWillStartAgentTask']);
   private readonly handles = new Map<string, IAgentScopeHandle>();
   private readonly onDidCreateEmitter = this._register(new Emitter<IAgentScopeHandle>());
   private readonly onDidCreateMainEmitter = this._register(new Emitter<IAgentScopeHandle>());
   private readonly onDidDisposeEmitter = this._register(new Emitter<string>());
+  private readonly onDidStopAgentTaskEmitter = this._register(
+    new Emitter<AgentTaskStopHookContext>(),
+  );
   private mcpManager: McpConnectionManager | undefined;
   private mcpInitialLoad: Promise<void> | undefined;
   private readonly interactionBusDisposables = new Map<string, IDisposable>();
@@ -114,6 +117,13 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
   }
   get onDidDispose() {
     return this.onDidDisposeEmitter.event;
+  }
+  get onDidStopAgentTask() {
+    return this.onDidStopAgentTaskEmitter.event;
+  }
+
+  notifyAgentTaskStopped(context: AgentTaskStopHookContext): void {
+    this.onDidStopAgentTaskEmitter.fire(context);
   }
 
   constructor(
@@ -200,12 +210,6 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
     this.onDidCreateEmitter.fire(handle);
     this.igniteEagerServices(handle);
     await mcpReady;
-    // Force-instantiate the replay service so it attaches the
-    // `ReplayTimelineModel` derived model before session resume replays this
-    // agent's wire log: derived models only fold ops that pass through after
-    // attach, so a late attach would leave resumed sessions with an empty
-    // replay timeline and the TUI could not rehydrate screen history.
-    handle.accessor.get(IAgentReplayService);
     await this.ensureWireMetadata(handle, agentScope);
     await this.bindBootstrap(handle, opts);
     // Bootstrap (eager tool / hook / MCP setup, wire metadata, profile binding)
@@ -217,7 +221,7 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
 
   private assertCanCreate(): void {
     if (!this.activityKernel.canAccept('agent.create')) {
-      throw new KimiError(
+      throw new Error2(
         ErrorCodes.ACTIVITY_SESSION_REJECTED,
         `Session is ${this.activityKernel.lane()}; agent creation rejected`,
         { details: { lane: this.activityKernel.lane() } },
@@ -290,6 +294,20 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
     // derived from it before the first turn.
     handle.accessor.get(IAgentToolSelectService);
     handle.accessor.get(IAgentToolSelectAnnouncementsService);
+    // Step-retry plugin: registers the loop error handler that retries
+    // retryable provider failures. Nothing injects it directly — it observes
+    // the loop — so it must be ignited before the first turn.
+    handle.accessor.get(IAgentStepRetryService);
+    // Loop-continuation aspect: enqueues the next step whenever a step ran
+    // tools. It only observes the loop's onDidFinishStep hook, so without ignition
+    // every tool-using turn would stop after a single step.
+    handle.accessor.get(IAgentLoopContinuationService);
+    // Replay service: attaches the `ReplayTimelineModel` derived model before
+    // session resume replays this agent's wire log — derived models only fold
+    // ops that pass through after attach, so a late attach would leave resumed
+    // sessions with an empty replay timeline and the TUI could not rehydrate
+    // screen history.
+    handle.accessor.get(IAgentReplayService);
   }
 
   private async bindBootstrap(
@@ -443,7 +461,7 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
 
     const connectedCount = entries.filter((entry) => entry.status === 'connected').length;
     if (connectedCount > 0) {
-      this.telemetry.track('mcp_connected', {
+      this.telemetry.track2('mcp_connected', {
         server_count: connectedCount,
         total_count: totalCount,
       });
@@ -451,7 +469,7 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
 
     const failedCount = entries.filter((entry) => entry.status === 'failed').length;
     if (failedCount > 0) {
-      this.telemetry.track('mcp_failed', {
+      this.telemetry.track2('mcp_failed', {
         failed_count: failedCount,
         total_count: totalCount,
       });

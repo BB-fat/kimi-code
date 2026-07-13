@@ -10,7 +10,7 @@ import { IAgentGoalService } from '#/agent/goal/goal';
 import type { PluginCommandActivatedEvent } from '@moonshot-ai/protocol';
 import { IEventBus } from '#/app/event/eventBus';
 import { IEventService } from '#/app/event/event';
-import { ErrorCodes, KimiError } from '#/errors';
+import { ErrorCodes, Error2 } from '#/errors';
 import { IAgentPermissionGate } from '#/agent/permissionGate/permissionGate';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import { IAgentPlanService } from '#/agent/plan/plan';
@@ -27,7 +27,7 @@ import { IAgentSkillService } from '#/agent/skill/skill';
 import { IAgentSwarmService } from '#/agent/swarm/swarm';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
-import { IAgentTurnService } from '#/agent/turn/turn';
+import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentUsageService } from '#/agent/usage/usage';
 import { IAgentUserToolService } from '#/agent/userTool/userTool';
 import type {
@@ -77,7 +77,7 @@ export class AgentRPCService implements IAgentRPCService {
   constructor(
     @IAgentPromptService private readonly promptService: IAgentPromptService,
     @IAgentShellCommandService private readonly shellCommand: IAgentShellCommandService,
-    @IAgentTurnService private readonly turnService: IAgentTurnService,
+    @IAgentLoopService private readonly loop: IAgentLoopService,
     @IAgentProfileService private readonly profile: IAgentProfileService,
     @IAgentPermissionModeService private readonly permissionMode: IAgentPermissionModeService,
     @IAgentPermissionGate private readonly permission: IAgentPermissionGate,
@@ -107,12 +107,14 @@ export class AgentRPCService implements IAgentRPCService {
     // prompt BEFORE launching the turn, so the web session title is populated as
     // soon as the conversation starts (gap closed — v2 used to leave it empty).
     await this.updatePromptMetadata(promptMetadataTextFromPayload(payload));
-    const turn = await this.promptService.prompt({
+    const handle = await this.promptService.enqueue({ message: {
       role: 'user',
       content: [...payload.input],
       toolCalls: [],
       origin: { kind: 'user' },
-    });
+    } });
+    if (handle.state === 'pending') return undefined;
+    const turn = await handle.launched;
     return turn === undefined ? undefined : { turn_id: turn.id };
   }
 
@@ -125,26 +127,27 @@ export class AgentRPCService implements IAgentRPCService {
   }
 
   async steer(payload: SteerPayload): Promise<PromptLaunchResult | undefined> {
-    this.telemetry.track('input_steer', { parts: payload.input.length });
-    const steer = this.promptService.steer({
+    this.telemetry.track2('input_steer', { parts: payload.input.length });
+    const queued = await this.promptService.enqueue({ message: {
       role: 'user',
       content: [...payload.input],
       toolCalls: [],
-    });
-    const turn = await steer.launched;
+    } });
+    const [steered] = await this.promptService.steer([queued.id]);
+    const turn = await steered?.launched;
     return turn === undefined ? undefined : { turn_id: turn.id };
   }
 
   cancel({ turnId }: CancelPayload): void {
-    if (this.turnService.getActiveTurn() !== undefined) {
-      this.telemetry.track('cancel', { from: 'streaming' });
+    if (this.loop.status().state === 'running') {
+      this.telemetry.track2('cancel', { from: 'streaming' });
     }
-    this.turnService.cancel(turnId);
+    this.loop.cancel(turnId);
   }
 
   undoHistory(payload: UndoHistoryPayload): number {
     const undone = this.promptService.undo(payload.count);
-    this.telemetry.track('conversation_undo', { count: payload.count });
+    this.telemetry.track2('conversation_undo', { count: payload.count });
     return undone;
   }
 
@@ -158,11 +161,11 @@ export class AgentRPCService implements IAgentRPCService {
     this.permissionMode.setMode(payload.mode);
     const enabled = this.permissionMode.mode === 'yolo';
     if (enabled !== wasYolo) {
-      this.telemetry.track('yolo_toggle', { enabled });
+      this.telemetry.track2('yolo_toggle', { enabled });
     }
     const afkEnabled = this.permissionMode.mode === 'auto';
     if (afkEnabled !== wasAuto) {
-      this.telemetry.track('afk_toggle', { enabled: afkEnabled });
+      this.telemetry.track2('afk_toggle', { enabled: afkEnabled });
     }
   }
 
@@ -209,7 +212,7 @@ export class AgentRPCService implements IAgentRPCService {
   cancelCompaction(_payload: EmptyPayload): void {
     const active = this.fullCompaction.compacting;
     if (active !== null) {
-      this.telemetry.track('cancel', { from: 'compacting' });
+      this.telemetry.track2('cancel', { from: 'compacting' });
     }
     active?.abortController.abort();
   }
@@ -249,7 +252,7 @@ export class AgentRPCService implements IAgentRPCService {
       (command) => command.pluginId === payload.pluginId && command.name === payload.commandName,
     );
     if (def === undefined) {
-      throw new KimiError(
+      throw new Error2(
         ErrorCodes.REQUEST_INVALID,
         `Plugin command "${payload.pluginId}:${payload.commandName}" was not found`,
       );
@@ -272,12 +275,12 @@ export class AgentRPCService implements IAgentRPCService {
       commandArgs: origin.commandArgs,
       trigger: origin.trigger,
     });
-    await this.promptService.prompt({
+    await this.promptService.enqueue({ message: {
       role: 'user',
       content: [{ type: 'text', text: expanded }],
       toolCalls: [],
       origin,
-    });
+    } });
     await this.updatePromptMetadata(promptMetadataTextFromPluginCommand(payload));
   }
 

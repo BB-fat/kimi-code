@@ -14,7 +14,7 @@ import {
   IAgentPermissionModeService,
   IAgentPlanService,
   IAgentProfileService,
-  IAgentPromptLegacyService,
+  IAgentPromptService,
   IAgentRPCService,
   IAgentSwarmService,
   IAgentSystemReminderService,
@@ -125,7 +125,7 @@ function makeFixture(options?: {
       bus,
       entries: [
         [IEventBus, bus],
-        [IAgentPromptLegacyService, { submit: recordReturning(`${id}.submit`, Promise.resolve({ prompt_id: 'p1' })) }],
+        [IAgentPromptService, { enqueue: recordReturning(`${id}.enqueue`, Promise.resolve({ prompt_id: 'p1' })) }],
         [
           IAgentRPCService,
           {
@@ -177,7 +177,7 @@ function makeFixture(options?: {
           },
         ],
         [IAgentUsageService, { status: () => usage }],
-        [IAgentContextSizeService, { get: () => ({ size: 100 }) }],
+        [IAgentContextSizeService, { get: () => ({ size: 100 }), rawSize: () => 120 }],
         [IAgentPermissionModeService, { mode: 'auto' }],
         [
           IAgentMcpService,
@@ -321,7 +321,7 @@ describe('CoreSession conversation flow and agent routing', () => {
   it('prompt routes to the main agent prompt service by default', async () => {
     const fx = makeFixture();
     await fx.core.prompt(parts);
-    expect(fx.calls['main.submit']).toEqual([[{ content: parts }]]);
+    expect(fx.calls['main.enqueue']).toEqual([[{ message: { role: 'user', content: parts, toolCalls: [] } }]]);
     // ensureMainAgent resolves main through the lifecycle's existing handle.
     expect(fx.getHandleCalls).toContain('main');
   });
@@ -329,8 +329,8 @@ describe('CoreSession conversation flow and agent routing', () => {
   it('prompt with an explicit agentId routes to that agent', async () => {
     const fx = makeFixture();
     await fx.core.prompt(parts, { agentId: 'btw-1' });
-    expect(fx.calls['btw-1.submit']).toEqual([[{ content: parts }]]);
-    expect(fx.calls['main.submit']).toBeUndefined();
+    expect(fx.calls['btw-1.enqueue']).toEqual([[{ message: { role: 'user', content: parts, toolCalls: [] } }]]);
+    expect(fx.calls['main.enqueue']).toBeUndefined();
   });
 
   it('prompt with an unknown agentId rejects with AGENT_NOT_FOUND', async () => {
@@ -418,6 +418,7 @@ describe('CoreSession queries', () => {
       planMode: true,
       swarmMode: false,
       contextTokens: 100,
+      rawContextTokens: 120,
       maxContextTokens: 1000,
       contextUsage: 0.1,
       usage: fx.usage,

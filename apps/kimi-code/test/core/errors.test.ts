@@ -1,4 +1,4 @@
-import { KimiError } from '@moonshot-ai/agent-core-v2';
+import { Error2 } from '@moonshot-ai/agent-core-v2';
 import { describe, expect, it } from 'vitest';
 import { CoreError, CoreErrorCodes, isCoreError } from '../../src/core/errors';
 
@@ -13,8 +13,8 @@ describe('CoreError', () => {
     expect(isCoreError(new Error('x'))).toBe(false);
     expect(isCoreError(undefined)).toBe(false);
   });
-  it('recognizes KimiError thrown by agent-core-v2 services', () => {
-    const err = new KimiError(CoreErrorCodes.SESSION_NOT_FOUND, 'session missing');
+  it('recognizes Error2 thrown by agent-core-v2 services', () => {
+    const err = new Error2(CoreErrorCodes.SESSION_NOT_FOUND, 'session missing');
     expect(isCoreError(err)).toBe(true);
   });
   it('rejects a plain Error that only carries a code', () => {

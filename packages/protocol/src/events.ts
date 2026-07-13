@@ -259,6 +259,7 @@ export type KimiErrorCode =
   | 'provider.rate_limit'
   | 'provider.auth_error'
   | 'provider.connection_error'
+  | 'provider.overloaded'
   | 'provider.not_found'
   | 'skill.not_found'
   | 'skill.type_unsupported'
@@ -296,6 +297,24 @@ export type KimiErrorCode =
   | 'fs.too_many_results'
   | 'fs.grep_timeout'
   | 'fs.git_unavailable'
+  | 'os.fs.not_found'
+  | 'os.fs.is_directory'
+  | 'os.fs.not_directory'
+  | 'os.fs.already_exists'
+  | 'os.fs.permission_denied'
+  | 'os.fs.not_empty'
+  | 'os.fs.unavailable'
+  | 'os.fs.unknown'
+  | 'os.process.spawn_failed'
+  | 'os.process.kill_failed'
+  | 'storage.not_found'
+  | 'storage.decode_failed'
+  | 'storage.corrupted'
+  | 'storage.io_failed'
+  | 'storage.locked'
+  | 'wire.duplicate_op'
+  | 'wire.cycle'
+  | 'wire.unknown_record'
   | 'validation.failed'
   | 'not_implemented'
   | 'internal';
@@ -306,6 +325,7 @@ export interface KimiErrorPayload {
   readonly name?: string;
   readonly details?: Record<string, unknown>;
   readonly retryable: boolean;
+  readonly cause?: KimiErrorPayload;
 }
 
 export interface TaskInfoBase {
@@ -1139,6 +1159,7 @@ export const kimiErrorCodeSchema = z.enum([
   'provider.rate_limit',
   'provider.auth_error',
   'provider.connection_error',
+  'provider.overloaded',
   'provider.not_found',
   'skill.not_found',
   'skill.type_unsupported',
@@ -1181,12 +1202,17 @@ export const kimiErrorCodeSchema = z.enum([
   'internal',
 ]) satisfies z.ZodType<KimiErrorCode>;
 
-export const kimiErrorPayloadSchema = z.object({
+export const kimiErrorPayloadSchema: z.ZodType<KimiErrorPayload> = z.lazy(
+  () => kimiErrorPayloadObjectSchema,
+);
+
+const kimiErrorPayloadObjectSchema = z.object({
   code: kimiErrorCodeSchema,
   message: z.string(),
   name: z.string().optional(),
   details: z.record(z.string(), z.unknown()).optional(),
   retryable: z.boolean(),
+  cause: kimiErrorPayloadSchema.optional(),
 }) satisfies z.ZodType<KimiErrorPayload>;
 
 export const taskInfoBaseSchema = z.object({
@@ -1400,7 +1426,7 @@ export const pluginCommandActivatedEventSchema = z.object({
   trigger: z.literal('user-slash'),
 }) satisfies z.ZodType<PluginCommandActivatedEvent>;
 
-export const errorEventSchema = kimiErrorPayloadSchema.extend({
+export const errorEventSchema = kimiErrorPayloadObjectSchema.extend({
   type: z.literal('error'),
 }) satisfies z.ZodType<ErrorEvent>;
 

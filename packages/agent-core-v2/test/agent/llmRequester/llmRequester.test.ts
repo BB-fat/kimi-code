@@ -8,7 +8,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   IAgentLLMRequesterService,
   type LLMRequestFinish,
-  type LLMRequestRetryContext,
 } from '#/agent/llmRequester/llmRequester';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import type { ILogger as Logger, LogPayload } from '#/_base/log/log';
@@ -17,8 +16,10 @@ import {
   createTestAgent,
   llmGenerateServices,
   logServices,
+  telemetryServices,
   type TestAgentContext,
 } from '../../harness';
+import { recordingTelemetry, type TelemetryRecord } from '../../app/telemetry/stubs';
 
 interface CapturedLogEntry {
   readonly level: 'error' | 'warn' | 'info' | 'debug';
@@ -112,7 +113,6 @@ describe('LLMRequester service migration coverage', () => {
           requestKind: 'direct_test',
           logFields: { turnStep: '7.2', droppedCount: 3 },
         },
-        retry: { maxAttempts: 1 },
       });
       ctx.mockNextResponse({ type: 'text', text: 'second response' });
       await llmRequester.request({
@@ -124,7 +124,6 @@ describe('LLMRequester service migration coverage', () => {
           requestKind: 'direct_test',
           logFields: { turnStep: '7.3' },
         },
-        retry: { maxAttempts: 1 },
       });
 
       const snapshots = wireEvents(ctx, 'llm.tools_snapshot');
@@ -169,41 +168,13 @@ describe('LLMRequester service migration coverage', () => {
       ctx.get(IAgentProfileService).update({ thinkingLevel: 'high' });
       ctx.mockNextResponse({ type: 'text', text: 'thinking response' });
 
-      await llmRequester.request({ retry: { maxAttempts: 1 } });
+      await llmRequester.request();
 
       expect(wireEvents(ctx, 'llm.request')).toHaveLength(1);
       expect(wireEvents(ctx, 'llm.request')[0]?.args).toMatchObject({
         thinkingEffort: 'high',
         thinkingKeep: 'all',
       });
-    });
-
-    it('records retry attempts after the first request attempt', async () => {
-      await ctx.dispose();
-      let calls = 0;
-      ctx = createTestAgent(
-        llmGenerateServices(async () => {
-          calls += 1;
-          if (calls === 1) {
-            throw new APIConnectionError('terminated');
-          }
-          return {
-            id: 'retry-response',
-            message: { role: 'assistant', content: [], toolCalls: [] },
-            usage: emptyUsage(),
-            finishReason: 'completed',
-            rawFinishReason: 'stop',
-          };
-        }),
-      );
-      llmRequester = ctx.get(IAgentLLMRequesterService);
-
-      await llmRequester.request();
-
-      const requests = wireEvents(ctx, 'llm.request');
-      expect(requests).toHaveLength(2);
-      expect((requests[0]?.args as Record<string, unknown> | undefined)?.['attempt']).toBeUndefined();
-      expect(requests[1]?.args).toMatchObject({ attempt: '2/3' });
     });
 
     it('records strict projection resends as separate outbound requests', async () => {
@@ -230,7 +201,7 @@ describe('LLMRequester service migration coverage', () => {
       );
       llmRequester = ctx.get(IAgentLLMRequesterService);
 
-      await llmRequester.request({ retry: { maxAttempts: 1 } });
+      await llmRequester.request();
 
       const requests = wireEvents(ctx, 'llm.request');
       expect(requests).toHaveLength(2);
@@ -309,11 +280,10 @@ describe('LLMRequester service migration coverage', () => {
     });
   });
 
-  describe('retry', () => {
+  describe('request failure logging', () => {
     let ctx: TestAgentContext | undefined;
 
     afterEach(async () => {
-      vi.useRealTimers();
       if (ctx === undefined) return;
       try {
         await ctx.expectResumeMatches();
@@ -323,77 +293,7 @@ describe('LLMRequester service migration coverage', () => {
       }
     });
 
-    it('retries an APIConnectionError("terminated") and succeeds on a later attempt', async () => {
-      vi.useFakeTimers();
-      let calls = 0;
-      const retryEvents: LLMRequestRetryContext[] = [];
-      ctx = createTestAgent(
-        llmGenerateServices(async () => {
-          calls += 1;
-          if (calls === 1) {
-            throw new APIConnectionError('terminated');
-          }
-          return {
-            id: 'retry-response',
-            message: { role: 'assistant', content: [], toolCalls: [] },
-            usage: emptyUsage(),
-            finishReason: 'completed',
-            rawFinishReason: 'stop',
-          };
-        }),
-      );
-      const llmRequester = ctx.get(IAgentLLMRequesterService);
-
-      const responsePromise = llmRequester.request({
-        retry: {
-          onRetry: (event) => {
-            retryEvents.push(event);
-          },
-        },
-      });
-      await vi.runAllTimersAsync();
-
-      await expect(responsePromise).resolves.toMatchObject({
-        message: {
-          role: 'assistant',
-          content: [{ type: 'text', text: '' }],
-          toolCalls: [],
-        },
-        usage: emptyUsage(),
-      });
-      expect(calls).toBe(2);
-      expect(retryEvents).toEqual([
-        expect.objectContaining({
-          failedAttempt: 1,
-          nextAttempt: 2,
-          maxAttempts: 3,
-          errorName: 'APIConnectionError',
-          errorMessage: 'terminated',
-        }),
-      ]);
-    });
-
-    it('does not retry once the signal is aborted', async () => {
-      let calls = 0;
-      const controller = new AbortController();
-      ctx = createTestAgent(
-        llmGenerateServices(async () => {
-          calls += 1;
-          controller.abort();
-          throw new APIConnectionError('terminated');
-        }),
-      );
-      const llmRequester = ctx.get(IAgentLLMRequesterService);
-
-      await expect(
-        llmRequester.request(undefined, undefined, controller.signal),
-      ).rejects.toMatchObject({
-        name: 'AbortError',
-      });
-      expect(calls).toBe(1);
-    });
-
-    it('logs final request failures without request payloads or stacks', async () => {
+    it('logs request failures without request payloads or stacks', async () => {
       const entries: unknown[] = [];
       const logger: Logger = {
         warn: (_message: string, payload?: LogPayload) => entries.push(payload),
@@ -417,7 +317,6 @@ describe('LLMRequester service migration coverage', () => {
             requestKind: 'direct_test',
             logFields: { turnStep: '0.1' },
           },
-          retry: { maxAttempts: 1 },
         }),
       ).rejects.toMatchObject({ message: 'temporary provider failure' });
 
@@ -425,7 +324,6 @@ describe('LLMRequester service migration coverage', () => {
         expect.objectContaining({
           requestKind: 'direct_test',
           turnStep: '0.1',
-          attempt: '1/1',
           model: expect.any(String),
           errorName: 'Error',
           errorMessage: 'temporary provider failure',
@@ -433,6 +331,51 @@ describe('LLMRequester service migration coverage', () => {
       ]);
       expect(JSON.stringify(entries)).not.toContain('messages');
       expect(JSON.stringify(entries)).not.toContain('stack');
+    });
+
+    it('fails a retryable provider error on the first attempt — retries are the loop\u2019s concern', async () => {
+      let calls = 0;
+      ctx = createTestAgent(
+        llmGenerateServices(async () => {
+          calls += 1;
+          throw new APIConnectionError('terminated');
+        }),
+      );
+      const llmRequester = ctx.get(IAgentLLMRequesterService);
+
+      await expect(llmRequester.request()).rejects.toMatchObject({
+        name: 'APIConnectionError',
+      });
+      expect(calls).toBe(1);
+    });
+
+    it('tracks api_error with the v1 wire shape (model id, alias, protocol, status code)', async () => {
+      const records: TelemetryRecord[] = [];
+      ctx = createTestAgent(
+        llmGenerateServices(async () => {
+          throw new APIStatusError(429, 'rate limited');
+        }),
+        telemetryServices(recordingTelemetry(records)),
+      );
+      const llmRequester = ctx.get(IAgentLLMRequesterService);
+
+      await expect(llmRequester.request()).rejects.toMatchObject({
+        name: 'APIStatusError',
+      });
+
+      expect(records).toContainEqual({
+        event: 'api_error',
+        properties: expect.objectContaining({
+          error_type: 'rate_limit',
+          model: 'mock-model',
+          alias: 'mock-model',
+          provider_type: 'kimi',
+          protocol: 'kimi',
+          retryable: expect.any(Boolean),
+          duration_ms: expect.any(Number),
+          status_code: 429,
+        }),
+      });
     });
   });
 

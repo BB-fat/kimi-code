@@ -42,6 +42,7 @@ describe('Agent + Cron — subagent suppression', () => {
 
     beforeEach(() => {
       ctx = createTestAgent(cronServices());
+      ctx.announceMain();
     });
 
     afterEach(async () => {
@@ -81,6 +82,7 @@ describe('Agent + Cron — subagent suppression', () => {
     beforeEach(() => {
       listenerCountBeforeCreate = process.listenerCount('SIGUSR1');
       ctx = createTestAgent();
+      ctx.announceMain();
       profile = ctx.get(IAgentProfileService);
     });
 
@@ -113,6 +115,7 @@ describe('Agent + Cron — subagent suppression', () => {
     beforeEach(() => {
       listenerCountBeforeCreate = process.listenerCount('SIGUSR1');
       ctx = createTestAgent();
+      ctx.announceMain();
       profile = ctx.get(IAgentProfileService);
     });
 

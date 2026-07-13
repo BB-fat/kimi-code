@@ -38,6 +38,7 @@ import type {
   IDisposable,
   Interaction,
   InteractionKind,
+  ISessionActivity,
   ISessionScopeHandle,
   Scope,
 } from '@moonshot-ai/agent-core-v2';
@@ -46,6 +47,7 @@ import {
   IAgentWireService,
   IEventBus,
   IEventService,
+  ISessionActivity as ISessionActivityService,
   ISessionInteractionService,
   ISessionIndex,
   ISessionLifecycleService,
@@ -58,6 +60,7 @@ import type {
   SessionCreatedEvent,
   SessionCursor,
   SessionMetaUpdatedEvent,
+  SessionStatus,
 } from '@moonshot-ai/protocol';
 import { isVolatileEventType } from '@moonshot-ai/protocol';
 
@@ -109,6 +112,9 @@ interface SessionState {
   readonly sessionId: string;
   readonly journal: SessionEventJournal;
   readonly tracker: InFlightTurnTracker;
+  readonly activity?: ISessionActivity;
+  /** Last status emitted (initialized from live session activity). */
+  lastStatus?: SessionStatus;
   /** Recent durable envelopes for in-memory replay. */
   readonly tail: Array<{ seq: number; envelope: EventEnvelope }>;
   /** Connections subscribed to this session, each with its optional agent allowlist. */
@@ -290,10 +296,13 @@ export class SessionEventBroadcaster {
       await journal.close();
       return undefined;
     }
+    const activity = session.accessor.get(ISessionActivityService);
     state = {
       sessionId,
       journal,
       tracker: new InFlightTurnTracker(),
+      activity,
+      lastStatus: activity.status(),
       tail: [],
       targets: new Map(),
       queue: Promise.resolve(),
@@ -520,36 +529,41 @@ export class SessionEventBroadcaster {
     // contract, hence the assertion via `unknown`.
     const wireEvent = { ...event, agentId, sessionId } as unknown as Event;
     if (event.type === 'turn.started') {
-      // Re-emit the authoritative running status ahead of the turn event. v2
-      // derives session status via `ISessionActivity` (a pure pull) and
-      // publishes nothing, so without this the WS stream never carries the
-      // running transition and kimi-web's Stop button (gated on
-      // `session.status === 'running'`) never renders. Emitted before
-      // `turn.started` so the web projector's `turn.started` synthesis (which
-      // binds the real prompt_id) applies after and keeps `currentPromptId`
-      // intact; idle/aborted are left to the projector's `turn.ended`
-      // synthesis, awaiting states to the client-side approval/question lists.
-      // Mirrors v1's sessionService status_changed emission.
-      this.enqueueDurable(state, {
-        type: 'event.session.status_changed',
-        status: 'running',
-        previous_status: 'idle',
-        agentId: 'main',
-        sessionId,
-      } as unknown as Event);
+      // Status is authoritative protocol state: emit it before the turn event so
+      // clients enter running first. A pending interaction remains higher
+      // priority than running.
+      this.enqueueStatusChanged(state, pendingStatus(state.activity?.status()) ?? 'running');
     }
+    const volatile = isVolatileSignal(event.type);
     state.queue = state.queue
-      .then(() => this.dispatch(state, wireEvent, isVolatileSignal(event.type)))
+      .then(() => this.dispatch(state, wireEvent, volatile))
       .catch(() => {});
+    if (event.type === 'turn.ended') {
+      // Emit completion after the turn event. Pending interactions remain higher
+      // priority; otherwise failed/cancelled/blocked turns abort and all others
+      // become idle.
+      const reason = (event as { reason?: unknown }).reason;
+      const terminalStatus =
+        reason === 'cancelled' || reason === 'failed' || reason === 'blocked' ? 'aborted' : 'idle';
+      this.enqueueStatusChanged(state, pendingStatus(state.activity?.status()) ?? terminalStatus);
+    }
+    // v1 wire compat: fan the legacy `background.task.*` spelling out next to
+    // the native `task.*` event (see `legacyTaskEvent`) so unchanged v1 clients
+    // keep working while v2-shaped clients ignore the alias. Same volatility as
+    // the native event so replay/journal/filter stay coherent between the two.
+    const legacy = legacyTaskEvent(event, agentId, sessionId);
+    if (legacy !== undefined) {
+      state.queue = state.queue
+        .then(() => this.dispatch(state, legacy, volatile))
+        .catch(() => {});
+    }
   }
 
   /**
    * Bridge the session's interaction kernel (approvals / questions) onto the
    * v1 event stream. The kernel only emits in-process notifications
-   * (`onDidChangePending` / `onDidResolve`), so the v1 protocol events
-   * (`event.question.requested`, `event.approval.requested`, ...) are
-   * synthesized here — mirroring what v1's question/approval services
-   * published through the Core firehose.
+   * (`onDidChangePending` / `onDidResolve`), so the v1 protocol events and their
+   * authoritative session status transitions are synthesized here.
    */
   private attachInteractions(
     sessionId: string,
@@ -558,8 +572,8 @@ export class SessionEventBroadcaster {
   ): void {
     const interactions = session.accessor.get(ISessionInteractionService);
     // Seed silently: interactions already pending at activation are surfaced
-    // by the snapshot route (`pending_questions` / `pending_approvals`), so
-    // announcing them again would duplicate the snapshot.
+    // by the snapshot route (`pending_questions` / `pending_approvals`), and
+    // lastStatus was initialized from the same live activity state.
     for (const i of interactions.listPending()) {
       state.knownInteractions.set(i.id, i.kind);
     }
@@ -569,7 +583,10 @@ export class SessionEventBroadcaster {
           if (state.knownInteractions.has(i.id)) continue;
           state.knownInteractions.set(i.id, i.kind);
           const event = interactionRequestedEvent(i, sessionId);
-          if (event !== undefined) this.enqueueDurable(state, event);
+          if (event !== undefined) {
+            this.enqueueDurable(state, event);
+            this.enqueueStatusChanged(state, state.activity!.status());
+          }
         }
       }),
       interactions.onDidResolve(({ id, response }) => {
@@ -577,13 +594,37 @@ export class SessionEventBroadcaster {
         if (kind === undefined) return;
         state.knownInteractions.delete(id);
         const event = interactionResolvedEvent(kind, id, response, sessionId);
-        if (event !== undefined) this.enqueueDurable(state, event);
+        if (event !== undefined) {
+          this.enqueueDurable(state, event);
+          this.enqueueStatusChanged(state, state.activity!.status());
+        }
       }),
     );
   }
 
   private enqueueDurable(state: SessionState, event: Event): void {
     state.queue = state.queue.then(() => this.dispatch(state, event, false)).catch(() => {});
+  }
+
+  private enqueueStatusChanged(state: SessionState, status: SessionStatus): void {
+    state.queue = state.queue
+      .then(async () => {
+        const previousStatus = state.lastStatus;
+        if (previousStatus === undefined || status === previousStatus) return;
+        state.lastStatus = status;
+        await this.dispatch(
+          state,
+          {
+            type: 'event.session.status_changed',
+            status,
+            previous_status: previousStatus,
+            agentId: 'main',
+            sessionId: state.sessionId,
+          } as Event,
+          false,
+        );
+      })
+      .catch(() => {});
   }
 
   private async dispatch(state: SessionState, event: Event, volatile: boolean): Promise<void> {
@@ -672,6 +713,30 @@ const volatileSignalTypeSet: ReadonlySet<string> = new Set(VOLATILE_SIGNAL_TYPES
 
 function isVolatileSignal(type: string): boolean {
   return volatileSignalTypeSet.has(type);
+}
+
+/**
+ * v1 wire compatibility: map a native v2 background-task lifecycle event to its
+ * pre-v2 spelling, returning `undefined` for every other event. The pre-v2
+ * engine emitted `background.task.started`/`background.task.terminated`; v2
+ * emits `task.started`/`task.terminated`. The payload (`info`) is kept
+ * byte-identical and `agentId`/`sessionId` are re-stamped so the alias flows
+ * through the same dispatch / journal / agent-filter path as the native event.
+ *
+ * Exists so unchanged v1 consumers (kimi-code TUI / `kimi -p`, node-sdk) keep
+ * working while v2-shaped consumers (kimi-web) keep the native event and ignore
+ * the alias (registered as known, no handler). Remove once every consumer has
+ * migrated to `task.*`.
+ */
+function legacyTaskEvent(event: DomainEvent, agentId: string, sessionId: string): Event | undefined {
+  if (event.type !== 'task.started' && event.type !== 'task.terminated') return undefined;
+  const legacyType =
+    event.type === 'task.started' ? 'background.task.started' : 'background.task.terminated';
+  return { ...event, type: legacyType, agentId, sessionId } as unknown as Event;
+}
+
+function pendingStatus(status: SessionStatus | undefined): SessionStatus | undefined {
+  return status === 'awaiting_approval' || status === 'awaiting_question' ? status : undefined;
 }
 
 /** Session/workspace/config/model-catalog events are broadcast to every connection. */

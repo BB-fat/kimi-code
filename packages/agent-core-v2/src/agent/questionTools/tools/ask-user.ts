@@ -10,12 +10,12 @@
 import { z } from 'zod';
 
 import { CoreErrors } from '#/_base/errors/codes';
-import { KimiError } from '#/_base/errors/errors';
+import { Error2 } from '#/_base/errors/errors';
 import { toInputJsonSchema } from '#/_base/tools/support/input-schema';
-import { isAbortError } from '#/agent/loop/errors';
+import { isAbortError } from '#/_base/utils/abort';
 import { IAgentTaskService } from '#/agent/task/task';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
-import type { TelemetryProperties } from '#/app/telemetry/telemetry';
+import type { QuestionAnsweredEvent } from '#/app/telemetry/events';
 import type {
   BuiltinTool,
   ExecutableToolContext,
@@ -256,15 +256,13 @@ export class AskUserQuestionTool implements BuiltinTool<AskUserQuestionInput> {
 
       const normalized = normalizeQuestionResult(result);
       if (normalized === null || Object.keys(normalized.answers).length === 0) {
-        this.telemetry.track('question_dismissed');
+        this.telemetry.track2('question_dismissed');
         return dismissedQuestionResult();
       }
 
-      const properties: TelemetryProperties =
-        normalized.method !== undefined
-          ? { answered: Object.keys(normalized.answers).length, method: normalized.method }
-          : { answered: Object.keys(normalized.answers).length };
-      this.telemetry.track('question_answered', properties);
+      const properties: QuestionAnsweredEvent = { answered: Object.keys(normalized.answers).length };
+      if (normalized.method !== undefined) properties.method = normalized.method;
+      this.telemetry.track2('question_answered', properties);
       return {
         isError: false,
         output: JSON.stringify({ answers: normalized.answers }),
@@ -272,7 +270,7 @@ export class AskUserQuestionTool implements BuiltinTool<AskUserQuestionInput> {
     } catch (error) {
       if (isAbortError(error) || signal.aborted) throw error;
 
-      if (error instanceof KimiError && error.code === CoreErrors.codes.NOT_IMPLEMENTED) {
+      if (error instanceof Error2 && error.code === CoreErrors.codes.NOT_IMPLEMENTED) {
         return {
           isError: true,
           output: QUESTION_UNSUPPORTED_FAILURE_MESSAGE,

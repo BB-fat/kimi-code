@@ -185,7 +185,7 @@ describe('Agent context', () => {
     expect(history[1]?.content).toEqual([{ type: 'text', text: '' }]);
   });
 
-  it('rejects tool result messages left empty by LLM projection cleanup', () => {
+  it('renders tool result messages left empty by LLM projection cleanup as empty output', () => {
     const history: ContextMessage[] = [
       {
         role: 'assistant',
@@ -200,9 +200,21 @@ describe('Agent context', () => {
       },
     ];
 
-    expect(() => ctx.project(history)).toThrow(
-      'Tool result message content cannot be empty after removing empty text blocks.',
-    );
+    // Empty tool output never reaches the model as a blank block (and no
+    // longer throws): the projection renders the empty-output status text.
+    expect(ctx.project(history)).toEqual([
+      {
+        role: 'assistant',
+        content: [],
+        toolCalls: [{ type: 'function', id: 'call_empty', name: 'empty', arguments: '{}' }],
+      },
+      {
+        role: 'tool',
+        content: [{ type: 'text', text: '<system>Tool output is empty.</system>' }],
+        toolCalls: [],
+        toolCallId: 'call_empty',
+      },
+    ]);
   });
 
   it('projects hook result messages into LLM projection', async () => {
@@ -609,6 +621,121 @@ describe('Agent context', () => {
     expect(contextSize.get()).toEqual({ size: 1_000, measured: 1_000, estimated: 0 });
   });
 
+  it('undo only counts real user prompts, skipping task notifications', () => {
+    ctx.appendAssistantText(1, 'first response');
+    ctx.appendAssistantText(2, 'second response');
+
+    // Append a task notification (role: 'user' but not a real prompt)
+    context.append(
+      {
+        role: 'user',
+        content: [{ type: 'text', text: 'background task completed' }],
+        toolCalls: [],
+        origin: {
+          kind: 'task',
+          taskId: 'bash-001',
+          status: 'completed',
+          notificationId: 'task:bash-001:completed',
+        },
+      },
+    );
+
+    expect(context.get().map((m) => m.role)).toEqual([
+      'user',
+      'assistant',
+      'user',
+      'assistant',
+      'user',
+    ]);
+
+    ctx.undoHistory(1);
+
+    // Should remove the background notification, the second assistant, and the second user prompt
+    expect(context.get().map((m) => m.role)).toEqual(['user', 'assistant']);
+  });
+
+  it('removes injection messages inside the undone turn', () => {
+    context.append(userMessage('earlier question', { kind: 'user' }));
+    context.append(userMessage('do the work', { kind: 'user' }));
+    context.append(
+      userMessage('Plan mode is active', {
+        kind: 'injection',
+        variant: 'plan_mode',
+      }),
+    );
+    context.append(
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'work done' }],
+        toolCalls: [],
+        origin: undefined,
+      },
+    );
+
+    ctx.undoHistory(1);
+
+    // v2 undo cuts at the oldest undone real-user prompt regardless of origin:
+    // injections inside the removed range go with the turn (unlike v1, which
+    // kept them); dynamic context such as plan-mode notices and tool schemas
+    // self-heals via re-injection on the next turn boundary.
+    expect(context.get()).toEqual([
+      expect.objectContaining({
+        role: 'user',
+        content: [{ type: 'text', text: 'earlier question' }],
+        origin: { kind: 'user' },
+      }),
+    ]);
+  });
+
+  describe('notification projection', () => {
+    it('does not merge a cron-fire envelope into an adjacent user message', () => {
+      const cronEnvelope =
+        '<cron-fire jobId="deadbeef" cron="*/5 * * * *" recurring="true" coalescedCount="1" stale="false">\n<prompt>\ncheck the deploy\n</prompt>\n</cron-fire>';
+      const messages = ctx.project([
+        userMessage(cronEnvelope, {
+          kind: 'cron_job',
+          jobId: 'deadbeef',
+          cron: '*/5 * * * *',
+          recurring: true,
+          coalescedCount: 1,
+          stale: false,
+        }),
+        userMessage('Actual follow-up from the user', { kind: 'user' }),
+      ]);
+      expect(messages).toHaveLength(2);
+      expect(textOf(messages[0]!)).toBe(cronEnvelope);
+      expect(textOf(messages[1]!)).toBe('Actual follow-up from the user');
+    });
+
+    it('uses message origin to keep non-user-origin messages separate', () => {
+      const messages = ctx.project([
+        userMessage('Host reminder without an XML prefix', {
+          kind: 'injection',
+          variant: 'host',
+        }),
+        userMessage('Actual follow-up from the user', { kind: 'user' }),
+      ]);
+
+      expect(messages).toHaveLength(2);
+      expect(textOf(messages[0]!)).toBe('Host reminder without an XML prefix');
+      expect(textOf(messages[1]!)).toBe('Actual follow-up from the user');
+    });
+
+    it('only merges user-role messages with user origin', () => {
+      const messages = ctx.project([
+        userMessage('First real prompt', { kind: 'user' }),
+        userMessage('Second real prompt', { kind: 'user' }),
+        userMessage('No origin prompt'),
+        userMessage('Third real prompt', { kind: 'user' }),
+      ]);
+
+      expect(messages).toHaveLength(3);
+      expect(textOf(messages[0]!)).toBe('First real prompt\n\nSecond real prompt');
+      expect(textOf(messages[1]!)).toBe('No origin prompt');
+      expect(textOf(messages[2]!)).toBe('Third real prompt');
+    });
+  });
+
   it('sizes a sub-range between two measured snapshots by their difference', () => {
     ctx.appendAssistantTextWithUsage(1, 'a1', 1_000);
     ctx.appendAssistantTextWithUsage(2, 'a2', 2_400);
@@ -679,114 +806,6 @@ describe('Agent context', () => {
     });
   });
 
-  it('undo only counts real user prompts, skipping task notifications', () => {
-    ctx.appendAssistantText(1, 'first response');
-    ctx.appendAssistantText(2, 'second response');
-
-    // Append a task notification (role: 'user' but not a real prompt)
-    context.append(
-      {
-        role: 'user',
-        content: [{ type: 'text', text: 'background task completed' }],
-        toolCalls: [],
-        origin: {
-          kind: 'task',
-          taskId: 'bash-001',
-          status: 'completed',
-          notificationId: 'task:bash-001:completed',
-        },
-      },
-    );
-
-    expect(context.get().map((m) => m.role)).toEqual([
-      'user',
-      'assistant',
-      'user',
-      'assistant',
-      'user',
-    ]);
-
-    ctx.undoHistory(1);
-
-    // Should remove the background notification, the second assistant, and the second user prompt
-    expect(context.get().map((m) => m.role)).toEqual(['user', 'assistant']);
-  });
-
-  it('preserves injection messages when undo removes the surrounding turn', () => {
-    context.append(userMessage('do the work', { kind: 'user' }));
-    context.append(
-      userMessage('Plan mode is active', {
-        kind: 'injection',
-        variant: 'plan_mode',
-      }),
-    );
-    context.append(
-      {
-        role: 'assistant',
-        content: [{ type: 'text', text: 'work done' }],
-        toolCalls: [],
-        origin: undefined,
-      },
-    );
-
-    ctx.undoHistory(1);
-
-    expect(context.get()).toEqual([
-      expect.objectContaining({
-        role: 'user',
-        origin: { kind: 'injection', variant: 'plan_mode' },
-      }),
-    ]);
-  });
-
-  describe('notification projection', () => {
-    it('does not merge a cron-fire envelope into an adjacent user message', () => {
-      const cronEnvelope =
-        '<cron-fire jobId="deadbeef" cron="*/5 * * * *" recurring="true" coalescedCount="1" stale="false">\n<prompt>\ncheck the deploy\n</prompt>\n</cron-fire>';
-      const messages = ctx.project([
-        userMessage(cronEnvelope, {
-          kind: 'cron_job',
-          jobId: 'deadbeef',
-          cron: '*/5 * * * *',
-          recurring: true,
-          coalescedCount: 1,
-          stale: false,
-        }),
-        userMessage('Actual follow-up from the user', { kind: 'user' }),
-      ]);
-      expect(messages).toHaveLength(2);
-      expect(textOf(messages[0]!)).toBe(cronEnvelope);
-      expect(textOf(messages[1]!)).toBe('Actual follow-up from the user');
-    });
-
-    it('uses message origin to keep non-user-origin messages separate', () => {
-      const messages = ctx.project([
-        userMessage('Host reminder without an XML prefix', {
-          kind: 'injection',
-          variant: 'host',
-        }),
-        userMessage('Actual follow-up from the user', { kind: 'user' }),
-      ]);
-
-      expect(messages).toHaveLength(2);
-      expect(textOf(messages[0]!)).toBe('Host reminder without an XML prefix');
-      expect(textOf(messages[1]!)).toBe('Actual follow-up from the user');
-    });
-
-    it('only merges user-role messages with user origin', () => {
-      const messages = ctx.project([
-        userMessage('First real prompt', { kind: 'user' }),
-        userMessage('Second real prompt', { kind: 'user' }),
-        userMessage('No origin prompt'),
-        userMessage('Third real prompt', { kind: 'user' }),
-      ]);
-
-      expect(messages).toHaveLength(3);
-      expect(textOf(messages[0]!)).toBe('First real prompt\n\nSecond real prompt');
-      expect(textOf(messages[1]!)).toBe('No origin prompt');
-      expect(textOf(messages[2]!)).toBe('Third real prompt');
-    });
-  });
 });
 
 function userMessage(text: string, origin?: ContextMessage['origin']): ContextMessage {

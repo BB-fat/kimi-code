@@ -1,21 +1,10 @@
 /**
- * Base error classes shared by every domain — `KimiError`,
- * `CancellationError`, and related control-flow errors.
+ * Base error classes shared by every domain — `Error2` and related
+ * control-flow errors.
  */
 
 import { CoreErrors } from './codes';
 import type { ErrorCode } from './codes';
-
-export class CancellationError extends Error {
-  constructor() {
-    super('Canceled');
-    this.name = 'CancellationError';
-  }
-}
-
-export function isCancellationError(error: unknown): error is CancellationError {
-  return error instanceof CancellationError;
-}
 
 export class ExpectedError extends Error {
   readonly isExpected = true;
@@ -45,29 +34,43 @@ export class BugIndicatingError extends Error {
   }
 }
 
-export interface KimiErrorOptions {
+export interface Error2Options {
   readonly details?: Readonly<Record<string, unknown>>;
   readonly cause?: unknown;
   readonly name?: string;
 }
 
-export class KimiError extends Error {
+export class Error2 extends Error {
   readonly code: ErrorCode;
   readonly details?: Readonly<Record<string, unknown>>;
 
-  constructor(code: ErrorCode, message: string, options?: KimiErrorOptions) {
+  constructor(code: ErrorCode, message: string, options?: Error2Options) {
     super(message, options?.cause === undefined ? undefined : { cause: options.cause });
-    this.name = options?.name ?? 'KimiError';
+    this.name = options?.name ?? 'Error2';
     this.code = code;
     this.details = options?.details;
   }
 }
 
-export function isKimiError(error: unknown): error is KimiError {
-  return error instanceof KimiError;
+export function isError2(error: unknown): error is Error2 {
+  return error instanceof Error2;
 }
 
-export class NotImplementedError extends KimiError {
+/**
+ * Follow `cause` links out of `Error2` wrappers down to the underlying raw
+ * error. Boundary-translated errors carry the original provider/fs error as
+ * `cause`, so predicates that classify raw error shapes (retryability,
+ * status codes) test the unwrapped value.
+ */
+export function unwrapErrorCause(error: unknown): unknown {
+  let current = error;
+  while (current instanceof Error2 && current.cause !== undefined) {
+    current = current.cause;
+  }
+  return current;
+}
+
+export class NotImplementedError extends Error2 {
   constructor(feature?: string) {
     super(
       CoreErrors.codes.NOT_IMPLEMENTED,

@@ -1,8 +1,8 @@
 /**
- * `/api/v1` prompt routes — v1-compatible prompt surface backed by
- * `IPromptLegacyService` (the per-agent v1 scheduler). Paths and wire shapes
- * mirror `packages/server/src/routes/prompts.ts` so existing clients keep
- * working against server-v2.
+ * `/api/v1` prompt routes — v1-compatible prompt surface backed directly by
+ * the Agent-scoped `prompt` scheduler. This edge applies protocol conversion,
+ * request overrides, and metadata updates while preserving the paths and wire
+ * shapes from `packages/server/src/routes/prompts.ts`.
  */
 
 import { createWriteStream } from 'node:fs';
@@ -13,16 +13,26 @@ import { pipeline } from 'node:stream/promises';
 import {
   IBootstrapService,
   IAgentLifecycleService,
-  IAgentPromptLegacyService,
+  IAgentPermissionModeService,
+  IAgentProfileService,
+  IAgentPromptService,
+  IAuthSummaryService,
+  IEventService,
   IFileService,
+  ISessionMetadata,
+  promptMetadataTextFromContentParts,
+  type ContentPart,
+  type PromptHandle,
+  type PromptQueueSnapshot,
   ISessionContext,
   ISessionLifecycleService,
   ITelemetryService,
+  applyPromptMetadataUpdate,
   buildImageCompressionCaption,
   compressBase64ForModel,
   compressImageForModel,
-  isKimiError,
-  KimiError,
+  isError2,
+  Error2,
   persistOriginalImage,
   sessionMediaOriginalsDir,
   type GetResult,
@@ -89,23 +99,16 @@ async function resolveSession(core: Scope, sessionId: string): Promise<ISessionS
   // `undefined` only when the session is unknown or its workspace is gone.
   const session = await core.accessor.get(ISessionLifecycleService).resume(sessionId);
   if (session === undefined) {
-    throw new KimiError('session.not_found', `session ${sessionId} does not exist`);
+    throw new Error2('session.not_found', `session ${sessionId} does not exist`);
   }
   return session;
 }
 
-async function resolveLegacy(
-  core: Scope,
-  sessionId: string,
-  agentId?: string,
-): Promise<IAgentPromptLegacyService> {
-  return resolveLegacyFromSession(await resolveSession(core, sessionId), agentId);
+async function resolvePrompt(core: Scope, sessionId: string, agentId?: string) {
+  return resolvePromptFromSession(await resolveSession(core, sessionId), agentId);
 }
 
-async function resolveLegacyFromSession(
-  session: ISessionScopeHandle,
-  agentId?: string,
-): Promise<IAgentPromptLegacyService> {
+async function resolvePromptFromSession(session: ISessionScopeHandle, agentId?: string) {
   // A prompt may target a forked side-channel agent (e.g. `/btw`) via
   // `body.agent_id`. Default to `main` when absent; only `main` is
   // auto-created — any other id must already exist (forked beforehand), or it
@@ -115,9 +118,14 @@ async function resolveLegacyFromSession(
       ? await ensureMainAgent(session)
       : session.accessor.get(IAgentLifecycleService).getHandle(agentId);
   if (agent === undefined) {
-    throw new KimiError('agent.not_found', `agent ${agentId} does not exist`);
+    throw new Error2('agent.not_found', `agent ${agentId} does not exist`);
   }
-  return agent.accessor.get(IAgentPromptLegacyService);
+  return {
+    prompt: agent.accessor.get(IAgentPromptService),
+    auth: agent.accessor.get(IAuthSummaryService),
+    profile: agent.accessor.get(IAgentProfileService),
+    permissionMode: agent.accessor.get(IAgentPermissionModeService),
+  };
 }
 
 export function registerPromptsRoutes(app: PromptRouteHost, core: Scope): void {
@@ -135,7 +143,7 @@ export function registerPromptsRoutes(app: PromptRouteHost, core: Scope): void {
     async (req, reply) => {
       try {
         const { session_id } = req.params;
-        const result = (await resolveLegacy(core, session_id)).list();
+        const result = projectPromptList((await resolvePrompt(core, session_id)).prompt.list());
         reply.send(okEnvelope(result, req.id));
       } catch (error) {
         sendMappedError(reply, req.id, error);
@@ -181,9 +189,25 @@ export function registerPromptsRoutes(app: PromptRouteHost, core: Scope): void {
             },
           },
         );
-        const legacy = await resolveLegacy(core, session_id, resolvedBody.agent_id);
-        const result = await legacy.submit(resolvedBody);
-        reply.send(okEnvelope(result, req.id));
+        const resolved = await resolvePrompt(core, session_id, resolvedBody.agent_id);
+        await resolved.auth.ensureReady();
+        if (resolvedBody.model !== undefined) await resolved.profile.setModel(resolvedBody.model);
+        if (resolvedBody.thinking !== undefined) resolved.profile.setThinking(resolvedBody.thinking);
+        if (resolvedBody.permission_mode !== undefined) resolved.permissionMode.setMode(resolvedBody.permission_mode);
+        const parts = contentToCoreParts(resolvedBody.content);
+        const session = await resolveSession(core, session_id);
+        await applyPromptMetadataUpdate({
+          metadata: session.accessor.get(ISessionMetadata),
+          eventService: core.accessor.get(IEventService),
+          sessionId: session_id,
+        }, promptMetadataTextFromContentParts(parts));
+        const handle = await resolved.prompt.enqueue({ message: {
+          role: 'user',
+          content: parts,
+          toolCalls: [],
+          origin: { kind: 'user' },
+        } });
+        reply.send(okEnvelope(projectPromptHandle(handle), req.id));
       } catch (error) {
         sendMappedError(reply, req.id, error);
       }
@@ -210,9 +234,9 @@ export function registerPromptsRoutes(app: PromptRouteHost, core: Scope): void {
     async (req, reply) => {
       try {
         const { session_id } = req.params;
-        const legacy = await resolveLegacy(core, session_id);
-        const result = await legacy.steer(req.body.prompt_ids);
-        reply.send(okEnvelope(result, req.id));
+        const resolved = await resolvePrompt(core, session_id);
+        await resolved.prompt.steer(req.body.prompt_ids);
+        reply.send(okEnvelope({ steered: true, prompt_ids: [...req.body.prompt_ids] }, req.id));
       } catch (error) {
         sendMappedError(reply, req.id, error);
       }
@@ -248,18 +272,75 @@ export function registerPromptsRoutes(app: PromptRouteHost, core: Scope): void {
           reply.send(errEnvelope(ErrorCode.VALIDATION_FAILED, message, req.id));
           return;
         }
-        const legacy = await resolveLegacy(core, session_id);
-        const result =
-          parsed.action === 'abort'
-            ? await legacy.abort(parsed.id)
-            : await legacy.steer([parsed.id]);
-        reply.send(okEnvelope(result, req.id));
+        const resolved = await resolvePrompt(core, session_id);
+        if (parsed.action === 'abort') {
+          resolved.prompt.abort(parsed.id);
+          reply.send(okEnvelope({ aborted: true }, req.id));
+        } else {
+          await resolved.prompt.steer([parsed.id]);
+          reply.send(okEnvelope({ steered: true, prompt_ids: [parsed.id] }, req.id));
+        }
       } catch (error) {
         sendMappedError(reply, req.id, error);
       }
     },
   );
   app.post(actionRoute.path, actionRoute.options, actionRoute.handler as Parameters<PromptRouteHost['post']>[2]);
+}
+
+function projectPromptList(snapshot: PromptQueueSnapshot) {
+  return {
+    active: snapshot.active === undefined ? null : projectPromptSnapshot(snapshot.active),
+    queued: snapshot.pending.map(projectPromptSnapshot),
+  };
+}
+
+function projectPromptHandle(handle: PromptHandle) {
+  return projectPromptSnapshot(handle);
+}
+
+function projectPromptSnapshot(prompt: PromptQueueSnapshot['pending'][number]) {
+  const status = prompt.state === 'running' || prompt.state === 'steered'
+    ? 'running'
+    : prompt.state === 'blocked' ? 'blocked' : 'queued';
+  return {
+    prompt_id: prompt.id,
+    user_message_id: prompt.userMessageId,
+    status,
+    content: corePartsToProtocol(prompt.message.content),
+    created_at: prompt.createdAt,
+  };
+}
+
+function corePartsToProtocol(content: readonly ContentPart[]): PromptSubmission['content'] {
+  const parts: PromptSubmission['content'] = [];
+  for (const part of content) {
+    if (part.type === 'text') parts.push({ type: 'text', text: part.text });
+    else if (part.type === 'image_url') {
+      const match = /^data:([^;]+);base64,(.*)$/.exec(part.imageUrl.url);
+      parts.push(match === null
+        ? { type: 'image', source: { kind: 'url', url: part.imageUrl.url } }
+        : { type: 'image', source: { kind: 'base64', media_type: match[1]!, data: match[2]! } });
+    } else if (part.type === 'video_url') {
+      const match = /^data:([^;]+);base64,(.*)$/.exec(part.videoUrl.url);
+      parts.push(match === null
+        ? { type: 'video', source: { kind: 'url', url: part.videoUrl.url } }
+        : { type: 'video', source: { kind: 'base64', media_type: match[1]!, data: match[2]! } });
+    }
+  }
+  return parts;
+}
+
+function contentToCoreParts(content: PromptSubmission['content']): ContentPart[] {
+  const parts: ContentPart[] = [];
+  for (const part of content) {
+    if (part.type === 'text') parts.push({ type: 'text', text: part.text });
+    else if (part.type === 'image' && part.source.kind === 'url') parts.push({ type: 'image_url', imageUrl: { url: part.source.url } });
+    else if (part.type === 'image' && part.source.kind === 'base64') parts.push({ type: 'image_url', imageUrl: { url: `data:${part.source.media_type};base64,${part.source.data}` } });
+    else if (part.type === 'video' && part.source.kind === 'url') parts.push({ type: 'video_url', videoUrl: { url: part.source.url } });
+    else if (part.type === 'video' && part.source.kind === 'base64') parts.push({ type: 'video_url', videoUrl: { url: `data:${part.source.media_type};base64,${part.source.data}` } });
+  }
+  return parts;
 }
 
 interface ResolvePromptMediaOptions {
@@ -415,7 +496,7 @@ async function readFileOrStream(file: GetResult): Promise<Buffer> {
 function assertMediaFile(file: GetResult, expected: 'image' | 'video'): void {
   const prefix = expected === 'video' ? 'video/' : 'image/';
   if (file.meta.media_type.toLowerCase().startsWith(prefix)) return;
-  throw new KimiError(
+  throw new Error2(
     'validation.failed',
     `file ${file.meta.id} is ${file.meta.media_type}, not ${expected === 'video' ? 'a video' : 'an image'}`,
   );
@@ -434,7 +515,7 @@ function sendMappedError(
   requestId: string,
   err: unknown,
 ): void {
-  if (isKimiError(err)) {
+  if (isError2(err)) {
     switch (err.code) {
       case 'session.not_found':
       case 'agent.not_found':
@@ -538,13 +619,13 @@ function sendMappedError(
   );
 }
 
-function authProviderDetails(err: KimiError): { provider_id: string } | undefined {
+function authProviderDetails(err: Error2): { provider_id: string } | undefined {
   const providerId = err.details?.['provider_id'];
   if (typeof providerId !== 'string') return undefined;
   return { provider_id: providerId };
 }
 
-function authModelDetails(err: KimiError): { model_id?: string; provider_id?: string } | null {
+function authModelDetails(err: Error2): { model_id?: string; provider_id?: string } | null {
   const details: { model_id?: string; provider_id?: string } = {};
   const modelId = err.details?.['model_id'];
   const providerId = err.details?.['provider_id'];

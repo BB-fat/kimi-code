@@ -22,6 +22,7 @@ describe('Agent + Cron integration (P1.7)', () => {
 
     beforeEach(() => {
       ctx = createTestAgent();
+      ctx.announceMain();
       cron = ctx.get(ISessionCronService);
       profile = ctx.get(IAgentProfileService);
       profile.update({ activeToolNames: ['CronCreate', 'CronList', 'CronDelete'] });
@@ -71,6 +72,7 @@ describe('Agent + Cron integration (P1.7)', () => {
     beforeEach(() => {
       vi.stubEnv('KIMI_DISABLE_CRON', '1');
       ctx = createTestAgent();
+      ctx.announceMain();
       cron = ctx.get(ISessionCronService);
       profile = ctx.get(IAgentProfileService);
       tools = ctx.get(IAgentToolRegistryService);

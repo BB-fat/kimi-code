@@ -2,6 +2,7 @@ import type { ContentPart } from '#/app/llmProtocol/message';
 
 import { createDecorator } from "#/_base/di/instantiation";
 import type { IDisposable } from "#/_base/di/lifecycle";
+import type { Event } from '#/_base/event';
 
 import type { Hooks } from '#/hooks';
 import type { WireMigrationRecord } from '#/agent/wireRecord/migration/migration';
@@ -93,9 +94,11 @@ export interface IAgentWireRecordService {
   close(): Promise<void>;
 
   readonly hooks: Hooks<{
-    onRestoredRecord: WireRecordRestoredContext;
-    onResumeEnded: {};
+    onDidRestoreRecord: WireRecordRestoredContext;
   }>;
+
+  /** Fires once after a resume's replay pass has finished (live or restored). */
+  readonly onDidFinishResume: Event<void>;
 }
 
 export const IAgentWireRecordService = createDecorator<IAgentWireRecordService>('agentWireRecordService');

@@ -7,8 +7,14 @@
  * absent or malformed, it is rebuilt once from the legacy
  * `<homeDir>/session_index.jsonl` (one workspace per distinct absolute
  * `workDir`) and then persisted. All access is serialized through a
- * promise-chain mutex so load/rebuild/mutations never race. Bound at App
- * scope.
+ * promise-chain mutex so load/rebuild/mutations never race.
+ *
+ * `createOrTouch` is the single choke point every workspace/session creation
+ * funnels through, so it owns the root-existence contract: the root must be
+ * an existing directory on the host filesystem, otherwise it throws
+ * `fs.path_not_found` (mirrors v1's `WorkspaceRootNotFoundError`). The rebuild
+ * path bypasses the check on purpose — it catalogs where sessions *were*, not
+ * where new ones may open. Bound at App scope.
  */
 
 import { basename, isAbsolute } from 'pathe';
@@ -16,6 +22,8 @@ import { basename, isAbsolute } from 'pathe';
 import { InstantiationType } from '#/_base/di/extensions';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
 import { encodeWorkDirKey } from '#/_base/utils/workdir-slug';
+import { ErrorCodes, Error2, unwrapErrorCause } from '#/errors';
+import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
 
 import { IWorkspaceRegistry, type Workspace, type WorkspaceUpdate } from './workspaceRegistry';
@@ -44,6 +52,7 @@ export class WorkspaceRegistryService implements IWorkspaceRegistry {
   constructor(
     @IWorkspacePersistence private readonly store: IWorkspacePersistence,
     @IFileSystemStorageService private readonly storage: IFileSystemStorageService,
+    @IHostFileSystem private readonly hostFs: IHostFileSystem,
   ) {}
 
   list(): Promise<readonly Workspace[]> {
@@ -63,6 +72,23 @@ export class WorkspaceRegistryService implements IWorkspaceRegistry {
   createOrTouch(root: string, name?: string): Promise<Workspace> {
     return this.runExclusive(async () => {
       const cache = await this.ensureLoaded();
+      // Refuse to catalog a root that is not a live directory: every consumer
+      // of a workspace (session cwd, fs tools, Bash spawn) assumes it exists,
+      // and failing here beats a misleading spawn ENOENT at prompt time.
+      let stat;
+      try {
+        stat = await this.hostFs.stat(root);
+      } catch (error) {
+        // hostFs wraps raw errnos in `HostFsError`; classify the unwrapped cause.
+        const code = (unwrapErrorCause(error) as NodeJS.ErrnoException | undefined)?.code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') {
+          throw new Error2(ErrorCodes.FS_PATH_NOT_FOUND, `workspace root ${root} does not exist`);
+        }
+        throw error;
+      }
+      if (!stat.isDirectory) {
+        throw new Error2(ErrorCodes.FS_PATH_NOT_FOUND, `workspace root ${root} is not a directory`);
+      }
       const id = encodeWorkDirKey(root);
       const existing = cache.get(id);
       const now = Date.now();

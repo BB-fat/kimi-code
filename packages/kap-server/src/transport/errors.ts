@@ -3,7 +3,7 @@
  * envelope, guard serialization, time-box calls, and gate access.
  */
 
-import { ErrorCodes, KimiError } from '@moonshot-ai/agent-core-v2';
+import { ErrorCodes, Error2 } from '@moonshot-ai/agent-core-v2';
 import { ErrorCode, errEnvelope } from '@moonshot-ai/protocol';
 
 /** Thrown by {@link withTimeout} when a call exceeds its deadline. */
@@ -29,10 +29,13 @@ export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 
 const KIMI_TO_PROTOCOL: Record<string, ErrorCode> = {
   [ErrorCodes.SESSION_NOT_FOUND]: ErrorCode.SESSION_NOT_FOUND,
+  // v1 maps a missing agent onto the session-not-found envelope; keep parity.
+  [ErrorCodes.AGENT_NOT_FOUND]: ErrorCode.SESSION_NOT_FOUND,
   [ErrorCodes.SESSION_UNDO_UNAVAILABLE]: ErrorCode.SESSION_UNDO_UNAVAILABLE,
   [ErrorCodes.REQUEST_INVALID]: ErrorCode.VALIDATION_FAILED,
   [ErrorCodes.NOT_IMPLEMENTED]: ErrorCode.INTERNAL_ERROR,
   [ErrorCodes.PROMPT_NOT_FOUND]: ErrorCode.PROMPT_NOT_FOUND,
+  [ErrorCodes.FS_PATH_NOT_FOUND]: ErrorCode.FS_PATH_NOT_FOUND,
   [ErrorCodes.SESSION_BUSY]: ErrorCode.SESSION_BUSY,
   [ErrorCodes.PROMPT_ALREADY_COMPLETED]: ErrorCode.PROMPT_ALREADY_COMPLETED,
   [ErrorCodes.GOAL_ALREADY_EXISTS]: ErrorCode.GOAL_ALREADY_EXISTS,
@@ -41,15 +44,24 @@ const KIMI_TO_PROTOCOL: Record<string, ErrorCode> = {
   [ErrorCodes.GOAL_NOT_RESUMABLE]: ErrorCode.GOAL_NOT_RESUMABLE,
   [ErrorCodes.GOAL_OBJECTIVE_EMPTY]: ErrorCode.GOAL_OBJECTIVE_EMPTY,
   [ErrorCodes.GOAL_OBJECTIVE_TOO_LONG]: ErrorCode.GOAL_OBJECTIVE_TOO_LONG,
+  // hostFs / storage codes → closest v1 wire equivalent (ENOTDIR collapses
+  // into path-not-found); codes without an equivalent fall back to 50001.
+  [ErrorCodes.OS_FS_NOT_FOUND]: ErrorCode.FS_PATH_NOT_FOUND,
+  [ErrorCodes.OS_FS_NOT_DIRECTORY]: ErrorCode.FS_PATH_NOT_FOUND,
+  [ErrorCodes.OS_FS_IS_DIRECTORY]: ErrorCode.FS_IS_DIRECTORY,
+  [ErrorCodes.OS_FS_ALREADY_EXISTS]: ErrorCode.FS_ALREADY_EXISTS,
+  [ErrorCodes.OS_FS_PERMISSION_DENIED]: ErrorCode.FS_PERMISSION_DENIED,
+  [ErrorCodes.STORAGE_IO_FAILED]: ErrorCode.PERSISTENCE_FAILURE,
+  [ErrorCodes.STORAGE_LOCKED]: ErrorCode.PERSISTENCE_FAILURE,
 };
 
 /**
- * Map an internal error to the project envelope. `KimiError` keeps its coded
+ * Map an internal error to the project envelope. `Error2` keeps its coded
  * mapping; everything else becomes `50001`. Stack traces are intentionally not
  * surfaced.
  */
 export function mapError(err: unknown, requestId: string): ReturnType<typeof errEnvelope> {
-  if (err instanceof KimiError) {
+  if (err instanceof Error2) {
     const code = KIMI_TO_PROTOCOL[err.code] ?? ErrorCode.INTERNAL_ERROR;
     return errEnvelope(code, err.message, requestId, err.stack);
   }
@@ -93,7 +105,7 @@ export function validationEnvelope(
 
 /**
  * Ensure a value survives a JSON round-trip (catches circular refs, `BigInt`,
- * functions). Returns the value unchanged; throws `KimiError` on failure so the
+ * functions). Returns the value unchanged; throws `Error2` on failure so the
  * caller maps it to `50001` with a clear message.
  */
 export function assertSerializable(value: unknown): unknown {
@@ -101,7 +113,7 @@ export function assertSerializable(value: unknown): unknown {
   try {
     JSON.stringify(value);
   } catch (error) {
-    throw new KimiError(
+    throw new Error2(
       ErrorCodes.INTERNAL,
       `result not serializable: ${error instanceof Error ? error.message : String(error)}`,
     );

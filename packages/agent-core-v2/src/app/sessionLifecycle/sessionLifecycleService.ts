@@ -6,7 +6,8 @@
  * addressing, running lifecycle hook slots, and tearing them down on
  * close/archive — archiving flags the session's `sessionMetadata`, removes
  * its `agentLifecycle` agents, restoring clears the archived flag, and
- * broadcasts through `event`. Materializes the session's initial metadata on
+ * broadcasts through `event`; session start and resume failures are reported
+ * through `telemetry`. Materializes the session's initial metadata on
  * creation by resolving `sessionMetadata`. Bound at App scope. Persisted
  * sessions are discovered through the `sessionIndex` read model, and workspace
  * roots are remembered through `workspaceRegistry`.
@@ -45,7 +46,8 @@ import {
 } from '#/app/sessionIndex/sessionIndex';
 import { IWorkspaceLocalConfigService } from '#/app/workspaceLocalConfig/workspaceLocalConfig';
 import { IWorkspaceRegistry } from '#/app/workspaceRegistry/workspaceRegistry';
-import { ErrorCodes, KimiError } from '#/errors';
+import { ITelemetryService } from '#/app/telemetry/telemetry';
+import { ErrorCodes, Error2, isError2 } from '#/errors';
 import { createHooks } from '#/hooks';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { IAppendLogStore } from '#/persistence/interface/appendLogStore';
@@ -114,6 +116,7 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
     @IWorkspaceLocalConfigService
     private readonly workspaceLocalConfig: IWorkspaceLocalConfigService,
     @IEventService private readonly event: IEventService,
+    @ITelemetryService private readonly telemetry: ITelemetryService,
   ) {
     super();
   }
@@ -192,6 +195,10 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
   private async announceCreated(event: SessionCreatedEvent): Promise<void> {
     await this.hooks.onDidCreateSession.run(event);
     this._onDidCreateSession.fire(event);
+    // Deliberately broader than v1: resumes also emit, with `resumed: true` —
+    // the flag exists precisely to distinguish them (v1's resume path never
+    // emitted despite the schema having the flag).
+    this.telemetry.track2('session_started', { resumed: event.source === 'resume' });
     event.handle.accessor.get(ISessionActivityKernel).markActive();
   }
 
@@ -216,7 +223,14 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
     if (inflight !== undefined) return inflight;
     const live = this.sessions.get(sessionId);
     if (live !== undefined) return Promise.resolve(live);
-    const promise = this.doResume(sessionId).finally(() => this.resuming.delete(sessionId));
+    const promise = this.doResume(sessionId)
+      .catch((error: unknown) => {
+        this.telemetry.track2('session_load_failed', {
+          reason: isError2(error) ? error.code : error instanceof Error ? error.name : 'unknown',
+        });
+        throw error;
+      })
+      .finally(() => this.resuming.delete(sessionId));
     this.resuming.set(sessionId, promise);
     return promise;
   }
@@ -319,7 +333,7 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
     const sourceHandle = this.sessions.get(sourceId);
     const indexSummary = await this.index.get(sourceId);
     if (sourceHandle === undefined && indexSummary === undefined) {
-      throw new KimiError(ErrorCodes.SESSION_NOT_FOUND, `session ${sourceId} does not exist`);
+      throw new Error2(ErrorCodes.SESSION_NOT_FOUND, `session ${sourceId} does not exist`);
     }
     const workspaceId =
       sourceHandle !== undefined
@@ -338,7 +352,7 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
       // 3. Resolve the work dir the fork inherits (same workspace as the source).
       const workspace = await this.workspaceRegistry.get(workspaceId);
       if (workspace === undefined) {
-        throw new KimiError('workspace.not_found', `workspace ${workspaceId} does not exist`);
+        throw new Error2('workspace.not_found', `workspace ${workspaceId} does not exist`);
       }
 
       // 4. Read the source metadata (live handle or disk).
@@ -350,7 +364,7 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
       // 5. Mint the target id and reject collisions.
       const targetId = opts.newSessionId ?? createSessionId();
       if (this.sessions.has(targetId) || (await this.index.get(targetId)) !== undefined) {
-        throw new KimiError(
+        throw new Error2(
           ErrorCodes.SESSION_ALREADY_EXISTS,
           `Session "${targetId}" already exists`,
         );
