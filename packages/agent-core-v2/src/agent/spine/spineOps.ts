@@ -163,7 +163,10 @@ export const spineNext = defineOp(SpineModel, 'spine.next', {
     const opened: SpineNode = {
       id: p.openedId,
       summary: p.summary,
-      openedAt: p.closedAt,
+      // The sibling opens right after the closing span — at the transition
+      // carrier's index — so the carrier assistant message and its receipt
+      // belong to the new sibling's span, not the closed one's.
+      openedAt: p.closedAt + 1,
       baselineTokens: p.baselineTokens,
       children: [],
     };

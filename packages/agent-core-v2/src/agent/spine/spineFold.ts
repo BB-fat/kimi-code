@@ -17,13 +17,13 @@
  * Span-firing invariants: a span closed entirely before the current root
  * epoch is owned by the epoch summary and is skipped silently — left queued,
  * it would pin the span scan and keep every post-epoch span raw forever.
- * `spine.next` siblings share one boundary index (the closing node's
- * `closedAt` is the new sibling's `openedAt`), so a span fires once the scan
- * has reached or passed its `openedAt`; otherwise every sibling after the
- * first in a next-chain would stay raw and its memory never injected. A span
- * fully behind the scan is late-drained: its memory is emitted, but the
- * current message still goes through normal handling instead of being
- * skipped.
+ * Closed spans never include the transition carrier: a span ends before the
+ * assistant message carrying the close/next call, and a `spine.next` sibling
+ * opens right after (at the carrier's index), so next-chain spans are
+ * disjoint and contiguous. A span fires once the scan has reached or passed
+ * its `openedAt`; a span fully behind the scan is late-drained: its memory
+ * is emitted, but the current message still goes through normal handling
+ * instead of being skipped.
  *
  * `collectSpanUserRequests` is the commit-side mirror of that numbering: it
  * tags each real user request inside a closing node's inclusive span with its

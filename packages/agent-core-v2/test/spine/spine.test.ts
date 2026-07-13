@@ -13,6 +13,7 @@ import {
   type BeforeStepContext,
 } from '#/agent/loop/loop';
 import { ACCEPTED_OUTPUT, toControlResult } from '#/agent/spine/tools/controlResult';
+import type { ContextMessage } from '#/agent/contextMemory/types';
 import type { PersistedWireRecord } from '#/agent/wireRecord/wireRecord';
 import type { PersistedRecord } from '#/wire/wireService';
 import {
@@ -31,11 +32,13 @@ import type { Message } from '#/app/llmProtocol/message';
 
 import {
   agentService,
+  createCommandRunner,
   execEnvServices,
   InMemoryWireRecordPersistence,
   testAgent,
   type TestAgentContext,
   type TestAgentOptions,
+  type TestAgentServiceOverride,
 } from '../harness';
 
 const SPINE_ENV = 'KIMI_CODE_SPINE';
@@ -233,7 +236,9 @@ describe('Spine reducers (via wire)', () => {
     expect(state.nodes['1.1.1']?.closedAt).toBe(5);
     expect(state.nodes['1.1.1']?.memory).toBe('did A');
     expect(state.nodes['1.1.2']?.summary).toBe('task B');
-    expect(state.nodes['1.1.2']?.openedAt).toBe(5);
+    // The sibling opens right after the closing span, at the transition
+    // carrier's index.
+    expect(state.nodes['1.1.2']?.openedAt).toBe(6);
     expect(state.nodes['1.1']?.children).toEqual(['1.1.1', '1.1.2']);
   });
 
@@ -500,6 +505,96 @@ describe('Spine control tools', () => {
     expect(state.openStack.at(-1)).toBe('1.1.2');
   });
 
+  it('keeps batched tool results visible and paired after a close', async () => {
+    // Reproduces the fold-boundary defect: the response batches an ordinary
+    // tool with spine_close, and the instant receipt lands before the
+    // ordinary result. Closing at the receipt index folded the carrier
+    // assistant message away, leaving the ordinary result an orphan the
+    // projector dropped (or an illegal wire when nothing else survived).
+    const rec = recordingHostFs();
+    const ctx = testAgent(
+      execEnvServices({
+        hostFs: rec.fs,
+        processRunner: createCommandRunner('ORDINARY-RESULT-MARKER'),
+      }),
+    );
+    await configureLoop(ctx);
+    ctx.mockNextResponse(toolCallPart('call_open', 'spine_open', { summary: 'task A' }));
+    ctx.mockNextResponse(
+      toolCallPart('call_bash', 'Bash', { command: 'true', description: 'noop' }),
+      toolCallPart('call_close', 'spine_close', { memory: 'did A' }),
+    );
+    ctx.mockNextResponse({ type: 'text', text: 'finished' });
+
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'start' }] });
+    await ctx.untilTurnEnd();
+
+    const history = ctx.context.get();
+    const carrierIndex = history.findIndex(
+      (m) => m.role === 'assistant' && m.toolCalls.some((call) => call.id === 'call_close'),
+    );
+    expect(carrierIndex).toBeGreaterThan(0);
+    // The span ends before the carrier, not at the receipt.
+    expect(readSpine(ctx).nodes['1.1.1']?.closedAt).toBe(carrierIndex - 1);
+
+    // The carrier and both tool results survive the fold, and every tool
+    // result keeps its originating assistant message.
+    const folded = ctx.get(IAgentSpineService).fold(history) as readonly ContextMessage[];
+    expect(folded.some((m) => m.role === 'tool' && m.toolCallId === 'call_bash')).toBe(true);
+    expect(folded.some((m) => m.role === 'tool' && m.toolCallId === 'call_close')).toBe(true);
+    expect(toolPairingGaps(folded)).toEqual([]);
+
+    // And the batched result reaches the model instead of being dropped as
+    // an orphan.
+    expect(historyText(ctx.project())).toContain('ORDINARY-RESULT-MARKER');
+
+    // The archive mirrors the folded span: no carrier, no receipt, no
+    // batched result.
+    const archive = [...rec.writes.values()].join('\n');
+    expect(archive).toContain('did A');
+    expect(archive).not.toContain('call_bash');
+    expect(archive).not.toContain('call_close');
+  });
+
+  it('hands the transition carrier to the new sibling span on next', async () => {
+    const ctx = testAgent(
+      execEnvServices({
+        hostFs: recordingHostFs().fs,
+        processRunner: createCommandRunner('ORDINARY-RESULT-MARKER'),
+      }),
+    );
+    await configureLoop(ctx);
+    ctx.mockNextResponse(toolCallPart('call_open', 'spine_open', { summary: 'task A' }));
+    ctx.mockNextResponse(
+      toolCallPart('call_bash', 'Bash', { command: 'true', description: 'noop' }),
+      toolCallPart('call_next', 'spine_next', { summary: 'task B', memory: 'did A' }),
+    );
+    ctx.mockNextResponse(toolCallPart('call_close_b', 'spine_close', { memory: 'did B' }));
+    ctx.mockNextResponse({ type: 'text', text: 'finished' });
+
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'start' }] });
+    await ctx.untilTurnEnd();
+
+    const history = ctx.context.get();
+    const carrierIndex = history.findIndex(
+      (m) => m.role === 'assistant' && m.toolCalls.some((call) => call.id === 'call_next'),
+    );
+    const state = readSpine(ctx);
+    expect(state.nodes['1.1.1']?.closedAt).toBe(carrierIndex - 1);
+    // The sibling opens at the carrier index: the carrier, its receipt, and
+    // the batched result belong to the sibling's span.
+    expect(state.nodes['1.1.2']?.openedAt).toBe(carrierIndex);
+
+    // After the sibling closes, the whole next-chain folds away — the
+    // carrier, both receipts, and the batched result leave no orphans.
+    const folded = ctx.get(IAgentSpineService).fold(history) as readonly ContextMessage[];
+    expect(folded.some((m) => m.role === 'tool' && m.toolCallId === 'call_bash')).toBe(false);
+    expect(toolPairingGaps(folded)).toEqual([]);
+    const memories = folded.filter((m) => textOf(m).includes('<spine_memory>'));
+    expect(memories).toHaveLength(2);
+    expect(historyText(ctx.project())).not.toContain('ORDINARY-RESULT-MARKER');
+  });
+
   it('rejects a second control tool in the same step', async () => {
     const ctx = loopContext();
     await configureLoop(ctx);
@@ -742,6 +837,82 @@ describe('Spine durability', () => {
     expect(reported).toHaveLength(1);
     expect(String(reported[0])).toContain('call_open_2');
   });
+
+  it('clamps the closing boundary at the span start', async () => {
+    // A truncation repair can restart an open span at the cut — past the end
+    // of the surviving history — so `assistantIndex - 1` would invert the
+    // span without the clamp.
+    const { beforeStep, afterStep, spine, ctx } = spineWithCapturedStepHooks(
+      execEnvServices({ hostFs: recordingHostFs().fs }),
+    );
+    ctx
+      .get(IAgentWireService)
+      .dispatch(spineOpen({ id: '1.1.1', summary: 'task A', parentId: '1.1', openedAt: 10 }));
+    ctx.context.append({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'closing' }],
+      toolCalls: [{ type: 'function', id: 'call_close', name: 'spine_close', arguments: '{}' }],
+    });
+    ctx.context.append({
+      role: 'tool',
+      content: [{ type: 'text', text: ACCEPTED_OUTPUT }],
+      toolCalls: [],
+      toolCallId: 'call_close',
+    });
+
+    await hookOf(beforeStep, 'spine')(beforeCtx(new AbortController().signal), noopNext);
+    expect(spine.acceptClose('did A', 'call_close').accepted).toBe(true);
+    await hookOf(afterStep, 'spine')(afterCtx(new AbortController().signal), noopNext);
+
+    expect(readSpine(ctx).nodes['1.1.1']?.closedAt).toBe(10);
+  });
+
+  it('commits a leftover close at the next step start when its receipt landed', async () => {
+    // The abort path: afterStep never runs, so the close stays pending past its
+    // owning step. The next step's beforeStep must commit it (the receipt is
+    // already in context) so the tree catches up before the model sees the
+    // context — rather than dropping it and forking the tree from the receipt.
+    const { beforeStep, reported, spine, ctx } = spineWithCapturedStepHooks(
+      execEnvServices({ hostFs: recordingHostFs().fs }),
+    );
+    ctx
+      .get(IAgentWireService)
+      .dispatch(spineOpen({ id: '1.1.1', summary: 'task A', parentId: '1.1', openedAt: 0 }));
+    ctx.context.append({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'work a' }],
+      toolCalls: [],
+    });
+    ctx.context.append({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'work b' }],
+      toolCalls: [],
+    });
+    ctx.context.append({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'closing' }],
+      toolCalls: [toolCallPart('call_close', 'spine_close', {})],
+    });
+    ctx.context.append({
+      role: 'tool',
+      content: [{ type: 'text', text: ACCEPTED_OUTPUT }],
+      toolCalls: [],
+      toolCallId: 'call_close',
+    });
+
+    // Owning step: accept the close, then abort before afterStep can commit it.
+    const controller = new AbortController();
+    await hookOf(beforeStep, 'spine')(beforeCtx(controller.signal), noopNext);
+    expect(spine.acceptClose('did A', 'call_close').accepted).toBe(true);
+    controller.abort();
+
+    // The next step begins: the leftover is committed (boundary = the carrier's
+    // predecessor), not dropped — and nothing is reported.
+    await hookOf(beforeStep, 'spine')(beforeCtx(new AbortController().signal), noopNext);
+
+    expect(readSpine(ctx).nodes['1.1.1']?.closedAt).toBe(1);
+    expect(reported).toHaveLength(0);
+  });
 });
 
 function readSpine(ctx: TestAgentContext) {
@@ -861,11 +1032,12 @@ const noopNext = async (): Promise<void> => {};
  * step hooks, so tests can drive beforeStep / afterStep by hand instead of
  * racing a real turn.
  */
-function spineWithCapturedStepHooks(): {
+function spineWithCapturedStepHooks(...overrides: readonly TestAgentServiceOverride[]): {
   readonly beforeStep: Map<string, BeforeStepHook>;
   readonly afterStep: Map<string, AfterStepHook>;
   readonly reported: unknown[];
   readonly spine: IAgentSpineService;
+  readonly ctx: TestAgentContext;
 } {
   const beforeStep = new Map<string, BeforeStepHook>();
   const afterStep = new Map<string, AfterStepHook>();
@@ -893,8 +1065,30 @@ function spineWithCapturedStepHooks(): {
   setUnexpectedErrorHandler((err) => {
     reported.push(err);
   });
-  const ctx = testAgent(agentService(IAgentLoopService, fakeLoop));
-  return { beforeStep, afterStep, reported, spine: ctx.get(IAgentSpineService) };
+  const ctx = testAgent(agentService(IAgentLoopService, fakeLoop), ...overrides);
+  return { beforeStep, afterStep, reported, spine: ctx.get(IAgentSpineService), ctx };
+}
+
+/**
+ * Tool-call pairing invariant over a folded history: every tool result must
+ * appear after the assistant message carrying its call. Returns the ids of
+ * orphan results — the fold-boundary defect's signature.
+ */
+function toolPairingGaps(messages: readonly ContextMessage[]): string[] {
+  const gaps: string[] = [];
+  const openCallIds = new Set<string>();
+  for (const message of messages) {
+    if (message.role === 'assistant') {
+      for (const call of message.toolCalls) openCallIds.add(call.id);
+    } else if (
+      message.role === 'tool' &&
+      message.toolCallId !== undefined &&
+      !openCallIds.has(message.toolCallId)
+    ) {
+      gaps.push(message.toolCallId);
+    }
+  }
+  return gaps;
 }
 
 function hookOf<THook>(hooks: Map<string, THook>, name: string): THook {

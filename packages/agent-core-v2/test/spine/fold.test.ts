@@ -263,10 +263,10 @@ describe('Spine projection fold', () => {
   });
 
   it('replaces each sibling of a next-chain with its own memory', () => {
-    // `spine.next` gives the new sibling `openedAt == closedAt` of the node it
-    // replaces — the very index the fold jumps past after firing the previous
-    // span. Regression: only the first sibling folded; every later sibling
-    // stayed raw and its memory was never injected.
+    // `spine.next` opens the new sibling right after the closing span
+    // (`openedAt == closedAt + 1`) — the index the fold lands on right after
+    // firing the previous span. Regression: only the first sibling folded;
+    // every later sibling stayed raw and its memory was never injected.
     const ctx = testAgent();
     append(ctx, userMessage('start'));
     append(ctx, assistantText('A body 1'));

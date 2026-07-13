@@ -7,8 +7,12 @@
  * transition; the `loop.afterStep` hook then commits it (`spine.open` /
  * `spine.close` / `spine.next`) once the matching assistant tool-call and tool
  * result have both landed in `contextMemory`, so the tree moves only on
- * observed evidence. Acceptance validates non-empty bodies and the cursor
- * position. At commit the closing span's real user requests are compiled into
+ * observed evidence. A closing span ends before the assistant message carrying
+ * the transition call, so the carrier, its receipt, and any slower tool
+ * results batched in the same response stay visible and paired in the parent
+ * context; `spine.next` hands the carrier to the new sibling, whose span
+ * opens right after the closing one. Acceptance validates non-empty bodies
+ * and the cursor position. At commit the closing span's real user requests are compiled into
  * the memory body as `## User Message [U#]` sections (with the fold's stable
  * ordinals), so `[U#]` citations stay resolvable after the span folds away.
  * Reads the cursor and node layout through
@@ -28,9 +32,12 @@
  * (detection only, no repair): ops without receipts (receipts a compaction
  * folded away) are the benign direction and stay silent, and the legacy bare
  * `accepted` receipt left by older sessions still counts, so resuming them
- * raises no false alarm. A pending transition dropped without commit evidence
- * is reported the same way, unless the owning step aborted (a routine
- * interrupt). Renders the read-only `spine_tree` view across every
+ * raises no false alarm. A transition left pending when its step ends
+ * (typically an abort before afterStep ran) is committed at the next step's
+ * start when its receipt already landed, so the tree catches up before the
+ * model sees the context; one with no receipt to commit against is dropped and
+ * reported the same way, unless the owning step aborted (a routine interrupt).
+ * Renders the read-only `spine_tree` view across every
  * root epoch (current first by numeric order), so a superseded epoch's
  * closed-node archives stay discoverable after a root compaction. Registers
  * its history fold into `contextProjector` and its `<spine_view>` prompt block
@@ -182,10 +189,12 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     this._register(
       loop.hooks.onWillBeginStep.register('spine', async (ctx, next) => {
         if (this.pending !== null) {
-          this.dropPending(
-            this.pending,
-            'the previous step ended before its tool result was observed',
-          );
+          // A leftover pending means the previous step ended (usually an abort
+          // before afterStep ran) without committing its transition. Commit it
+          // now — before this step's request is built — so a receipt that
+          // already landed is honored and the tree catches up before the model
+          // sees the context; commitPending drops it when there is no evidence.
+          await this.commitPending();
         }
         this.stepSignal = ctx.signal;
         await next();
@@ -401,10 +410,10 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
           this.commitOpen(pending.summary, evidence.assistantIndex);
           break;
         case 'close':
-          await this.commitClose(pending.memory, evidence.toolResultIndex);
+          await this.commitClose(pending.memory, evidence.assistantIndex);
           break;
         case 'next':
-          await this.commitNext(pending.summary, pending.memory, evidence.toolResultIndex);
+          await this.commitNext(pending.summary, pending.memory, evidence.assistantIndex);
           break;
       }
     } catch (error) {
@@ -446,11 +455,19 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     );
   }
 
-  private async commitClose(memory: string, closedAt: number): Promise<void> {
+  private async commitClose(memory: string, assistantIndex: number): Promise<void> {
     const state = this.state();
     const id = topOf(state);
     const node = state.nodes[id];
     if (node === undefined || isRootEpoch(id)) return;
+    // The span ends BEFORE the assistant message carrying the transition
+    // call: the carrier, its instant receipt, and any slower tool results
+    // batched in the same response stay visible and paired in the parent
+    // context. (Closing at the receipt index would fold the carrier away and
+    // orphan the late results — the receipt always lands first.) The max()
+    // guards a span start that truncation repair moved past the carrier's
+    // predecessor.
+    const closedAt = Math.max(assistantIndex - 1, node.openedAt);
     const assembled = assembleMemoryBody({
       userRequests: collectSpanUserRequests(this.context.get(), node.openedAt, closedAt),
       childMemories: closedChildMemories(state, node),
@@ -463,7 +480,7 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     );
   }
 
-  private async commitNext(summary: string, memory: string, closedAt: number): Promise<void> {
+  private async commitNext(summary: string, memory: string, assistantIndex: number): Promise<void> {
     const state = this.state();
     const closedId = topOf(state);
     const closing = state.nodes[closedId];
@@ -473,6 +490,11 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     const parent = state.nodes[parentId];
     if (parent === undefined) return;
     const openedId = childNodeId(parentId, nextChildIndex(parent.children));
+    // Same boundary rule as commitClose: the span ends before the transition
+    // carrier, and the reducer opens the new sibling right after (at the
+    // carrier's index), so the carrier and its receipt ride inside the new
+    // sibling's span.
+    const closedAt = Math.max(assistantIndex - 1, closing.openedAt);
     const assembled = assembleMemoryBody({
       userRequests: collectSpanUserRequests(this.context.get(), closing.openedAt, closedAt),
       childMemories: closedChildMemories(state, closing),
