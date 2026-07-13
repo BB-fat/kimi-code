@@ -143,11 +143,23 @@ export class AgentContextSizeService extends Disposable implements IAgentContext
   }
 
   measured(input: readonly Message[], output: readonly Message[], usage: TokenUsage): void {
+    // The loop opens a `partial` assistant at `step.begin` and settles it with
+    // the response content after the request returns: a trailing partial in
+    // `input` and the output message are the SAME stored message. Strip
+    // trailing partials from both sides so the match and the prefix length
+    // describe the settled storage. Counting the partial separately would
+    // inflate the prefix one past the stored context, knocking the
+    // whole-context read off the exact measured aggregate and onto a
+    // per-message estimate until the next append caught the length up — the
+    // footer gauge then swung between estimate and request caliber at every
+    // turn boundary.
+    const storedInput = stripTrailingPartials(input);
+    const storedContext = stripTrailingPartials(this.context.get());
     // Only adopt the measurement when `input` still matches the live context.
     // This rejects stale readings (e.g. the context was spliced, or the request
     // used overridden messages) so a mismatched measurement cannot poison state.
-    if (!matchesContext(input, this.context.get())) return;
-    const length = input.length + output.length;
+    if (!matchesContext(storedInput, storedContext)) return;
+    const length = storedInput.length + output.length;
     const tokens = tokenUsageTotal(usage);
     this.wire.dispatch(contextSizeMeasured({ length, tokens }));
   }
@@ -196,6 +208,18 @@ function prefixTokens(
   }
   if (anchor === undefined) return undefined;
   return anchor.tokens + estimateTokensForMessages(context.slice(anchor.storageLength, end));
+}
+
+/**
+ * Drop trailing in-progress (`partial`) messages — at most the open step's
+ * assistant, which settles into the response message once the request returns.
+ */
+function stripTrailingPartials<T extends { readonly partial?: boolean }>(
+  messages: readonly T[],
+): readonly T[] {
+  let end = messages.length;
+  while (end > 0 && messages[end - 1]!.partial === true) end -= 1;
+  return end === messages.length ? messages : messages.slice(0, end);
 }
 
 function matchesContext(input: readonly Message[], context: readonly ContextMessage[]): boolean {
