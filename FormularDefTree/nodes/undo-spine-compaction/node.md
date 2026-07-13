@@ -2,7 +2,7 @@
 id: undo_spine_compaction
 parent: root
 status: active
-version: 0.2.1
+version: 0.2.2
 ---
 
 # undo × spine × compaction Caliber-Identity FormularDef Node
@@ -196,6 +196,15 @@ P10 [debt→缓解] spine 模式下存储历史只增不减:compaction 成本随
    增长——P5 修复后 summary 输入改为当前历元,成本有界;undo 够不着旧
    历元(与"历史可追溯"卖点的张力)留作设计讨论(批次 3)。
 P11 [open] flag 运行中翻转:pending 不清、lastObserved 不推进,未定义。
+P12 [FIXED 2026-07-13] 显示层口径分裂(TUI footer):contextTokens 仅实测
+   前缀(不含尾部)、仅在测量时更新;rawContextTokens 仅在 ContextModel
+   变更时重算——测量落地不重算 → raw 滞后甚至 raw < projection(生产
+   截图实证:raw 549 / projection 28.8k,违背 rawSize 的 >= 设计声明),
+   且 resume 后 getStatus()(measured+estimated)与事件(measured-only)
+   口径不同。修复:contextSizeService.publishSizes 双订阅
+   (ContextModel + ContextSizeModel)统一发布,contextTokens 改发
+   get().size(含尾部),op 的 toEvent 移除;12 个快照更新(事件形状
+   由 {raw} 变 {contextTokens, rawContextTokens})。
 ```
 
 ## Validation
@@ -253,4 +262,8 @@ repro:     test/agent/fullCompaction/repro-frequent-compaction.test.ts (A-G)
   F3(投影估算三处拷贝)收敛为 IAgentContextProjectorService.
   estimateProjectedTokens;重入守卫留在 contextSize 本地包裹。
   F4(splice 隐含尾部截断契约)加不变量注释 + 非等长跳过防御。
+2026-07-13 (v0.2.2) P12 显示层口径统一(用户生产截图:raw 549 <
+  projection 28.8k):publishSizes 双订阅统一发布,contextTokens 改发
+  get().size 含尾部,消除 raw 滞后与 getStatus/事件口径分裂;
+  全量 3287 测试绿,12 个快照更新。
 ```

@@ -101,10 +101,6 @@ export const contextSizeMeasured = defineOp(ContextSizeModel, 'context_size.meas
     }
     return { length, tokens, snapshots };
   },
-  toEvent: (_p, state) => ({
-    type: 'agent.status.updated' as const,
-    contextTokens: state.tokens,
-  }),
 });
 
 function sameSnapshots(

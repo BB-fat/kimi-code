@@ -4,11 +4,12 @@
  * Owns the measured context token counts in the wire `ContextSizeModel`:
  * reads it through `wire.getModel`, writes it through
  * `wire.dispatch(contextSizeMeasured(...))` (called by `llmRequester` after
- * each measured exchange). Two `agent.status.updated` slices are emitted
- * live: `contextTokens` through the Op's `toEvent` when the measured value
- * changes, and `rawContextTokens` (the unfolded-request cost, always >= the
- * projected size — see `rawSize`) from a `ContextModel` subscription on
- * every live context mutation. `get(start?, end?)` returns `{ size, measured, estimated }` for the
+ * each measured exchange). Both live gauges — `contextTokens`
+ * (= `get().size`, the measured prefix plus the unmeasured tail estimate) and
+ * `rawContextTokens` (the unfolded-request cost, always >= the projected
+ * size — see `rawSize`) — are re-derived and published together on every
+ * live change to `ContextModel` or `ContextSizeModel`, so the pair stays
+ * mutually consistent and in the same caliber as `getStatus()`. `get(start?, end?)` returns `{ size, measured, estimated }` for the
  * context-message range `[start, end)`, resolved like `Array.prototype.slice`
  * (defaulting to the whole context; negative indices count back from the end;
  * an inverted range is empty). `measured` resolves as follows: the full
@@ -42,8 +43,10 @@ import { ContextSizeModel, type ContextSizeSnapshot, contextSizeMeasured } from 
 export class AgentContextSizeService extends Disposable implements IAgentContextSizeService {
   declare readonly _serviceBrand: undefined;
 
-  private lastEmittedTokens = 0;
   private estimatingProjected = false;
+  private lastEmitted:
+    | { readonly contextTokens: number; readonly rawContextTokens: number }
+    | null = null;
 
   constructor(
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
@@ -52,20 +55,32 @@ export class AgentContextSizeService extends Disposable implements IAgentContext
     @IAgentContextProjectorService private readonly projector: IAgentContextProjectorService,
   ) {
     super();
-    // Raw follows the stored history, so it is re-derived on every live
-    // context mutation (append, streamed loop events, clear, undo,
-    // compaction) instead of from `measured`: a measured exchange runs before
-    // its own response and tool results fold in, which would lag the gauge a
-    // full step behind the history the user actually has. The subscription
-    // fires once per live dispatch (never on replay).
-    this._register(
-      this.wire.subscribe(ContextModel, () => {
-        this.eventBus.publish({
-          type: 'agent.status.updated',
-          rawContextTokens: this.rawSize(),
-        });
-      }),
-    );
+    // Both gauges are re-derived on every live change to either model: the
+    // stored history drives the unmeasured tail and the raw estimate, while a
+    // measurement landing re-bases the measured prefix without touching the
+    // history. Publishing the pair from one place keeps them mutually
+    // consistent (raw >= projected) and in the same caliber as `getStatus()`.
+    this._register(this.wire.subscribe(ContextModel, () => this.publishSizes()));
+    this._register(this.wire.subscribe(ContextSizeModel, () => this.publishSizes()));
+  }
+
+  private publishSizes(): void {
+    const contextTokens = this.get().size;
+    const rawContextTokens = this.rawSize();
+    const last = this.lastEmitted;
+    if (
+      last !== null &&
+      last.contextTokens === contextTokens &&
+      last.rawContextTokens === rawContextTokens
+    ) {
+      return;
+    }
+    this.lastEmitted = { contextTokens, rawContextTokens };
+    this.eventBus.publish({
+      type: 'agent.status.updated',
+      contextTokens,
+      rawContextTokens,
+    });
   }
 
   get(start?: number, end?: number): ContextSize {
@@ -135,7 +150,6 @@ export class AgentContextSizeService extends Disposable implements IAgentContext
     const length = input.length + output.length;
     const tokens = tokenUsageTotal(usage);
     this.wire.dispatch(contextSizeMeasured({ length, tokens }));
-    this.emitIfChanged();
   }
 
   latestMeasurement(): ContextSizeMeasurement | undefined {
@@ -143,12 +157,6 @@ export class AgentContextSizeService extends Disposable implements IAgentContext
     const latest = snapshots.at(-1);
     if (latest === undefined) return undefined;
     return { length: latest.storageLength, tokens: latest.tokens, kind: latest.kind };
-  }
-
-  private emitIfChanged(): void {
-    const tokens = this.wire.getModel(ContextSizeModel).tokens;
-    if (tokens === this.lastEmittedTokens) return;
-    this.lastEmittedTokens = tokens;
   }
 }
 

@@ -28,4 +28,4 @@ nodes:
     path: nodes/undo-spine-compaction/node.md
     parent: root
     status: active
-    version: 0.2.1
+    version: 0.2.2
