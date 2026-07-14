@@ -1,4 +1,12 @@
-import { createDecorator } from "#/_base/di/instantiation";
+/**
+ * `contextProjector` domain (L4) — Agent-scope context projection contract.
+ *
+ * Defines wire-safe history projections and an opaque snapshot of the media
+ * identities that a provider rejected, allowing later steps to strip only
+ * that content while preserving newly generated recovery media.
+ */
+
+import { createDecorator } from '#/_base/di/instantiation';
 import type { IDisposable } from '#/_base/di/lifecycle';
 import type { Message } from '#/app/llmProtocol/message';
 
@@ -52,6 +60,12 @@ export interface ProjectOptions {
   readonly applyFolds?: boolean;
 }
 
+declare const mediaStripSnapshotBrand: unique symbol;
+
+export interface MediaStripSnapshot {
+  readonly [mediaStripSnapshotBrand]: undefined;
+}
+
 export interface IAgentContextProjectorService {
   readonly _serviceBrand: undefined;
 
@@ -72,6 +86,20 @@ export interface IAgentContextProjectorService {
    * history through unchanged.
    */
   registerContextFold(id: string, fold: ContextFold, options?: ContextFoldOptions): IDisposable;
+
+  projectMediaDegraded(
+    messages: readonly ContextMessage[],
+    options?: ProjectOptions,
+  ): readonly Message[];
+  captureMediaStripSnapshot(
+    messages: readonly ContextMessage[],
+    options?: ProjectOptions,
+  ): MediaStripSnapshot;
+  projectMediaStripped(
+    messages: readonly ContextMessage[],
+    snapshot?: MediaStripSnapshot,
+    options?: ProjectOptions,
+  ): readonly Message[];
 }
 
 export const IAgentContextProjectorService = createDecorator<IAgentContextProjectorService>(

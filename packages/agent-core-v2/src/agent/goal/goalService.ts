@@ -3,15 +3,16 @@
  *
  * Owns the per-agent goal lifecycle; persists the goal in the `wire`
  * `GoalModel` (`GoalState | null`) through the `goal.create` / `goal.update` /
- * `goal.clear` Ops (`wire.dispatch`), reads it through `wire.getModel`, emits
- * `goal.updated` live through `wire.signal`, and forces a replayed `active`
+ * `goal.clear` Ops (`wire.dispatch`), reads it through `wire.getModel`,
+ * publishes `goal.updated` live to `IEventBus`, and forces a replayed `active`
  * goal back to `paused` via `wire.onRestored`. The accumulated `wallClockMs`
  * lives in the Model (set from each Op payload, never by `Date.now()` inside
  * `apply`); the `wallClockResumedAt` cursor is a live-only field, reset on
  * replay and (re)started on the live path. A `forked` wire Op clears the Model
- * at a fork boundary; the `goal.*` record shapes stay declared in
- * `WireRecordMap` because they still ride the shared wire log read by
- * `getRecords()` and replayed into the Model. Injects reminders through
+ * at a fork boundary; the `goal.*` payload shapes are registered in
+ * `PersistedOpMap` (`#/wire/types`) inside `goalOps` because they still ride
+ * the shared wire log read by `getRecords()` and replayed into the Model.
+ * Injects reminders through
  * `contextInjector`, drives continuation turns by enqueueing `newTurn`
  * `StepRequest`s onto `loop` (the continuation message materializes when the
  * loop pops it), accounts live
@@ -38,7 +39,7 @@ import {
 import { LOOP_CONTROL_SECTION, type LoopControl } from '#/agent/loop/configSection';
 import { ContinuationStepRequest, MessageStepRequest } from '#/agent/loop/stepRequest';
 import { IAgentSystemReminderService } from '#/agent/systemReminder/systemReminder';
-import type { ExecutableToolResult } from '#/agent/tool/toolContract';
+import type { ExecutableToolResult } from '#/tool/toolContract';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { IAgentUsageService, type UsageRecordedContext } from '#/agent/usage/usage';
 import type { GoalBudgetProperties } from '#/app/telemetry/events';
@@ -69,31 +70,8 @@ import type {
   GoalToolResult,
 } from './types';
 
-declare module '#/agent/wireRecord/wireRecord' {
-  interface WireRecordMap {
-    forked: {};
-    'goal.create': {
-      goalId: string;
-      objective: string;
-      completionCriterion?: string;
-    };
-    'goal.update': {
-      status?: GoalStatus;
-      reason?: string;
-      turnsUsed?: number;
-      tokensUsed?: number;
-      wallClockMs?: number;
-      budgetLimits?: GoalBudgetLimits;
-      actor?: GoalActor;
-    };
-    'goal.clear': {};
-  }
-}
-
 const MAX_GOAL_OBJECTIVE_LENGTH = 4000;
 
-// The criterion is repeated in every goal reminder, so it is truncated instead
-// of rejected: an over-long criterion never fails goal creation outright.
 const MAX_GOAL_COMPLETION_CRITERION_LENGTH = MAX_GOAL_OBJECTIVE_LENGTH;
 
 const GOAL_CANCELLED_REMINDER = [
@@ -173,11 +151,6 @@ interface GoalForkNoticeState {
   readonly reminderPending: boolean;
 }
 
-// Derived (never persisted) fork bookkeeping, folded over the same records on
-// dispatch and replay: a `forked` boundary that clears a copied goal marks the
-// fork-cleared reminder as pending. The live reminder append is its own
-// acknowledgment — replaying the appended reminder record flips the flag back
-// off, so later resumes never duplicate it.
 const GoalForkNoticeModel = defineDerivedModel<GoalForkNoticeState>(
   'goalForkNotice',
   () => ({ goalPresent: false, reminderPending: false }),
@@ -235,9 +208,6 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
         dynamicInjector,
       ),
     );
-    // The wire forkGoal op clears the goal at a fork boundary; the derived
-    // notice model tracks whether that clear dropped a copied goal so the
-    // post-replay pass can tell the model about it exactly once.
     this._register(this.wire.attach(GoalForkNoticeModel));
     this._register(this.wire.onRestored(() => this.normalizeAfterReplay()));
     this._register(
@@ -260,9 +230,6 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
     );
     this._register(
       toolExecutor.hooks.onBeforeExecuteTool.register('goal-budget-reject', async (ctx, next) => {
-        // During a turn's budget-grace step the model was told to write a
-        // final message without tools: answer every tool call with a soft
-        // synthetic result instead of executing it.
         if (this.budgetGraceTurns.has(ctx.turnId)) {
           ctx.decision = {
             syntheticResult: { output: GOAL_BUDGET_TOOLS_REJECTED_MESSAGE },
@@ -486,13 +453,6 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
   private handleTurnLaunched(turnId: number): void {
     this.liveTurnId = turnId;
     const state = this.goalState;
-    // A goal already past its budget must not drive a new turn: block it at
-    // the launch boundary (blockIfBudgetReached dispatches synchronously, so
-    // nothing async escapes this event subscriber) and leave the turn off
-    // goalDrivenTurns. The prompt then runs as a normal non-goal turn — no
-    // turn counting, no goal_continued telemetry, no continuation — while the
-    // blocked-goal note still reaches the model, because injection reads the
-    // goal status in the first onWillBeginStep, after this subscriber ran.
     if (state?.status === 'active' && this.blockIfBudgetReached(state) === null) {
       this.goalDrivenTurns.add(turnId);
     }
@@ -500,10 +460,6 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
     this.goalOutcomeContinuationTurns.delete(turnId);
   }
 
-  // The ordinary turn that created or resumed the goal counts as the first
-  // active goal turn. Its later steps are token-charged like any goal turn,
-  // but the turn itself is counted at turn end (see handleTurnEnded), not at
-  // the next step boundary — countedGoalTurns suppresses per-step counting.
   private adoptStarterTurn(): void {
     const turnId = this.liveTurnId;
     if (turnId === undefined || this.goalDrivenTurns.has(turnId)) return;
@@ -615,10 +571,6 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
     return false;
   }
 
-  // A rejected turn-ended handler (e.g. a continuation launch losing a race
-  // to a queued prompt) must never strand an active goal with nothing driving
-  // it: settle deterministically by pausing. The settle itself is best-effort;
-  // the turn.ended subscriber must not throw into the event bus.
   private async settleGoalAfterContinuationFailure(error: unknown): Promise<void> {
     try {
       const reason = pauseReasonWithMessage(
@@ -627,8 +579,6 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
       );
       await this.pauseActiveGoal({ reason }, 'system');
     } catch {
-      // Swallowed on purpose: pausing failed too, and rethrowing would only
-      // crash the event bus subscriber.
     }
   }
 

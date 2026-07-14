@@ -20,9 +20,9 @@
 
 import { z } from 'zod';
 
-import type { BuiltinTool, ToolExecution } from '#/agent/tool/toolContract';
+import type { BuiltinTool, ToolExecution } from '#/tool/toolContract';
 import { registerTool } from '#/agent/toolRegistry/toolContribution';
-import { toInputJsonSchema } from '#/_base/tools/support/input-schema';
+import { toInputJsonSchema } from '#/tool/input-schema';
 
 import { SPINE_FLAG_ID } from '#/agent/spine/flag';
 import { IFlagService } from '#/app/flag/flag';

@@ -38,8 +38,9 @@
  * `contextSizeService`.
  */
 
+import { z } from 'zod';
+
 import { defineModel } from '#/wire/model';
-import { defineOp } from '#/wire/op';
 
 export type ContextSizeSnapshotKind = 'measured' | 'estimate';
 
@@ -63,20 +64,23 @@ export const ContextSizeModel = defineModel<ContextSizeState>('contextSize', () 
   snapshots: [],
 }));
 
-export interface ContextSizeMeasuredPayload {
-  readonly length: number;
-  readonly tokens: number;
-  /**
-   * Provenance of the record. `measured` (default) = LLM-reported usage;
-   * `estimate` = cascade computed alongside a content mutation (clear,
-   * compaction, undo rebase) — restarts the snapshot chain.
-   */
-  readonly kind?: ContextSizeSnapshotKind;
+declare module '#/wire/types' {
+  interface TransientOpMap {
+    'context_size.measured': typeof contextSizeMeasured;
+  }
 }
 
-export const contextSizeMeasured = defineOp(ContextSizeModel, 'context_size.measured', {
+export const contextSizeMeasured = ContextSizeModel.defineOp('context_size.measured', {
+  schema: z.object({
+    length: z.number(),
+    tokens: z.number(),
+    // Provenance of the record. `measured` (default) = LLM-reported usage;
+    // `estimate` = cascade computed alongside a content mutation (clear,
+    // compaction, undo rebase) — restarts the snapshot chain.
+    kind: z.enum(['measured', 'estimate']).optional(),
+  }),
   persist: false,
-  apply: (s, p: ContextSizeMeasuredPayload): ContextSizeState => {
+  apply: (s, p) => {
     const length = normalizeMeasuredLength(p.length);
     const tokens = Math.max(0, p.tokens);
     const kind = p.kind ?? 'measured';

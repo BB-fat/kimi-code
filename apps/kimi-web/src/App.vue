@@ -269,9 +269,6 @@ const conversationPaneRef = ref<InstanceType<typeof ConversationPane> | null>(nu
 const showModelPicker = ref(false);
 const showProviders = ref(false);
 
-// Provider management (add / delete) is not shipped by the daemon yet — hide the
-// manager UI entry points for now. Re-enable once POST/DELETE /providers land.
-const PROVIDER_MANAGER_ENABLED = false;
 const showLogin = ref(false);
 const showAddWorkspace = ref(false);
 const showStatusPanel = ref(false);
@@ -473,16 +470,12 @@ function handleCommand(cmd: string): void {
     case '/fork':
       void client.forkSession();
       break;
+    case '/export':
+      void client.exportSession();
+      break;
     case '/undo':
       void client.undo();
       break;
-    case '/permission': {
-      // Cycle manual → auto → yolo → manual
-      const current = client.permission.value;
-      const next = current === 'manual' ? 'auto' : current === 'auto' ? 'yolo' : 'manual';
-      client.setPermission(next);
-      break;
-    }
     case '/plan':
       client.togglePlanMode();
       break;
@@ -496,17 +489,8 @@ function handleCommand(cmd: string): void {
       // No popover anchor from a slash command — step to the next level.
       client.setThinking(nextThinkingLevel(client.thinking.value));
       break;
-    case '/help':
-      client.dismissWarning(-1);
-      break;
     case '/status':
       showStatusPanel.value = true;
-      break;
-    case '/model':
-      void openModelPicker();
-      break;
-    case '/provider':
-      if (PROVIDER_MANAGER_ENABLED) void openProviders();
       break;
     case '/login':
       openLogin();
@@ -673,6 +657,7 @@ function openPr(url: string): void {
         :pending-by-session="client.pendingBySession.value"
         :unread-by-session="client.unreadBySession.value"
         :workspace-sort-mode="client.workspaceSortMode.value"
+        :backend="client.backend.value"
         @select="client.selectSession($event)"
         @create="handleCreateSession"
         @create-in-workspace="handleCreateSessionInWorkspace($event)"
@@ -681,6 +666,7 @@ function openPr(url: string): void {
         @rename="(id, title) => client.renameSession(id, title)"
         @archive="(id) => client.archiveSession(id)"
         @fork="(id) => client.forkSession(id)"
+        @export="(id) => client.exportSession(id)"
         @rename-workspace="(id, name) => client.renameWorkspace(id, name)"
         @delete-workspace="(id) => client.deleteWorkspace(id)"
         @reorder-workspaces="client.reorderWorkspaces($event)"
@@ -785,6 +771,7 @@ function openPr(url: string): void {
       @rename-session="(id, title) => client.renameSession(id, title)"
       @fork-session="(id) => client.forkSession(id)"
       @archive-session="(id) => client.archiveSession(id)"
+      @export-session="(id) => client.exportSession(id)"
       @compact="client.compact()"
       @pick-model="openModelPicker()"
       @select-model="handleComposerSelectModel($event)"
@@ -937,6 +924,7 @@ function openPr(url: string): void {
       :models="client.models.value"
       :config-saving="configSaving"
       :server-version="client.serverVersion.value"
+      :backend="client.backend.value"
       @set-color-scheme="client.setColorScheme($event)"
       @set-accent="client.setAccent($event)"
       @set-ui-font-size="client.setUiFontSize($event)"

@@ -36,6 +36,7 @@ export function makeLifecycleStub(handles: readonly IAgentScopeHandle[] = []): L
     ensureMcpReady: () => Promise.resolve(),
     notifyMainCreated: () => {},
     notifyAgentTaskStopped: () => {},
+    whenReady: async () => undefined,
     fork: async () => {
       throw new Error('not implemented');
     },

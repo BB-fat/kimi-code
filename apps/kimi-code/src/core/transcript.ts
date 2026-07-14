@@ -569,7 +569,11 @@ export function reduceTranscript(records: Iterable<object>): TranscriptModelStat
     const fields = record as Record<string, unknown>;
     const type = fields['type'];
     if (typeof type !== 'string') continue;
-    const reducer = TranscriptModel.reducers[type];
+    const reducers = TranscriptModel.reducers as Record<
+      string,
+      ((state: TranscriptModelState, payload: unknown) => TranscriptModelState) | undefined
+    >;
+    const reducer = reducers[type];
     if (reducer === undefined) continue;
     state = reducer(state, recordToPayload(fields));
   }

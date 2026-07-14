@@ -1,3 +1,5 @@
+import { createKimiCodeUserAgent } from '#/cli/version';
+
 import type { SkillListSession } from '../commands';
 
 import type { CoreHarness, CoreSession } from '#/core/index';
@@ -166,6 +168,7 @@ export class AuthFlowController {
         const tokenProvider = host.harness.auth.resolveOAuthTokenProvider(providerName, oauthRef);
         return tokenProvider.getAccessToken();
       },
+      userAgent: createKimiCodeUserAgent(),
     };
     const result = await refreshAllProviderModels(hostAdapter, { scope });
     if (result.changed.length > 0) {

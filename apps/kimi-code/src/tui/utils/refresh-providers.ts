@@ -20,6 +20,8 @@ export interface RefreshProviderHost {
   removeProvider(providerId: string): Promise<CoreConfig>;
   setConfig(patch: CoreConfigPatch): Promise<CoreConfig>;
   resolveOAuthToken(providerName: string, oauthRef?: OAuthRef): Promise<string>;
+  /** Product User-Agent sent on custom-registry (api.json) fetches. */
+  readonly userAgent?: string;
 }
 
 export type { ProviderChange, RefreshProviderOptions, RefreshProviderScope, RefreshResult };
@@ -48,6 +50,7 @@ export async function refreshAllProviderModels(
         (await host.setConfig(patch as CoreConfigPatch)) as unknown as ManagedKimiConfigShape,
       resolveOAuthToken: (providerName, oauthRef) =>
         host.resolveOAuthToken(providerName, oauthRef as unknown as OAuthRef),
+      userAgent: host.userAgent,
     },
     options,
   );

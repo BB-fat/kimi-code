@@ -46,17 +46,18 @@ import {
   type ContentPart,
   type ToolCall,
 } from '#/app/llmProtocol/message';
-import type { ContextCompactionPayload } from '#/agent/contextMemory/contextOps';
+import { contextApplyCompaction } from '#/agent/contextMemory/contextOps';
 import { TOOL_INTERRUPTED_ON_RESUME_OUTPUT } from '#/agent/contextMemory/loopEventFold';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import type { CompactionResult } from '#/agent/fullCompaction/types';
-import type { GoalState, GoalUpdatePayload } from '#/agent/goal/goalOps';
+import { type GoalState, updateGoal } from '#/agent/goal/goalOps';
 import type {
   GoalBudgetLimits,
   GoalBudgetReport,
   GoalChange,
   GoalSnapshot,
 } from '#/agent/goal/types';
+import type { PayloadOf } from '#/wire/types';
 
 import type { ReplayTimeline } from './replayTimelineModel';
 import type { AgentReplayRecord } from './types';
@@ -270,7 +271,7 @@ export function projectReplayTimeline(timeline: ReplayTimeline): readonly AgentR
 }
 
 /** Mirror of `goalOps` `updateGoal.apply` so per-record snapshots track the timeline. */
-function applyGoalUpdate(state: GoalState, payload: GoalUpdatePayload): GoalState {
+function applyGoalUpdate(state: GoalState, payload: PayloadOf<typeof updateGoal>): GoalState {
   let next = state;
   if (payload.status !== undefined && payload.status !== state.status) {
     next = {
@@ -333,7 +334,7 @@ function budgetReport(
   };
 }
 
-function compactionSummary(payload: ContextCompactionPayload): string {
+function compactionSummary(payload: PayloadOf<typeof contextApplyCompaction>): string {
   if (typeof payload.summary === 'string') return payload.summary;
   if ('contextSummary' in payload && typeof payload.contextSummary === 'string') {
     return payload.contextSummary;

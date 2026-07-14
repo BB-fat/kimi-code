@@ -224,10 +224,6 @@ describe('ConfigState prompt cache hint', () => {
   it('uses session id as a provider prompt cache hint without storing it on Agent', () => {
     profile.update({ modelAlias: 'kimi-code' });
 
-    // The session id is now applied to the resolved `Model`'s generation kwargs
-    // (`prompt_cache_key`) by `AgentProfileService.resolveModel` for kimi
-    // models; the `Model` god-object no longer exposes the raw provider config,
-    // so we assert the resolved protocol and the "not stored on Agent" invariant.
     expect(profile.resolveModel()?.protocol).toBe('kimi');
     expect('sessionId' in ctx).toBe(false);
   });

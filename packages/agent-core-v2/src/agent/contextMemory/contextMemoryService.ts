@@ -154,18 +154,6 @@ export class AgentContextMemoryService extends Disposable implements IAgentConte
     this.eventBus.publish({ type: 'context.spliced', ...input });
   }
 
-  /**
-   * Cascade a `context_size.measured` Op when an undo truncates the measured
-   * prefix (`ContextSizeModel.length`). If the surviving context still covers
-   * the measured prefix, the measurement stays valid and nothing is emitted;
-   * otherwise the prefix is rebased to an estimate of the surviving messages
-   * (an aggregate measured count can't be truncated without per-message data).
-   * The gauge answers "what will the next request cost", so the estimate is
-   * projection-caliber. The prefix slice keeps fold semantics honest: it is
-   * index-aligned with the stored history the folds anchor on (a prefix never
-   * shifts positions), and the pre-repair tree folds it into the same shape
-   * the post-repair tree would.
-   */
   private sizeOpsForCut(cutIndex: number, history: readonly ContextMessage[]): Op[] {
     const model = this.wire.getModel(ContextSizeModel);
     if (model.length <= cutIndex) return [];
@@ -183,6 +171,6 @@ registerScopedService(
   LifecycleScope.Agent,
   IAgentContextMemoryService,
   AgentContextMemoryService,
-  InstantiationType.Delayed,
+  InstantiationType.Eager,
   'contextMemory',
 );

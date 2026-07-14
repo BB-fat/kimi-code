@@ -16,8 +16,9 @@
  * `spineService` and the `spineFold` projection.
  */
 
+import { z } from 'zod';
+
 import { defineModel } from '#/wire/model';
-import { defineOp } from '#/wire/op';
 
 import {
   epochStartupNodeId,
@@ -77,16 +78,25 @@ function initialSpineState(): SpineState {
 
 export const SpineModel = defineModel<SpineState>('spine', initialSpineState);
 
-export interface SpineOpenPayload {
-  readonly id: string;
-  readonly summary: string;
-  readonly parentId: string;
-  readonly openedAt: number;
-  readonly baselineTokens?: number;
+declare module '#/wire/types' {
+  interface PersistedOpMap {
+    'spine.open': typeof spineOpen;
+    'spine.close': typeof spineClose;
+    'spine.next': typeof spineNext;
+    'spine.root_compact': typeof spineRootCompact;
+    'spine.truncate_repair': typeof spineTruncateRepair;
+  }
 }
 
-export const spineOpen = defineOp(SpineModel, 'spine.open', {
-  apply: (s, p: SpineOpenPayload): SpineState => {
+export const spineOpen = SpineModel.defineOp('spine.open', {
+  schema: z.object({
+    id: z.string(),
+    summary: z.string(),
+    parentId: z.string(),
+    openedAt: z.number(),
+    baselineTokens: z.number().optional(),
+  }),
+  apply: (s, p): SpineState => {
     const parent = s.nodes[p.parentId];
     const top = s.openStack.at(-1);
     if (parent === undefined || parent.closedAt !== undefined) return s;
@@ -110,16 +120,15 @@ export const spineOpen = defineOp(SpineModel, 'spine.open', {
   },
 });
 
-export interface SpineClosePayload {
-  readonly id: string;
-  readonly closedAt: number;
-  readonly memory: string;
-  readonly archivePath?: string;
-  readonly finalTokens?: number;
-}
-
-export const spineClose = defineOp(SpineModel, 'spine.close', {
-  apply: (s, p: SpineClosePayload): SpineState => {
+export const spineClose = SpineModel.defineOp('spine.close', {
+  schema: z.object({
+    id: z.string(),
+    closedAt: z.number(),
+    memory: z.string(),
+    archivePath: z.string().optional(),
+    finalTokens: z.number().optional(),
+  }),
+  apply: (s, p): SpineState => {
     const node = s.nodes[p.id];
     const top = s.openStack.at(-1);
     if (node === undefined || node.closedAt !== undefined) return s;
@@ -141,19 +150,18 @@ export const spineClose = defineOp(SpineModel, 'spine.close', {
   },
 });
 
-export interface SpineNextPayload {
-  readonly closedId: string;
-  readonly closedAt: number;
-  readonly memory: string;
-  readonly archivePath?: string;
-  readonly finalTokens?: number;
-  readonly openedId: string;
-  readonly summary: string;
-  readonly baselineTokens?: number;
-}
-
-export const spineNext = defineOp(SpineModel, 'spine.next', {
-  apply: (s, p: SpineNextPayload): SpineState => {
+export const spineNext = SpineModel.defineOp('spine.next', {
+  schema: z.object({
+    closedId: z.string(),
+    closedAt: z.number(),
+    memory: z.string(),
+    archivePath: z.string().optional(),
+    finalTokens: z.number().optional(),
+    openedId: z.string(),
+    summary: z.string(),
+    baselineTokens: z.number().optional(),
+  }),
+  apply: (s, p): SpineState => {
     const closing = s.nodes[p.closedId];
     const top = s.openStack.at(-1);
     if (closing === undefined || closing.closedAt !== undefined) return s;
@@ -193,15 +201,14 @@ export const spineNext = defineOp(SpineModel, 'spine.next', {
   },
 });
 
-export interface SpineRootCompactPayload {
-  readonly epoch: number;
-  readonly epochStartAt: number;
-  readonly epochMemoryAt: number;
-  readonly archivePath?: string;
-}
-
-export const spineRootCompact = defineOp(SpineModel, 'spine.root_compact', {
-  apply: (s, p: SpineRootCompactPayload): SpineState => {
+export const spineRootCompact = SpineModel.defineOp('spine.root_compact', {
+  schema: z.object({
+    epoch: z.number(),
+    epochStartAt: z.number(),
+    epochMemoryAt: z.number(),
+    archivePath: z.string().optional(),
+  }),
+  apply: (s, p): SpineState => {
     if (p.epoch !== s.rootEpoch + 1) return s;
     if (p.epochStartAt < 0) return s;
     const epoch = syntheticEpochNode(p.epoch, p.archivePath);
@@ -216,12 +223,11 @@ export const spineRootCompact = defineOp(SpineModel, 'spine.root_compact', {
   },
 });
 
-export interface SpineTruncateRepairPayload {
-  readonly cut: number;
-}
-
-export const spineTruncateRepair = defineOp(SpineModel, 'spine.truncate_repair', {
-  apply: (s, p: SpineTruncateRepairPayload): SpineState => {
+export const spineTruncateRepair = SpineModel.defineOp('spine.truncate_repair', {
+  schema: z.object({
+    cut: z.number(),
+  }),
+  apply: (s, p): SpineState => {
     const cut = Number.isFinite(p.cut) ? Math.max(0, Math.floor(p.cut)) : 0;
     let changed = false;
     const nodes: Record<string, SpineNode> = {};
@@ -268,13 +274,3 @@ export const spineTruncateRepair = defineOp(SpineModel, 'spine.truncate_repair',
     return changed ? { ...s, nodes, epochStartAt, epochMemoryAt } : s;
   },
 });
-
-declare module '#/agent/wireRecord/wireRecord' {
-  interface WireRecordMap {
-    'spine.open': SpineOpenPayload;
-    'spine.close': SpineClosePayload;
-    'spine.next': SpineNextPayload;
-    'spine.root_compact': SpineRootCompactPayload;
-    'spine.truncate_repair': SpineTruncateRepairPayload;
-  }
-}

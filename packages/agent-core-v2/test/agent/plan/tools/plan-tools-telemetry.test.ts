@@ -7,7 +7,8 @@ import {
   ExitPlanModeTool,
   type ExitPlanModeInput,
 } from '#/agent/plan/tools/exit-plan-mode';
-import type { ToolResult } from '#/agent/tool/toolContract';
+import type { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
+import type { ToolResult } from '#/tool/toolContract';
 import type { ITelemetryService } from '#/app/telemetry/telemetry';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 
@@ -56,6 +57,15 @@ function recordingTelemetry(): {
       shutdown: () => Promise.resolve(),
     },
     track2,
+  };
+}
+
+function permissionMode(): IAgentPermissionModeService {
+  return {
+    _serviceBrand: undefined,
+    mode: 'auto',
+    setMode: () => {},
+    onDidChangeMode: () => ({ dispose: () => {} }),
   };
 }
 
@@ -275,7 +285,7 @@ describe('AgentPlanService EnterPlanMode telemetry', () => {
 describe('ExitPlanModeTool telemetry', () => {
   it('has name, description, parameters, and a stable execution description', async () => {
     const { telemetry } = recordingTelemetry();
-    const tool = new ExitPlanModeTool(planService(), telemetry);
+    const tool = new ExitPlanModeTool(planService(), permissionMode(), telemetry);
 
     expect(tool.name).toBe('ExitPlanMode');
     expect(tool.description).toContain('ExitPlanMode');
@@ -296,7 +306,9 @@ describe('ExitPlanModeTool telemetry', () => {
   it('refuses to exit when plan mode is inactive', async () => {
     const { telemetry } = recordingTelemetry();
 
-    const result = await executeTool(new ExitPlanModeTool(planService({ status: null }), telemetry), {
+    const result = await executeTool(
+      new ExitPlanModeTool(planService({ status: null }), permissionMode(), telemetry),
+      {
       turnId: 7,
       toolCallId: 'call_exit_plan',
       args: {},
@@ -319,7 +331,7 @@ describe('ExitPlanModeTool telemetry', () => {
     } as unknown as NonNullable<PlanData>;
 
     const result = await executeTool(
-      new ExitPlanModeTool(planService({ status }), telemetry),
+      new ExitPlanModeTool(planService({ status }), permissionMode(), telemetry),
       {
         turnId: 7,
         toolCallId: 'call_exit_plan',
@@ -337,7 +349,7 @@ describe('ExitPlanModeTool telemetry', () => {
 
   it('exposes options[].description as optional with a default of empty string', () => {
     const { telemetry } = recordingTelemetry();
-    const parameters = new ExitPlanModeTool(planService(), telemetry).parameters as {
+    const parameters = new ExitPlanModeTool(planService(), permissionMode(), telemetry).parameters as {
       properties: {
         options: {
           items: {
@@ -358,7 +370,7 @@ describe('ExitPlanModeTool telemetry', () => {
     const exit = vi.fn();
     const { telemetry, track2 } = recordingTelemetry();
 
-    const result = await executeTool(new ExitPlanModeTool(planService({ exit }), telemetry), {
+    const result = await executeTool(new ExitPlanModeTool(planService({ exit }), permissionMode(), telemetry), {
       turnId: 7,
       toolCallId: 'call_exit_plan',
       args: {},
@@ -376,7 +388,7 @@ describe('ExitPlanModeTool telemetry', () => {
   it('tracks submitted with options only when multiple options are present', async () => {
     const { telemetry, track2 } = recordingTelemetry();
 
-    const result = await executeTool(new ExitPlanModeTool(planService(), telemetry), {
+    const result = await executeTool(new ExitPlanModeTool(planService(), permissionMode(), telemetry), {
       turnId: 7,
       toolCallId: 'call_exit_plan_options',
       args: { options },
@@ -396,7 +408,7 @@ describe('ExitPlanModeTool telemetry', () => {
     });
     const { telemetry, track2 } = recordingTelemetry();
 
-    const result = await executeTool(new ExitPlanModeTool(planService({ exit }), telemetry), {
+    const result = await executeTool(new ExitPlanModeTool(planService({ exit }), permissionMode(), telemetry), {
       turnId: 7,
       toolCallId: 'call_exit_plan_fail',
       args: {},

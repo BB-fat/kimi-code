@@ -10,7 +10,7 @@
  * `close` / `next` control tools.
  */
 
-import type { ExecutableToolResult } from '#/agent/tool/toolContract';
+import type { ExecutableToolResult } from '#/tool/toolContract';
 
 import type { SpineTransitionResult } from '#/agent/spine/spine';
 

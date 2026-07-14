@@ -61,10 +61,6 @@ declare module '#/app/event/eventBus' {
   }
 }
 
-/**
- * Requester-facing label for a resumed agent whose profile binding is unknown.
- * Kept as the legacy wire display value.
- */
 const RESUMED_PROFILE_FALLBACK = 'subagent';
 
 export class SessionSwarmService implements ISessionSwarmService {
@@ -140,9 +136,6 @@ export class SessionSwarmService implements ISessionSwarmService {
     if (callerData.modelAlias === undefined) {
       throw new Error('Caller agent has no model bound');
     }
-    // Explicit inheritance: the child runs the requested profile on the
-    // caller's own model / thinking level / cwd, and inherits the caller's
-    // permission mode so it does not fall back to `manual`.
     const child = await this.lifecycle.create({
       binding: {
         profile: profile.name,
@@ -189,14 +182,16 @@ export class SessionSwarmService implements ISessionSwarmService {
     this.realignChildModel(caller, child);
     const profileName =
       child.accessor.get(IAgentProfileService).data().profileName ?? RESUMED_PROFILE_FALLBACK;
-    emitAgentRunSpawned(caller, agentId, {
-      profileName,
-      parentToolCallId: options.parentToolCallId,
-      parentToolCallUuid: options.parentToolCallUuid,
-      description: options.description,
-      swarmIndex: options.swarmIndex,
-      runInBackground: options.runInBackground,
-    });
+    if (!retryTurn) {
+      emitAgentRunSpawned(caller, agentId, {
+        profileName,
+        parentToolCallId: options.parentToolCallId,
+        parentToolCallUuid: options.parentToolCallUuid,
+        description: options.description,
+        swarmIndex: options.swarmIndex,
+        runInBackground: options.runInBackground,
+      });
+    }
     const request = retryTurn
       ? ({ kind: 'retry' } as const)
       : ({ kind: 'prompt', prompt: options.prompt } as const);
@@ -263,13 +258,12 @@ export class SessionSwarmService implements ISessionSwarmService {
   }
 }
 
-// Kept as a type-anchor so future maintenance imports the usage shape from here.
 export type _AgentRunUsage = TokenUsage;
 
 registerScopedService(
   LifecycleScope.Session,
   ISessionSwarmService,
   SessionSwarmService,
-  InstantiationType.Delayed,
+  InstantiationType.Eager,
   'sessionSwarm',
 );

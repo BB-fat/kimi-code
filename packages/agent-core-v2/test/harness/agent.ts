@@ -30,10 +30,11 @@ import { IAgentPromptService } from '#/agent/prompt/prompt';
 import type { AgentAPI } from '#/agent/rpc/core-api';
 import { IAgentSkillService } from '#/agent/skill/skill';
 import { AgentSkillService } from '#/agent/skill/skillService';
+import { IAgentToolDedupeService } from '#/agent/toolDedupe/toolDedupe';
 import type {
   ExecutableToolOutput as ToolOutput,
   ExecutableToolResult,
-} from '#/agent/tool/toolContract';
+} from '#/tool/toolContract';
 import type {
   PersistedWireRecord,
   WireRecordRestoreOptions,
@@ -381,24 +382,11 @@ function defineServiceValue<T>(
   }
 }
 
-/**
- * Scoped overrides for the execution environment and derived atoms.
- *
- * The session cwd is controlled via `TestAgentOptions.cwd` (seeded into
- * `ISessionContext.cwd`). Host fs is registered at its production App scope,
- * where `IFileEditService` consumes it and Agent tools inherit it. The process
- * runner and workspace context remain Session-scoped.
- */
 export interface ExecEnvOverride {
   readonly hostFs?: IHostFileSystem | Partial<IHostFileSystem>;
   readonly processRunner?: ISessionProcessRunner | Partial<ISessionProcessRunner>;
 }
 
-/**
- * Register a fake execution-environment set for a test session. Any
- * unspecified atom keeps the harness default and the real services backed by
- * it.
- */
 export function execEnvServices(override: ExecEnvOverride = {}): TestAgentServiceOverride {
   const session = sessionServices((reg) => {
     if (override.processRunner !== undefined) {
@@ -424,10 +412,6 @@ export function execEnvServices(override: ExecEnvOverride = {}): TestAgentServic
 }
 
 function resolveHostFsOverride(input: IHostFileSystem | Partial<IHostFileSystem>): IHostFileSystem {
-  // A full impl (class instance or `Proxy` over one) exposes every core
-  // method. A partial override typically covers only a few of them. If every
-  // core method is a function, pass the input through unchanged; otherwise
-  // treat it as a partial override and spread it over the fake defaults.
   if (isFullHostFs(input)) return input as IHostFileSystem;
   return createFakeHostFs(input as Partial<IHostFileSystem>);
 }
@@ -453,9 +437,6 @@ function isFullHostFs(input: unknown): boolean {
 function resolveProcessRunnerOverride(
   input: ISessionProcessRunner | Partial<ISessionProcessRunner>,
 ): ISessionProcessRunner {
-  // `ISessionProcessRunner` has only one method (`exec`), so a full impl is
-  // any object with `exec` as a function. Both `SessionProcessRunner`
-  // instances and `createFakeProcessRunner()` results satisfy this.
   if (
     typeof input === 'object' &&
     input !== null &&
@@ -484,12 +465,6 @@ export function homeDirServices(homeDir: string | undefined): TestAgentServiceOv
   });
 }
 
-/**
- * Override the App-scope `IHostEnvironment` with a fully-populated POSIX
- * snapshot whose `homeDir` points at a hermetic test directory. Used by tests
- * that render system prompts / resolve user-level config so a developer's real
- * `~/.kimi-code` / `~/.agents` files never leak into the assertions.
- */
 export function hostEnvironmentServices(homeDir: string): TestAgentServiceOverride {
   return appServices((reg) => {
     reg.defineInstance(
@@ -666,10 +641,6 @@ export function swarmServices(
   ];
 }
 
-/**
- * Build a fake `ISessionProcessRunner` whose `exec` returns a scripted
- * `IProcess` emitting `stdout` on stdout and exiting with `exitCode`.
- */
 export function createCommandRunner(stdout: string, exitCode = 0): ISessionProcessRunner {
   function createProcess(): IProcess {
     return {
@@ -913,6 +884,23 @@ export class AgentTestContext {
     const sessionId = 'test-session';
     const agentId = 'main';
     const persistence = options.persistence ?? new InMemoryWireRecordPersistence();
+    // The harness builds its main agent bypassing `AgentLifecycleService.create`,
+    // so nothing writes the wire metadata envelope the production restore path
+    // requires as the first record (its appendLog read ignores scope, so
+    // lifecycle-created subagents share this log). Seed the same synthesized
+    // record `withMetadata` prepends on read, keeping the shared log valid.
+    // Only for the default store: tests that pass their own persistence control
+    // its records deliberately (including metadata-less rejection cases).
+    if (options.persistence === undefined && persistence.records[0]?.type !== 'metadata') {
+      persistence.rewrite([
+        {
+          type: 'metadata',
+          protocol_version: AGENT_WIRE_PROTOCOL_VERSION,
+          created_at: 1,
+        },
+        ...persistence.records,
+      ]);
+    }
 
     const appSeeds = collectScopeSeed(
       [
@@ -925,11 +913,6 @@ export class AgentTestContext {
           })) {
             reg.defineInstance(id, value);
           }
-          // In-memory Storage-layer backend. The `InMemoryStorageService` is no
-          // longer auto-registered, so the harness seeds it here to keep a
-          // workable default for storage-backed services. Tests that need durable
-          // (file) storage override this via `homeDirServices(dir)` — overrides
-          // win over this base seed (see `collectScopeSeed`).
           const memoryStorage = (): SyncDescriptor<IFileSystemStorageService> =>
             new SyncDescriptor(InMemoryStorageService, [], true);
           reg.defineDescriptor(IFileSystemStorageService, memoryStorage());
@@ -949,10 +932,6 @@ export class AgentTestContext {
             ),
           );
           reg.defineInstance(ILogService, createLogService(undefined));
-          // Per-scope `*LogService` bindings (e.g. SessionLogService) resolve their
-          // level/paths from the App-scope `ILogOptions`. Seed a quiet config so
-          // harness-built agents can construct them; logs go under the throwaway
-          // test home dir and `level: 'off'` keeps them from being emitted.
           reg.defineInstance(
             ILogOptions,
             {
@@ -984,10 +963,6 @@ export class AgentTestContext {
             );
           }
           reg.defineInstance(IHostTerminalService, createHostTerminalService());
-          // The real `HostEnvironmentService` probes the host asynchronously (`ready`);
-          // builtin tools (e.g. `BashTool`) read `osKind`/`shellName` synchronously at
-          // construction, which throws "accessed before ready". Seed a fully-populated
-          // POSIX snapshot so agent-scope tools construct without awaiting the probe.
           reg.defineInstance(
             IHostEnvironment,
             {
@@ -1030,10 +1005,6 @@ export class AgentTestContext {
             reg.defineInstance(ISessionInteractionService, this.createInteractionService());
             reg.defineInstance(ISessionApprovalService, this.createApprovalService());
             reg.defineInstance(ISessionQuestionService, this.createQuestionService());
-            // Note: `IHostFileSystem` (App) and `ISessionProcessRunner`
-            // (Session) are auto-registered by their service files. Tests that
-            // need a fake filesystem override its App binding through
-            // `execEnvServices({ hostFs })`; child scopes inherit it.
             reg.defineDescriptor(
               ISessionWorkspaceContext,
               new SyncDescriptor(SessionWorkspaceContextService),
@@ -1048,9 +1019,6 @@ export class AgentTestContext {
         'session',
       ),
     });
-    // The harness builds scopes directly (bypassing SessionLifecycleService), so
-    // drive the Session activity kernel to `active` here — the lifecycle would
-    // do this in `announceCreated` after materialize / replay.
     this.session.accessor.get(ISessionActivityKernel).markActive();
     const workspace = this.session.accessor.get(ISessionWorkspaceContext);
 
@@ -1060,7 +1028,7 @@ export class AgentTestContext {
           (reg) => {
             reg.defineDescriptor(
               IAgentWireRecordService,
-              new SyncDescriptor(AgentWireRecordService, [{}]),
+              new SyncDescriptor(AgentWireRecordService),
             );
             reg.defineDescriptor(
               IAgentWireService,
@@ -1124,10 +1092,6 @@ export class AgentTestContext {
     const wire = this.get(IAgentWireService);
     this.disposables.push(
       wire.onEmission((e) => {
-        // `onEmission` is the record-only channel: `dispatch` persists each record
-        // through the append log and emits it here for `[wire]` snapshot capture.
-        // Op-derived facts (formerly signals) ride `IEventBus` instead — see the
-        // subscription below.
         this.captureRecord(e.record as PersistedWireRecord);
       }),
     );
@@ -1214,18 +1178,10 @@ export class AgentTestContext {
     const permissionRules = this.get(IAgentPermissionRulesService);
     const cron = this.get(ISessionCronService);
     const plan = this.get(IAgentPlanService);
-    // Force-instantiate the Eager builtin-tools registrar: its constructor
-    // consumes every `registerTool(...)` contribution, so `Read`/`Write`/
-    // `Bash`/etc. land in the per-agent registry the same way they would
-    // under a real Agent scope (see `AgentLifecycleService.create`).
     this.get(IAgentBuiltinToolsRegistrar);
+    this.get(IAgentToolDedupeService);
     this.get(IAgentExternalHooksService);
-    // The step-retry plugin registers its loop error handler at construction;
-    // nothing pulls it lazily, so ignite it the way `AgentLifecycleService`
-    // does, or turns driven directly through `loop.run` would never retry.
     this.get(IAgentStepRetryService);
-    // Same for the loop-continuation aspect: it only observes `afterStep`, so
-    // without ignition no tool-using turn would ever get its next step.
     this.get(IAgentLoopContinuationService);
     const tasks = this.get(IAgentTaskService);
     const permission = this.get(IAgentPermissionGate);
@@ -1862,8 +1818,6 @@ export class AgentTestContext {
       inputCacheRead: 0,
       inputCacheCreation: 0,
     };
-    // Persist both the context-size measurement and turn-scoped usage so resume
-    // rebuilds size and usage the same way the real loop does.
     const context = this.get(IAgentContextMemoryService);
     const contextSize = this.get(IAgentContextSizeService);
     contextSize.measured(context.get(), [], usage);
@@ -1979,12 +1933,6 @@ const failOnResumeGenerate: GenerateFn = async () => {
 function resumeStateSnapshot(ctx: AgentTestContext): ResumeStateSnapshot {
   const usage = ctx.get(IAgentUsageService);
   const permission = ctx.get(IAgentPermissionGate);
-  // Live-only state is excluded from the resume comparison: the measured
-  // context token count, the per-turn usage accumulator, runtime-added
-  // permission rules (`permission.rules.add` is persist: false), and the task
-  // list (`task.started` / `task.terminated` are persist: false — tasks
-  // restore from their own persistence, not the wire log) are intentionally
-  // not persisted (v1 parity) and reset on resume.
   const { currentTurn: _currentTurn, ...usageStatus } = usage.status();
   const { rules: _rules, ...permissionData } = permission.data();
   return {
@@ -2004,8 +1952,6 @@ function stripUndefinedFields<T extends object>(value: T): T {
 function resumeContextSnapshot(ctx: AgentTestContext) {
   const context = ctx.contextData();
   return {
-    // `tokenCount` (the measured prefix) is live-only and resets on resume;
-    // compare the history only.
     history: context.history
       .filter((message) => !isSystemReminderMessage(message))
       .map(stripMessageId),
@@ -2091,9 +2037,6 @@ function taskNotificationKey(taskId: string, status: string): string {
 function configStateSnapshot(ctx: AgentTestContext): ResumeStateSnapshot['config'] {
   const profile = ctx.get(IAgentProfileService);
   const data = profile.data();
-  // A restored alias may be unresolvable locally (the model is not in this
-  // config.toml); the resume comparison then carries no provider rather than
-  // failing the whole snapshot.
   let model: ReturnType<IAgentProfileService['resolveModel']>;
   try {
     model = profile.resolveModel();

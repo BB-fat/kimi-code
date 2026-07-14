@@ -13,6 +13,7 @@ import { i18n } from '../../i18n';
 import { useConfirmDialog } from '../useConfirmDialog';
 import { isDaemonApiError } from '../../api/errors';
 import { SERVER_AUTH_UNAUTHORIZED_CODE } from '../../api/daemon/http';
+import { isPlaceholderSessionUsage } from '../../api/daemon/mappers';
 import type {
   AppConfig,
   AppInFlightTurn,
@@ -34,6 +35,7 @@ import {
 } from '../../lib/storage';
 import { parseDiff } from '../../lib/parseDiff';
 import { coerceThinkingForModel } from '../../lib/modelThinking';
+import { sessionExportTraceToJsonl, traceKeyEvent } from '../../debug/trace';
 import { readSessionIdFromLocation, sessionUrl } from '../../lib/sessionRoute';
 import type { SessionUrlMode } from '../../lib/sessionRoute';
 import type {
@@ -220,6 +222,7 @@ export interface UseWorkspaceStateDeps {
   reopenSession: (sessionId: string) => Promise<SyncSessionResult>;
   hasLoadedMessages: (sessionId: string) => boolean;
   refreshSessionStatus: (sessionId: string) => Promise<void>;
+  refreshSessionGoal: (sessionId: string) => Promise<void>;
   persistSessionProfile: (patch: PersistSessionProfilePatch, sessionId?: string) => Promise<void>;
   mergedWorkspaces: ComputedRef<AppWorkspace[]>;
   /** Sidebar-facing workspaces in the user's (dragged) display order. */
@@ -271,6 +274,7 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
     reopenSession,
     hasLoadedMessages,
     refreshSessionStatus,
+    refreshSessionGoal,
     persistSessionProfile,
     mergedWorkspaces,
     workspacesView,
@@ -292,6 +296,7 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
     fileDiffLines,
     fileDiffLoading,
   } = deps;
+  let exportInFlight = false;
 
   async function loadOlderMessages(sessionId: string): Promise<void> {
     if (rawState.messagesLoadingMoreBySession[sessionId]) return;
@@ -339,6 +344,7 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
     void taskPoller.loadTasksForSession(sessionId);
     void loadGitStatus(sessionId);
     void refreshSessionStatus(sessionId);
+    void refreshSessionGoal(sessionId);
     if (!Object.prototype.hasOwnProperty.call(modelProvider.skillsBySession.value, sessionId)) {
       void modelProvider.loadSkillsForSession(sessionId);
     }
@@ -501,6 +507,26 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
       beforeId = page.items[page.items.length - 1]!.id;
     }
     return items;
+  }
+
+  /**
+   * Replace the sessions list wholesale, preserving the live usage accumulated
+   * from /status and the WS status stream: the list endpoint returns all-zero
+   * placeholder usage for every session, and a blind replace would zero the
+   * context ring until the next refresh.
+   */
+  function setSessionsPreservingLiveUsage(sessions: AppSession[]): void {
+    const liveUsageById = new Map(rawState.sessions.map((s) => [s.id, s.usage] as const));
+    setSessions(
+      sessions.map((s) => {
+        const live = liveUsageById.get(s.id);
+        return live !== undefined &&
+          isPlaceholderSessionUsage(s.usage) &&
+          !isPlaceholderSessionUsage(live)
+          ? { ...s, usage: live }
+          : s;
+      }),
+    );
   }
 
   /** Load the initial page of sessions for one workspace, then keep fetching
@@ -670,14 +696,34 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
     if (rawState.sessionsFullyLoaded) return;
     const sessions = await listAllSessionsGlobal().catch(() => null);
     if (sessions === null) return;
-    setSessions(sessions);
+    setSessionsPreservingLiveUsage(sessions);
     rawState.sessionsFullyLoaded = true;
     const cleared: Record<string, boolean> = {};
     for (const w of rawState.workspaces) cleared[w.id] = false;
     rawState.sessionsHasMoreByWorkspace = cleared;
   }
 
+  /**
+   * Re-read GET /meta and apply the server-self fields (version, open-in
+   * apps, auth bypass, backend engine). Called on first load and on every WS
+   * (re)connect — the latter keeps the values truthful across backend
+   * restarts and dev-proxy backend switches.
+   */
+  async function refreshServerMeta(): Promise<void> {
+    const m = await getKimiWebApi()
+      .getMeta()
+      .catch(() => null);
+    if (m === null) return;
+    rawState.serverVersion = m.serverVersion;
+    rawState.availableOpenInApps = m.openInApps;
+    rawState.dangerousBypassAuth = m.dangerousBypassAuth;
+    rawState.backend = m.backend;
+  }
+
   async function load(): Promise<void> {
+    const startedAt = Date.now();
+    let traceStatus = 'accepted';
+    traceKeyEvent('app:load:start');
     rawState.loading = true;
     // The very first load gates on /auth before anything else: a transient
     // failure there (daemon still booting, network blip, 5xx) must NOT be read
@@ -690,17 +736,14 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
     try {
       if (firstLoad && (await waitForFirstAuth()) === 'server-auth-required') {
         authResolved = false;
+        traceStatus = 'auth-required';
         return;
       }
       const api = getKimiWebApi();
       // Parallel: health + meta + models
       await Promise.all([
         api.getHealth().catch(() => null),
-        api.getMeta().then((m) => {
-          rawState.serverVersion = m.serverVersion;
-          rawState.availableOpenInApps = m.openInApps;
-          rawState.dangerousBypassAuth = m.dangerousBypassAuth;
-        }).catch(() => null),
+        refreshServerMeta(),
         modelProvider.loadModels(),
       ]);
 
@@ -714,7 +757,7 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
       // hiding already-fetched rows.
       await loadWorkspaces();
       const sessions = await loadInitialSessionsByWorkspace();
-      setSessions(sessions);
+      setSessionsPreservingLiveUsage(sessions);
 
       // First load: pick the workspace of the most-recent session, unless the
       // user already has a persisted active workspace that still exists.
@@ -747,6 +790,7 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
         await selectSession(sessions[0]!.id, { urlMode: 'replace' });
       }
     } catch (err) {
+      traceStatus = 'failed';
       pushOperationFailure('load', err);
       // Do not re-throw — app stays mounted with empty sessions
     } finally {
@@ -754,6 +798,13 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
       // Without a definitive /auth outcome the splash stays up (retry loop or
       // ServerAuthDialog is handling it) — never expose the half-loaded app.
       if (authResolved) initialized.value = true;
+      traceKeyEvent('app:load:complete', {
+        status: traceStatus,
+        sessionId: rawState.activeSessionId,
+        sessionCount: rawState.sessions.length,
+        workspaceCount: rawState.workspaces.length,
+        durationMs: Date.now() - startedAt,
+      });
     }
   }
 
@@ -2092,6 +2143,77 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
     }
   }
 
+  /** Export the given session (default: the active one). The id is captured
+   * synchronously so a later session switch cannot redirect the in-flight
+   * request, and a lock prevents duplicate ZIP generation. */
+  async function exportSession(targetSessionId?: string): Promise<void> {
+    if (exportInFlight) return;
+    const sessionId = targetSessionId ?? rawState.activeSessionId;
+    if (!sessionId) {
+      const message = t('commands.export.noSession');
+      traceKeyEvent('export:failed', { status: 'no-session' });
+      pushOperationFailure('exportSession', new Error(message), { message });
+      return;
+    }
+    exportInFlight = true;
+    const startedAt = Date.now();
+    traceKeyEvent('export:start', { sessionId });
+    try {
+      const webLog = sessionExportTraceToJsonl();
+      const { blob, fileName } = await getKimiWebApi().exportSession(sessionId, webLog);
+      if (typeof document === 'undefined') throw new Error('Document is unavailable');
+      const url = URL.createObjectURL(blob);
+      let anchor: HTMLAnchorElement | undefined;
+      try {
+        anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = fileName;
+        document.body.append(anchor);
+        anchor.click();
+      } finally {
+        anchor?.remove();
+        setTimeout(() => {
+          try {
+            URL.revokeObjectURL(url);
+          } catch {
+            // Object URL cleanup is best-effort in restricted browser contexts.
+          }
+        }, 0);
+      }
+      traceKeyEvent('export:accepted', {
+        sessionId,
+        status: 'accepted',
+        zipBytes: blob.size,
+        durationMs: Date.now() - startedAt,
+      });
+    } catch (error) {
+      const failure =
+        typeof error === 'object' && error !== null
+          ? (error as {
+              name?: unknown;
+              code?: unknown;
+              requestId?: unknown;
+              phase?: unknown;
+              status?: unknown;
+            })
+          : undefined;
+      traceKeyEvent('export:failed', {
+        sessionId,
+        status: 'failed',
+        durationMs: Date.now() - startedAt,
+        errorName:
+          typeof failure?.name === 'string' ? failure.name : typeof error,
+        errorCode: typeof failure?.code === 'number' ? failure.code : undefined,
+        requestId: typeof failure?.requestId === 'string' ? failure.requestId : undefined,
+        phase: typeof failure?.phase === 'string' ? failure.phase : undefined,
+        httpStatus: typeof failure?.status === 'number' ? failure.status : undefined,
+      });
+      pushOperationFailure('exportSession', error, { sessionId });
+    } finally {
+      exportInFlight = false;
+    }
+  }
+
   /** Restore an archived session — calls API, then puts the returned session
    *  back at the front of the list so it reappears in the sidebar. */
   async function restoreSession(id: string): Promise<boolean> {
@@ -2383,6 +2505,7 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
     updateConfig,
     listAllSessionsGlobal,
     load,
+    refreshServerMeta,
     loadWorkspaces,
     loadMoreSessions,
     loadAllSessions,
@@ -2436,6 +2559,7 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
     renameWorkspace,
     deleteWorkspace,
     archiveSession,
+    exportSession,
     restoreSession,
     loadArchivedSessions,
     logout,

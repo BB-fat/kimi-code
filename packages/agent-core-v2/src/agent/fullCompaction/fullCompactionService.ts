@@ -70,7 +70,6 @@ import {
   fullCompactionBegin,
   fullCompactionCancel,
   fullCompactionComplete,
-  type FullCompactionCompletePayload,
 } from './compactionOps';
 import {
   type CompactionBeginData,
@@ -78,19 +77,6 @@ import {
 } from './types';
 import { Emitter, type Event } from '#/_base/event';
 import { OrderedHookSlot } from '#/hooks';
-
-// The `full_compaction.*` record shapes stay declared in `WireRecordMap`
-// because the records still ride the per-agent `wire.jsonl` log read by
-// `wireRecord.restore()` / `getRecords()`. fullCompaction itself no longer
-// registers resumers here — its state rebuilds from the same log via
-// `wire.replay` into `CompactionModel`.
-declare module '#/agent/wireRecord/wireRecord' {
-  interface WireRecordMap {
-    'full_compaction.begin': CompactionBeginData;
-    'full_compaction.cancel': {};
-    'full_compaction.complete': FullCompactionCompletePayload;
-  }
-}
 
 export const MAX_COMPACTION_RETRY_ATTEMPTS = 5;
 const DEFAULT_COMPACTION_MAX_COMPLETION_TOKENS = 128 * 1024;
@@ -118,7 +104,6 @@ type CompactionCancelReason = 'abort' | 'history_changed';
 
 interface ActiveCompaction extends FullCompactionTask {
   blockedByTurn: boolean;
-  /** Background-activity registration with the activity kernel (I2 visibility). */
   bgRegistration?: IDisposable;
   cancelReason?: CompactionCancelReason;
 }
@@ -280,8 +265,6 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
     estimatedRequestTokens = this.estimateCurrentRequestTokens(),
   ): boolean {
     if (isCodedError(error) && error.code === ErrorCodes.CONTEXT_OVERFLOW) return true;
-    // The raw provider error rides as `cause` of the translated coded error;
-    // the 413 heuristic below still needs its status code.
     const statusError = findAPIStatusError(error);
     if (statusError instanceof APIContextOverflowError) return true;
     if (statusError === undefined || statusError.statusCode !== 413) return false;
@@ -395,10 +378,6 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
   }
 
   private normalizeAfterReplay(): void {
-    // A compaction in flight when the session was torn down cannot resume — the
-    // worker and its AbortController are gone — so a `running` phase replayed
-    // from the log is stranded. Collapse it back to idle silently: no live
-    // `compaction.cancelled` signal, since restore must stay quiet.
     if (this.wire.getModel(CompactionModel).phase !== 'running') return;
     this.wire.dispatch(fullCompactionCancel({}));
   }
@@ -432,10 +411,6 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
   }
 
   private retryFailedDriver(context: LoopErrorContext): boolean {
-    // The failed driver is already materialized, so re-running it does not
-    // append its messages a second time. The loop only learns that the error
-    // was caught; the re-run rides the normal step numbering and keeps
-    // consuming the per-turn maxSteps budget — compacting must not reset it.
     const driver = context.failedDriver;
     if (driver === undefined || context.currentStep?.signal.aborted === true) return false;
     context.retry(driver, { at: 'head' });
@@ -576,18 +551,8 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
       } catch (error) {
         this.log.error('failed to refresh system prompt after compaction', { error });
       }
-      // Fallback floor when reinjection throws; raised below once the per-turn
-      // reminders are back.
       this.lastCompactedTokenCount = result.tokensAfter;
-      // Re-arm the per-turn injectors while the compaction still holds the
-      // context (before markCompleted), so the first post-compaction request —
-      // including a replayed deferred prompt's — already carries the goal
-      // reminder the compaction folded away.
       await this.contextInjector.injectAfterCompaction();
-      // The reinjected reminders are part of the post-compaction floor: a
-      // baseline captured before this point would leave them outside the
-      // "nothing new since compaction" guard and checkAutoCompaction could
-      // re-trigger against a shape that cannot shrink.
       this.lastCompactedTokenCount = this.tokenCountWithPending();
       this.compactionFutile = this.strategy.shouldCompact(this.tokenCountWithPending());
       if (this.compactionFutile) {
@@ -623,10 +588,6 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
       });
       throw error;
     } finally {
-      // Fires on completion, cancellation, AND failure so input deferred while
-      // the compaction held the context is never lost. `_compacting` is already
-      // null on every path, so a replayed launch starts a turn instead of
-      // re-buffering.
       this._onDidFinishCompaction.fire(active);
     }
   }
@@ -674,8 +635,6 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
       let emptyOrTruncatedShrinkCount = 0;
       while (true) {
         const messagesToCompact = historyForModel;
-        // Raw context slice — `llmRequester` projects every request once;
-        // projecting here too would double-project onto shifted indices.
         const messages: Message[] = [...messagesToCompact, createUserMessage(instruction)];
         const estimatedCompactionRequestTokens = this.estimateRequestTokens(messages);
 
@@ -767,7 +726,6 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
           });
 
       const properties: CompactionFinishedEvent = {
-        // Never send `data.instruction` (user-authored content) to telemetry.
         source: data.source,
         tokens_before: result.tokensBefore,
         tokens_after: result.tokensAfter,
@@ -809,7 +767,13 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
         thinking_effort: this.profile.data().thinkingLevel,
         error_type: error instanceof Error ? error.name : 'Unknown',
       });
-      if (isError2(error) && error.code === ErrorCodes.AUTH_LOGIN_REQUIRED) throw error;
+      if (
+        isError2(error) &&
+        (error.code === ErrorCodes.AUTH_LOGIN_REQUIRED ||
+          error.code === ErrorCodes.PROVIDER_AUTH_ERROR)
+      ) {
+        throw error;
+      }
       throw new Error2(ErrorCodes.COMPACTION_FAILED, String(error), { cause: error });
     }
   }
@@ -910,12 +874,6 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
     return this.contextSize.get().size;
   }
 
-  /**
-   * Resolved lazily (not constructor-injected): materializing the injector
-   * from this constructor would reorder loop-hook registration across the
-   * dependency cascade (see AgentPromptService.fullCompaction for the same
-   * hazard).
-   */
   private get contextInjector(): IAgentContextInjectorService {
     if (this.contextInjectorService === undefined) {
       this.contextInjectorService = this.instantiation.invokeFunction((accessor) =>
@@ -1026,11 +984,6 @@ function compactionCancelledReason(active: ActiveCompaction | null): Error {
   return error;
 }
 
-// Construct eagerly (not delayed): the service registers turn and loop hooks
-// (onLaunched / onWillBeginStep / onDidFinishStep) plus a loop error handler that drive
-// auto compaction. With delayed instantiation the eager `accessor.get(IAgentFullCompactionService)`
-// only realizes a proxy, so the hooks would not register until the first RPC —
-// after turns have already run without the auto-compaction gate.
 registerScopedService(
   LifecycleScope.Agent,
   IAgentFullCompactionService,

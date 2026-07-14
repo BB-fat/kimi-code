@@ -86,14 +86,10 @@ export class AgentContextSizeService extends Disposable implements IAgentContext
   get(start?: number, end?: number): ContextSize {
     const context = this.context.get();
     const model = this.wire.getModel(ContextSizeModel);
-    // Mirrors `Array.prototype.slice`: defaults to the whole context, negative
-    // indices count back from the end, and an inverted range is empty.
     const from = normalizeSliceIndex(start ?? 0, context.length);
     const to = normalizeSliceIndex(end ?? context.length, context.length);
     const measuredEnd = Math.min(to, model.length);
     const estimatedStart = Math.max(from, model.length);
-    // The measured-prefix total is the only deterministic measured value; use
-    // it when the range covers the whole prefix.
     const measured =
       from === 0 && measuredEnd === model.length
         ? model.tokens
@@ -243,6 +239,6 @@ registerScopedService(
   LifecycleScope.Agent,
   IAgentContextSizeService,
   AgentContextSizeService,
-  InstantiationType.Delayed,
+  InstantiationType.Eager,
   'contextSize',
 );
