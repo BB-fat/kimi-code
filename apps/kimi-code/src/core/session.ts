@@ -485,7 +485,7 @@ export class CoreSession {
   private async agent(agentId?: string): Promise<IAgentScopeHandle> {
     const id = agentId ?? MAIN_AGENT_ID;
     if (id === MAIN_AGENT_ID) return await ensureMainAgent(this.init.handle);
-    const handle = this.init.handle.accessor.get(IAgentLifecycleService).getHandle(id);
+    const handle = this.init.handle.accessor.get(IAgentLifecycleService).get(id);
     if (handle === undefined) {
       throw new CoreError(
         CoreErrorCodes.AGENT_NOT_FOUND,

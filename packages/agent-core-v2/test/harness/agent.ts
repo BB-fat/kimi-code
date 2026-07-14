@@ -21,7 +21,8 @@ import { ICronTaskPersistence } from '#/app/cron/cronTaskPersistence';
 import { CronTaskPersistenceService } from '#/app/cron/cronTaskPersistenceService';
 import { IAgentGoalService } from '#/agent/goal/goal';
 import { AgentGoalService } from '#/agent/goal/goalService';
-import type { McpServiceOptions } from '#/agent/mcp/mcp';
+import { ISessionMcpService } from '#/session/mcp/sessionMcp';
+import type { McpConnectionManager } from '#/agent/mcp/connection-manager';
 import type { PermissionMode } from '#/agent/permissionPolicy/types';
 import type { PermissionRule } from '#/agent/permissionRules/permissionRules';
 import { IAgentPlanService } from '#/agent/plan/plan';
@@ -80,7 +81,6 @@ import {
   IAgentFullCompactionService,
   IAgentLLMRequesterService,
   ILogService,
-  IAgentMcpService,
   IAgentPermissionGate,
   IAgentPermissionModeService,
   IAgentPermissionRulesService,
@@ -592,8 +592,16 @@ export function cronServices(): TestAgentServiceOverride {
   return sessionService(ISessionCronService, new SyncDescriptor(SessionCronServiceImpl));
 }
 
-export function mcpServices(options: McpServiceOptions): TestAgentServiceOverride {
-  return agentService(IAgentMcpService, new SyncDescriptor(AgentMcpService, [options]));
+export function mcpServices(options: {
+  readonly manager?: McpConnectionManager;
+}): TestAgentServiceOverride {
+  // `AgentMcpService` now resolves the session's shared manager through
+  // `ISessionMcpService`; tests inject a fake manager by stubbing that service.
+  return sessionService(ISessionMcpService, {
+    _serviceBrand: undefined,
+    ensureMcpReady: () => Promise.resolve(),
+    connectionManager: () => options.manager!,
+  } satisfies ISessionMcpService);
 }
 
 export function skillServices(
@@ -1060,7 +1068,6 @@ export class AgentTestContext {
               IAgentTaskService,
               new SyncDescriptor(AgentTaskService),
             );
-            reg.defineDescriptor(IAgentMcpService, new SyncDescriptor(AgentMcpService, [{}]));
             reg.defineDescriptor(IAgentGoalService, new SyncDescriptor(AgentGoalService));
             reg.defineDescriptor(IAgentSkillService, new SyncDescriptor(AgentSkillService));
             reg.defineDescriptor(IAgentUserToolService, new SyncDescriptor(AgentUserToolService));
@@ -1121,14 +1128,24 @@ export class AgentTestContext {
   /**
    * Announce the harness agent as `main` to the real lifecycle. The harness
    * builds the agent scope directly (bypassing `AgentLifecycleService.create`),
-   * so main-bound services (cron, which binds on `onDidCreateMain` /
-   * `getHandle('main')`) stay unbound unless a test announces it here. Kept
-   * opt-in so other tests' tool registries and timer state match upstream.
+   * so main-bound services (cron, which binds on `onDidCreate` filtered to
+   * `main`) stay unbound unless a test announces it here. Kept opt-in so other
+   * tests' tool registries and timer state match upstream.
+   *
+   * `IAgentLifecycleService` has no public registration path outside `create`,
+   * so this mirrors `create`'s effect directly: register the handle in the
+   * service registry and fire its create event.
    */
   announceMain(): void {
-    this.session.accessor
-      .get(IAgentLifecycleService)
-      .notifyMainCreated(this.agent.toHandle() as IAgentScopeHandle);
+    const lifecycle = this.session.accessor.get(IAgentLifecycleService);
+    const internals = lifecycle as unknown as {
+      handles: Map<string, IAgentScopeHandle>;
+      onDidCreateEmitter: { fire: (handle: IAgentScopeHandle) => void };
+    };
+    const handle = this.agent.toHandle() as IAgentScopeHandle;
+    if (internals.handles.has(handle.id)) return;
+    internals.handles.set(handle.id, handle);
+    internals.onDidCreateEmitter.fire(handle);
   }
 
   get modelResolver(): IModelResolver {
@@ -2114,22 +2131,28 @@ function configWithEnvOverrides(config: KimiConfig): KimiConfig {
     parseEnvCompletionTokens(process.env['KIMI_MODEL_MAX_TOKENS']);
   const temperature = parseEnvFloat(process.env['KIMI_MODEL_TEMPERATURE']);
   const topP = parseEnvFloat(process.env['KIMI_MODEL_TOP_P']);
+  const forcedEffort = process.env['KIMI_MODEL_THINKING_EFFORT']?.trim();
   const thinkingKeep = process.env['KIMI_MODEL_THINKING_KEEP']?.trim();
   const cron = cronEnvOverrides(asMutableRecord(config['cron']));
   if (
     maxCompletionTokens === undefined &&
     temperature === undefined &&
     topP === undefined &&
+    (forcedEffort === undefined || forcedEffort.length === 0) &&
     (thinkingKeep === undefined || thinkingKeep.length === 0) &&
     cron === undefined
   ) {
     return config;
   }
   const modelOverrides = asMutableRecord(config['modelOverrides']);
+  const thinking = asMutableRecord(config['thinking']);
   if (temperature !== undefined) modelOverrides['temperature'] = temperature;
   if (topP !== undefined) modelOverrides['topP'] = topP;
   if (thinkingKeep !== undefined && thinkingKeep.length > 0) {
     modelOverrides['thinkingKeep'] = thinkingKeep;
+  }
+  if (forcedEffort !== undefined && forcedEffort.length > 0) {
+    thinking['forcedEffort'] = forcedEffort;
   }
   if (maxCompletionTokens !== undefined) {
     modelOverrides['maxCompletionTokens'] = maxCompletionTokens;
@@ -2138,6 +2161,8 @@ function configWithEnvOverrides(config: KimiConfig): KimiConfig {
     ...config,
     cron: cron ?? config['cron'],
     modelOverrides,
+    thinking:
+      forcedEffort !== undefined && forcedEffort.length > 0 ? thinking : config['thinking'],
   };
 }
 

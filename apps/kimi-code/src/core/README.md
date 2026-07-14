@@ -32,7 +32,7 @@ run-shell.ts ── createCoreHarness(...) ──> CoreHarness ── createSess
 
 - `bootstrap()` 产生进程唯一的 App `Scope`，持有到退出。
 - 一切能力 = `handle.accessor.get(IXxxService)`，严格按 App / Session / Agent 三层从对应 handle 取。
-- main agent 通过 `ensureMainAgent(handle)` 惰性物化；其他 agent 经 `IAgentLifecycleService.getHandle(id)` 解析。
+- main agent 通过 `ensureMainAgent(handle)` 惰性物化；其他 agent 经 `IAgentLifecycleService.get(id)` 解析。
 
 ## 3. 文件职责
 

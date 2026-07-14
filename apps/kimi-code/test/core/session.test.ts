@@ -209,9 +209,14 @@ function makeFixture(options?: {
   const getHandleCalls: string[] = [];
   const lifecycle = {
     list: () => [mainAgent],
-    getHandle: (id: string) => {
+    get: (id: string) => {
       getHandleCalls.push(id);
       return handles.get(id);
+    },
+    create: async (opts?: { agentId?: string }) => {
+      const id = opts?.agentId ?? 'main';
+      getHandleCalls.push(id);
+      return handles.get(id) ?? mainAgent;
     },
     onDidCreate: () => ({ dispose: () => {} }),
     onDidDispose: () => ({ dispose: () => {} }),

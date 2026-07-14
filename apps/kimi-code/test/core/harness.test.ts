@@ -184,7 +184,8 @@ function makeFixture(options?: {
     const main = { id: 'main', kind: 'agent', accessor: makeAccessor(agent.entries) };
     const lifecycleAgents = {
       list: () => [main],
-      getHandle: (id: string) => (id === 'main' ? main : undefined),
+      get: (id: string) => (id === 'main' ? main : undefined),
+      create: async () => main,
       onDidCreate: () => ({ dispose: () => {} }),
       onDidDispose: () => ({ dispose: () => {} }),
     };
