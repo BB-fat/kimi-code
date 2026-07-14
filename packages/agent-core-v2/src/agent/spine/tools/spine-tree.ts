@@ -4,8 +4,9 @@
  * Read-only: renders the current Spine tree, cursor and per-node status through
  * `spine.renderTree()` so the model can re-orient; it never registers a
  * transition. Self-registers via `registerTool` gated on the `KIMI_CODE_SPINE`
- * flag; the Eager `AgentBuiltinToolsRegistrar` instantiates one per agent.
- * Bound at Agent scope.
+ * flag and `agentId === 'main'` (main-agent-only, like the goal tools); the
+ * Eager `AgentBuiltinToolsRegistrar` registers it into the main agent's tool
+ * registry only, never a sub-agent's. Bound at Agent scope.
  */
 
 import { z } from 'zod';
@@ -14,6 +15,7 @@ import { toInputJsonSchema } from '#/tool/input-schema';
 import type { BuiltinTool, ToolExecution } from '#/tool/toolContract';
 import { registerTool } from '#/agent/toolRegistry/toolContribution';
 
+import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { SPINE_FLAG_ID } from '#/agent/spine/flag';
 import { IAgentSpineService, SPINE_TOOL_TREE } from '#/agent/spine/spine';
 import { IFlagService } from '#/app/flag/flag';
@@ -38,5 +40,7 @@ export class SpineTreeTool implements BuiltinTool<Record<string, never>> {
 }
 
 registerTool(SpineTreeTool, {
-  when: (accessor) => accessor.get(IFlagService).enabled(SPINE_FLAG_ID),
+  when: (accessor) =>
+    accessor.get(IFlagService).enabled(SPINE_FLAG_ID) &&
+    accessor.get(IAgentScopeContext).agentId === 'main',
 });

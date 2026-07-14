@@ -50,14 +50,14 @@ const AGENT_TOOLS = [
   'SetGoalBudget',
   'UpdateGoal',
   'mcp__*',
-  // Spine task-tree control tools. Harmless when the spine experiment is off:
-  // the tools are only registered when the `spine` experimental flag is
-  // enabled (see `registerTool(..., { when })` gating on
-  // `IFlagService.enabled(SPINE_FLAG_ID)`), so a name listed here with no
-  // matching registered tool contributes nothing — same as an unmatched
-  // `mcp__*` pattern. Without these names the profile's active-tool whitelist
-  // would filter the spine tools out of every LLM request even when the
-  // experiment is enabled.
+  // Spine task-tree control tools. Harmless for sub-agents and when the spine
+  // experiment is off: the tools register only on the main agent and only when
+  // the `spine` experimental flag is enabled (see `registerTool(..., { when })`
+  // gating on `IFlagService.enabled(SPINE_FLAG_ID)` and `agentId === 'main'`),
+  // so a name listed here with no matching registered tool
+  // contributes nothing — same as an unmatched `mcp__*` pattern. Without these
+  // names the main agent's active-tool whitelist would filter the spine tools
+  // out of every LLM request even when the experiment is enabled.
   'spine_open',
   'spine_close',
   'spine_next',

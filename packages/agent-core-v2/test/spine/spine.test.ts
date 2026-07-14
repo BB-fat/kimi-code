@@ -13,6 +13,15 @@ import {
   type BeforeStepContext,
 } from '#/agent/loop/loop';
 import { ACCEPTED_OUTPUT, toControlResult } from '#/agent/spine/tools/controlResult';
+import { SPINE_FLAG_ID } from '#/agent/spine/flag';
+import { SpineCloseTool } from '#/agent/spine/tools/spine-close';
+import { SpineNextTool } from '#/agent/spine/tools/spine-next';
+import { SpineOpenTool } from '#/agent/spine/tools/spine-open';
+import { SpineTreeTool } from '#/agent/spine/tools/spine-tree';
+import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import { IFlagService } from '#/app/flag/flag';
+import { getToolContributions } from '#/agent/toolRegistry/toolContribution';
+import type { ServicesAccessor } from '#/_base/di/instantiation';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import type { PersistedWireRecord } from '#/agent/wireRecord/wireRecord';
 import type { PersistedRecord } from '#/wire/wireService';
@@ -912,6 +921,43 @@ describe('Spine durability', () => {
 
     expect(readSpine(ctx).nodes['1.1.1']?.closedAt).toBe(1);
     expect(reported).toHaveLength(0);
+  });
+});
+
+describe('spine control tool main-agent gating', () => {
+  const gatedTools = [
+    ['spine_open', SpineOpenTool],
+    ['spine_close', SpineCloseTool],
+    ['spine_next', SpineNextTool],
+    ['spine_tree', SpineTreeTool],
+  ] as const;
+
+  function accessorFor(agentId: string, spineEnabled: boolean): ServicesAccessor {
+    const scopeContext: IAgentScopeContext = {
+      _serviceBrand: undefined,
+      agentId,
+      scope: () => '',
+    };
+    const flags = {
+      enabled: (id: string) => id === SPINE_FLAG_ID && spineEnabled,
+    } as unknown as IFlagService;
+    return {
+      get: (id: unknown) => {
+        if (id === IAgentScopeContext) return scopeContext;
+        if (id === IFlagService) return flags;
+        throw new Error(`unexpected service identifier: ${String(id)}`);
+      },
+    } as unknown as ServicesAccessor;
+  }
+
+  it.each(gatedTools)('%s registers only on the main agent with the flag on', (name, ctor) => {
+    const contribution = getToolContributions().find((c) => c.ctor === ctor);
+    expect(contribution, `${name} contribution`).toBeDefined();
+    const when = contribution?.options.when;
+    expect(when, `${name} must gate on flag + main-agent identity`).toBeDefined();
+    expect(when?.(accessorFor('main', true))).toBe(true);
+    expect(when?.(accessorFor('sub-1', true))).toBe(false);
+    expect(when?.(accessorFor('main', false))).toBe(false);
   });
 });
 

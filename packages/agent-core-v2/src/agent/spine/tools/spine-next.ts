@@ -5,9 +5,10 @@
  * registers the single per-step pending transition through `spine`; the atomic
  * close+open is committed by the `spine` service after the step once the
  * matching tool result lands in `contextMemory`. Self-registers via
- * `registerTool` gated on the `KIMI_CODE_SPINE` flag; the Eager
- * `AgentBuiltinToolsRegistrar` instantiates one per agent. Bound at Agent
- * scope.
+ * `registerTool` gated on the `KIMI_CODE_SPINE` flag and `agentId === 'main'`
+ * (main-agent-only, like the goal tools); the Eager `AgentBuiltinToolsRegistrar`
+ * registers it into the main agent's tool registry only, never a sub-agent's.
+ * Bound at Agent scope.
  */
 
 import { z } from 'zod';
@@ -16,6 +17,7 @@ import { toInputJsonSchema } from '#/tool/input-schema';
 import type { BuiltinTool, ToolExecution } from '#/tool/toolContract';
 import { registerTool } from '#/agent/toolRegistry/toolContribution';
 
+import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { SPINE_FLAG_ID } from '#/agent/spine/flag';
 import { IAgentSpineService, SPINE_TOOL_NEXT } from '#/agent/spine/spine';
 import { IFlagService } from '#/app/flag/flag';
@@ -54,5 +56,7 @@ export class SpineNextTool implements BuiltinTool<SpineNextInput> {
 }
 
 registerTool(SpineNextTool, {
-  when: (accessor) => accessor.get(IFlagService).enabled(SPINE_FLAG_ID),
+  when: (accessor) =>
+    accessor.get(IFlagService).enabled(SPINE_FLAG_ID) &&
+    accessor.get(IAgentScopeContext).agentId === 'main',
 });
