@@ -717,6 +717,7 @@ function openPr(url: string): void {
       :git-info="client.gitInfo.value"
       :tasks="client.tasks.value"
       :todos="client.todos.value"
+      :todo-tree="client.todoTree.value"
       :goal="client.goal.value"
       :activation-badges="client.activationBadges.value"
       :status="client.status.value"

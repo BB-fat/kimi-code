@@ -106,6 +106,7 @@ export interface WireSessionRuntimeStatus {
   plan_mode: boolean;
   swarm_mode: boolean;
   context_tokens: number;
+  raw_context_tokens?: number;
   max_context_tokens: number;
   context_usage: number;
 }

@@ -176,6 +176,7 @@ export class SessionLegacyService implements ISessionLegacyService {
       plan_mode: planData !== null,
       swarm_mode: swarm.isActive,
       context_tokens: tokens,
+      raw_context_tokens: contextSize.rawSize(),
       max_context_tokens: maxTokens,
       context_usage: maxTokens > 0 ? tokens / maxTokens : 0,
     };

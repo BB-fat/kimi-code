@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  SPINE_ACCEPTED_RECEIPT,
   applyAcceptedSpineTransition,
   createSpineProjectionState,
   isSpineProjectionActive,
   projectSpineTree,
   scanSpineProjectionFromHistory,
 } from '#/tui/utils/spine-projection';
+
+/** Core's real accepted receipt (ACCEPTED_OUTPUT in agent-core-v2's
+ *  controlResult.ts) — the replay scan must match it. */
+const ACCEPTED_OUTPUT = 'accepted — commits after this step completes';
 
 function assistant(callId: string, name: string, args: Record<string, unknown>) {
   return {
@@ -151,11 +154,11 @@ describe('spine projection history scan', () => {
   it('rebuilds the tree from accepted receipts in transcript order', () => {
     const history = [
       assistant('c1', 'spine_open', { summary: 'task A' }),
-      tool('c1', SPINE_ACCEPTED_RECEIPT),
+      tool('c1', ACCEPTED_OUTPUT),
       bash('c2'),
       tool('c2', 'hi\n'),
       assistant('c3', 'spine_next', { summary: 'task B', memory: 'A done' }),
-      tool('c3', SPINE_ACCEPTED_RECEIPT),
+      tool('c3', ACCEPTED_OUTPUT),
     ];
 
     const state = scanSpineProjectionFromHistory(history);
@@ -168,11 +171,11 @@ describe('spine projection history scan', () => {
   it('skips rejected transitions so the tree stays truthful', () => {
     const history = [
       assistant('c1', 'spine_open', { summary: 'task A' }),
-      tool('c1', SPINE_ACCEPTED_RECEIPT),
+      tool('c1', ACCEPTED_OUTPUT),
       assistant('c2', 'spine_close', { memory: 'root close gets rejected' }),
       tool('c2', 'Root-epoch nodes cannot be closed. Use open to start a child node under the current scope.'),
       assistant('c3', 'spine_next', { summary: 'task B', memory: 'moving on' }),
-      tool('c3', SPINE_ACCEPTED_RECEIPT),
+      tool('c3', ACCEPTED_OUTPUT),
     ];
 
     // The rejected close did not pop the cursor, so `task B` landed as a
@@ -187,11 +190,11 @@ describe('spine projection history scan', () => {
   it('rebuilds nested structure from the stored history', () => {
     const history = [
       assistant('c1', 'spine_open', { summary: 'parent' }),
-      tool('c1', SPINE_ACCEPTED_RECEIPT),
+      tool('c1', ACCEPTED_OUTPUT),
       assistant('c2', 'spine_open', { summary: 'child' }),
-      tool('c2', SPINE_ACCEPTED_RECEIPT),
+      tool('c2', ACCEPTED_OUTPUT),
       assistant('c3', 'spine_close', { memory: 'child done' }),
-      tool('c3', SPINE_ACCEPTED_RECEIPT),
+      tool('c3', ACCEPTED_OUTPUT),
     ];
 
     const state = scanSpineProjectionFromHistory(history);
@@ -208,9 +211,9 @@ describe('spine projection history scan', () => {
   it('applies a tool result only to the first matching call', () => {
     const history = [
       assistant('c1', 'spine_open', { summary: 'task A' }),
-      tool('c1', SPINE_ACCEPTED_RECEIPT),
-      tool('c1', SPINE_ACCEPTED_RECEIPT),
-      tool('c9', SPINE_ACCEPTED_RECEIPT),
+      tool('c1', ACCEPTED_OUTPUT),
+      tool('c1', ACCEPTED_OUTPUT),
+      tool('c9', ACCEPTED_OUTPUT),
     ];
 
     const state = scanSpineProjectionFromHistory(history);
@@ -249,7 +252,7 @@ describe('spine projection history scan', () => {
     const history = transitions.flatMap(([name, args], index) => {
       const callId = `c${String(index)}`;
       live = applyAcceptedSpineTransition(live, name, args);
-      return [assistant(callId, name, args), tool(callId, SPINE_ACCEPTED_RECEIPT)];
+      return [assistant(callId, name, args), tool(callId, ACCEPTED_OUTPUT)];
     });
 
     expect(scanSpineProjectionFromHistory(history)).toEqual(live);

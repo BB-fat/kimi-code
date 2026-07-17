@@ -16,6 +16,7 @@ import { createDecorator } from '#/_base/di/instantiation';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 
 import type { SpineEpochArchiveInput } from './spineArchive';
+import type { SpineState } from './spineOps';
 
 export const SPINE_TOOL_OPEN = 'spine_open';
 export const SPINE_TOOL_CLOSE = 'spine_close';
@@ -43,15 +44,18 @@ export interface IAgentSpineService {
 
   readonly enabled: boolean;
 
-  acceptOpen(summary: string, toolCallId: string): SpineTransitionResult;
-  acceptClose(memory: string, toolCallId: string): SpineTransitionResult;
-  acceptNext(summary: string, memory: string, toolCallId: string): SpineTransitionResult;
+  acceptOpen(summary: string): SpineTransitionResult;
+  acceptClose(memory: string): SpineTransitionResult;
+  acceptNext(summary: string, memory: string): SpineTransitionResult;
 
   archiveEpochRoot(input: SpineEpochArchiveInput): Promise<string | undefined>;
 
   renderTree(): string;
 
   fold(messages: readonly ContextMessage[]): readonly ContextMessage[];
+
+  /** The current tree state, derived from the message stream on read. */
+  currentState(): SpineState;
 }
 
 export const IAgentSpineService = createDecorator<IAgentSpineService>('agentSpineService');

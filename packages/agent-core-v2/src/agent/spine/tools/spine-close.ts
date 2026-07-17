@@ -43,7 +43,7 @@ export class SpineCloseTool implements BuiltinTool<SpineCloseInput> {
     return {
       approvalRule: this.name,
       description: 'Close the current Spine node',
-      execute: async (ctx) => toControlResult(this.spine.acceptClose(input.memory, ctx.toolCallId)),
+      execute: async (_ctx) => toControlResult(this.spine.acceptClose(input.memory)),
     };
   }
 }

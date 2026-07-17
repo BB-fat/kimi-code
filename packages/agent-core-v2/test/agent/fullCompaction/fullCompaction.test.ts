@@ -51,12 +51,36 @@ import {
 } from '#/index';
 import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentContextSizeService } from '#/agent/contextSize/contextSize';
-import { spineClose, spineOpen } from '#/agent/spine/spineOps';
+import type { ContextMessage } from '#/agent/contextMemory/types';
+import { ACCEPTED_OUTPUT } from '#/agent/spine/tools/controlResult';
 import { IAgentWireService } from '#/wire/tokens';
 import { IAgentGoalService } from '#/agent/goal/goal';
 import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
 
 type GenerateFn = NonNullable<TestAgentOptions['generate']>;
+
+// Appends a real spine transition — the carrier assistant call and its
+// accepted receipt — so the derivation rebuilds the node from the messages.
+function spineTransition(
+  ctx: TestAgentContext,
+  id: string,
+  name: string,
+  args: Record<string, unknown>,
+): void {
+  const carrier: ContextMessage = {
+    role: 'assistant',
+    content: [{ type: 'text', text: `calling ${name}` }],
+    toolCalls: [{ type: 'function', id, name, arguments: JSON.stringify(args) }],
+  };
+  const receipt: ContextMessage = {
+    role: 'tool',
+    content: [{ type: 'text', text: ACCEPTED_OUTPUT }],
+    toolCalls: [],
+    toolCallId: id,
+  };
+  ctx.context.append(carrier);
+  ctx.context.append(receipt);
+}
 
 const CATALOGUED_PROVIDER = {
   type: 'kimi',
@@ -2921,17 +2945,29 @@ describe('FullCompaction', () => {
         provider: CATALOGUED_PROVIDER,
         modelCapabilities: { ...CATALOGUED_MODEL_CAPABILITIES, max_context_tokens: window },
       });
-      for (let i = 0; i < 10; i++) {
+      // A real closed node: the open carrier rides in first, and the close
+      // carrier lands before the last two exchanges so the undo below leaves
+      // it (and the node's closed span) intact. The user prompts stay tiny so
+      // the assembled memory (which cites the span's requests) stays small and
+      // the folded view stays far below the raw history the assistants inflate.
+      spineTransition(ctx, 's_open', 'spine_open', { summary: 'seed node' });
+      for (let i = 0; i < 8; i++) {
         ctx.appendExchange(
           i + 1,
-          `u${String(i)} ${'x'.repeat(2000)}`,
+          `u${String(i)}`,
           `a${String(i)} ${'y'.repeat(2000)}`,
           1000,
         );
       }
-      const wire = ctx.get(IAgentWireService);
-      wire.dispatch(spineOpen({ id: '1.1.1', parentId: '1.1', summary: 'seed node', openedAt: 0 }));
-      wire.dispatch(spineClose({ id: '1.1.1', closedAt: 15, memory: 'seed memory' }));
+      spineTransition(ctx, 's_close', 'spine_close', { memory: 'seed memory' });
+      for (let i = 8; i < 10; i++) {
+        ctx.appendExchange(
+          i + 1,
+          `u${String(i)}`,
+          `a${String(i)} ${'y'.repeat(2000)}`,
+          1000,
+        );
+      }
 
       await ctx.rpc.undoHistory({ count: 1 });
 
@@ -2969,7 +3005,8 @@ describe('FullCompaction', () => {
       });
       // ~140k estimated raw tokens — above 50% of the 256k window — while the
       // folded view (all but the last two exchanges closed) stays tiny.
-      for (let i = 0; i < 70; i++) {
+      spineTransition(ctx, 's_open', 'spine_open', { summary: 'seed node' });
+      for (let i = 0; i < 68; i++) {
         ctx.appendExchange(
           i + 1,
           `u${String(i)} ${'x'.repeat(4000)}`,
@@ -2977,9 +3014,15 @@ describe('FullCompaction', () => {
           1000,
         );
       }
-      const wire = ctx.get(IAgentWireService);
-      wire.dispatch(spineOpen({ id: '1.1.1', parentId: '1.1', summary: 'seed node', openedAt: 0 }));
-      wire.dispatch(spineClose({ id: '1.1.1', closedAt: 135, memory: 'seed memory' }));
+      spineTransition(ctx, 's_close', 'spine_close', { memory: 'seed memory' });
+      for (let i = 68; i < 70; i++) {
+        ctx.appendExchange(
+          i + 1,
+          `u${String(i)} ${'x'.repeat(4000)}`,
+          `a${String(i)} ${'y'.repeat(4000)}`,
+          1000,
+        );
+      }
 
       await ctx.rpc.prompt({ input: [{ type: 'text', text: 'go' }] });
       const events = await ctx.untilTurnEnd();

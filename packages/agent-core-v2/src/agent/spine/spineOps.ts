@@ -1,19 +1,18 @@
 /**
- * `spine` domain (L4) — wire Model (`SpineModel`) and the Ops that mutate the
- * model-driven task tree (`spine.open` / `spine.close` / `spine.next` /
- * `spine.root_compact` / `spine.truncate_repair`).
+ * `spine` domain (L4) — the LEGACY wire Model (`SpineModel`) and its Ops
+ * (`spine.open` / `spine.close` / `spine.next` / `spine.root_compact` /
+ * `spine.truncate_repair`), plus the `SpineState` / `SpineNode` types the
+ * whole domain shares.
  *
- * Declares the tree as `SpineState` (initial root epoch `1` with an open
- * synthetic startup node `1.1`): a node map, the open-node stack (its top is
- * the cursor), and the current root-epoch boundary. Every Op's `apply` is a
- * pure state transform that returns a NEW reference on a real change and the
- * SAME reference when its guard fails (so the wire's reference-equality gate
- * stays quiet); guards reject malformed or out-of-order payloads so a replay
- * never lands the tree in an inconsistent shape — cursor, parent linkage and
- * child numbering are derived by the live service, never trusted from a record.
- * Node ids and memory bodies live on the records themselves, so `wire.dispatch`
- * and `wire.replay` rebuild the same tree. Consumed by the Agent-scope
- * `spineService` and the `spineFold` projection.
+ * Since the derivation rewrite, the live tree is rebuilt from the
+ * `contextMemory` message stream by `spineDerive.deriveSpineState` and these
+ * ops are NEVER dispatched: they stay registered only so sessions persisted
+ * before the rewrite still replay without unknown-op errors, and their
+ * reducers are kept honest by the `Spine reducers (via wire)` tests. The
+ * state shape below is the derivation's output contract — a node map, the
+ * open-node stack (its top is the cursor), and the current root-epoch
+ * boundary, with `openedAt`/`closedAt` indexing the stored history. Consumed
+ * by the Agent-scope `spineService` and the `spineFold` projection.
  */
 
 import { z } from 'zod';

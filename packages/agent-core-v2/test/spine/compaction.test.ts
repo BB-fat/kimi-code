@@ -1,14 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { MASTER_ENV } from '#/app/flag/flagService';
 import {
-  IAgentSpineService,
-  IAgentWireService,
-  SpineModel,
-  spineClose,
-  spineOpen,
-  spineRootCompact,
-} from '#/index';
+  buildCompactionSummaryText,
+  createCompactionSummaryMessage,
+} from '#/agent/contextMemory/compactionHandoff';
+import type { ContextMessage } from '#/agent/contextMemory/types';
+import { MASTER_ENV } from '#/app/flag/flagService';
+import { ACCEPTED_OUTPUT, IAgentSpineService } from '#/index';
 
 import {
   execEnvServices,
@@ -63,7 +61,9 @@ describe('Spine / compaction interaction', () => {
     await completed;
 
     const recordTypes = ctx.recordHistory.map((record) => record.type);
-    expect(recordTypes).toContain('spine.root_compact');
+    // The derivation reads the boundary from the summary message itself — no
+    // tree op is dispatched for a root compaction any more.
+    expect(recordTypes).not.toContain('spine.root_compact');
     expect(recordTypes).not.toContain('context.apply_compaction');
 
     const state = readSpine(ctx);
@@ -96,13 +96,13 @@ describe('Spine / compaction interaction', () => {
     await ctx.rpc.beginCompaction({});
     await completed;
 
-    const state = readSpine(ctx);
-    const epochNode = state.nodes[String(state.rootEpoch)];
-    expect(epochNode?.archivePath).toBeDefined();
-    const archivePath = epochNode?.archivePath as string;
-    expect(archivePath.endsWith('/agents/main/spine/2.md')).toBe(true);
-    expect(writes.has(archivePath)).toBe(true);
-    const content = writes.get(archivePath) ?? '';
+    // The archive path is deterministic and published on the tree view; the
+    // epoch node itself carries no persisted path any more.
+    const archivePath = [...writes.keys()].find((path) =>
+      path.endsWith('/agents/main/spine/2.md'),
+    );
+    expect(archivePath).toBeDefined();
+    const content = writes.get(archivePath!) ?? '';
     expect(content).toContain('# Spine Root Epoch 2');
     expect(content).toContain('## Epoch Summary');
     expect(content).toContain('Summary.');
@@ -112,25 +112,7 @@ describe('Spine / compaction interaction', () => {
     expect(content).toContain('recent user');
     expect(content).toContain('recent assistant');
 
-    expect(ctx.get(IAgentSpineService).renderTree()).toContain(archivePath);
-  });
-
-  it('keeps the epoch archive path on the new epoch node through dispatch', () => {
-    const ctx = testAgent();
-    const wire = ctx.get(IAgentWireService);
-
-    wire.dispatch(
-      spineRootCompact({
-        epoch: 2,
-        epochStartAt: 10,
-        epochMemoryAt: 9,
-        archivePath: '/work/spine/agent-0/2.md',
-      }),
-    );
-
-    const state = readSpine(ctx);
-    expect(state.nodes['2']?.archivePath).toBe('/work/spine/agent-0/2.md');
-    expect(ctx.get(IAgentSpineService).renderTree()).toContain('archive: /work/spine/agent-0/2.md');
+    expect(ctx.get(IAgentSpineService).renderTree()).toContain(archivePath!);
   });
 
   it('completes the root compaction without an archive path when the archive write fails', async () => {
@@ -152,10 +134,13 @@ describe('Spine / compaction interaction', () => {
     await completed;
 
     const recordTypes = ctx.recordHistory.map((record) => record.type);
-    expect(recordTypes).toContain('spine.root_compact');
+    expect(recordTypes).not.toContain('spine.root_compact');
     expect(recordTypes).toContain('full_compaction.complete');
-    const state = readSpine(ctx);
-    expect(state.nodes[String(state.rootEpoch)]?.archivePath).toBeUndefined();
+    // The failed epoch archive write is tracked, so the tree view publishes no
+    // path for the new epoch (instead of pointing at a missing file).
+    const tree = ctx.get(IAgentSpineService).renderTree();
+    expect(tree).toContain('2 [open]');
+    expect(tree).not.toContain('2.md');
     expect(
       logEntries.some(
         (entry) => entry.level === 'warn' && entry.message.toLowerCase().includes('archive'),
@@ -165,26 +150,23 @@ describe('Spine / compaction interaction', () => {
 
   it('keeps previous epochs and their archive paths reachable in the tree after a root compaction', () => {
     const ctx = testAgent();
-    const wire = ctx.get(IAgentWireService);
-
-    wire.dispatch(spineOpen({ id: '1.1.1', summary: 'task A', parentId: '1.1', openedAt: 0 }));
-    wire.dispatch(
-      spineClose({
-        id: '1.1.1',
-        closedAt: 5,
-        memory: 'did A',
-        archivePath: '/work/spine/agent-0/1-1-1.md',
-      }),
-    );
-    wire.dispatch(spineRootCompact({ epoch: 2, epochStartAt: 10, epochMemoryAt: 9 }));
+    // Epoch 1: a real open + close, then the epoch boundary lands.
+    append(ctx, assistantToolCall('c_open', 'spine_open', JSON.stringify({ summary: 'task A' })));
+    append(ctx, spineAcceptedReceipt('c_open'));
+    append(ctx, assistantToolCall('c_close', 'spine_close', JSON.stringify({ memory: 'did A' })));
+    append(ctx, spineAcceptedReceipt('c_close'));
+    append(ctx, createCompactionSummaryMessage(buildCompactionSummaryText('epoch summary')));
 
     const tree = ctx.get(IAgentSpineService).renderTree();
 
     expect(tree).toContain('1 [closed]');
     expect(tree).toContain('1.1.1');
     expect(tree).toContain('task A');
-    expect(tree).toContain('archive: /work/spine/agent-0/1-1-1.md');
-    expect(tree).toContain('2 [open]');
+    // The closed node's archive path is recomputed deterministically and
+    // published on the tree view.
+    expect(tree).toContain('archive:');
+    expect(tree).toContain('1-1-1.md');
+    expect(tree).toContain('2 [open, archive:');
   });
 
   it('summarizes only the current epoch and chains the previous epoch summary', async () => {
@@ -226,7 +208,30 @@ describe('Spine / compaction interaction', () => {
 });
 
 function readSpine(ctx: TestAgentContext) {
-  return ctx.get(IAgentWireService).getModel(SpineModel);
+  return ctx.get(IAgentSpineService).currentState();
+}
+
+function append(ctx: TestAgentContext, message: ContextMessage): number {
+  const index = ctx.context.get().length;
+  ctx.context.append(message);
+  return index;
+}
+
+function assistantToolCall(id: string, name: string, args: string = '{}'): ContextMessage {
+  return {
+    role: 'assistant',
+    content: [{ type: 'text', text: `calling ${name}` }],
+    toolCalls: [{ type: 'function', id, name, arguments: args }],
+  };
+}
+
+function spineAcceptedReceipt(toolCallId: string): ContextMessage {
+  return {
+    role: 'tool',
+    content: [{ type: 'text', text: ACCEPTED_OUTPUT }],
+    toolCalls: [],
+    toolCallId,
+  };
 }
 
 function recordingHostFs(writes: Map<string, string>) {

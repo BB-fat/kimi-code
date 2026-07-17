@@ -13,9 +13,12 @@
  * closable) and work nodes whose closed span a truncation repair voided. The
  * startup node does NOT use it — it opens at the real epoch boundary and
  * closes like any other work node. Holds no state and performs no IO;
- * consumed by `spineOps` (reducers), `spineService` (commit orchestration)
- * and `spineFold` (projection).
+ * consumed by `spineOps` (reducers), `spineDerive` (message-stream
+ * derivation), `spineService` (commit orchestration) and `spineFold`
+ * (projection).
  */
+
+import type { SpineNode } from './spineOps';
 
 export const SPINE_VOID_OPENED_AT = -1;
 
@@ -69,6 +72,26 @@ export function assembleMemoryBody(input: SpineMemoryAssemblyInput): string {
   if (sections.length === 0) return node;
   if (node.length > 0) sections.push(`## Node Memory\n\n${node}`);
   return sections.join('\n\n');
+}
+
+/**
+ * Assembled memory bodies of a node's already-closed children, in child
+ * order — the `## Child Memory` section input for the parent's own assembly.
+ * Children close before their parent by construction (a close pops the
+ * cursor), so every child is closed when the parent's memory assembles.
+ */
+export function closedChildMemories(
+  nodes: Readonly<Record<string, SpineNode>>,
+  node: SpineNode,
+): readonly string[] {
+  const bodies: string[] = [];
+  for (const childId of node.children) {
+    const child = nodes[childId];
+    if (child !== undefined && child.closedAt !== undefined && child.memory !== undefined) {
+      bodies.push(child.memory);
+    }
+  }
+  return bodies;
 }
 
 export interface SpineTreeNodeView {

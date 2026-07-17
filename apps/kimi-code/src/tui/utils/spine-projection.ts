@@ -3,9 +3,10 @@
  *
  * Pure reducer that mirrors the main agent's Spine task tree from the
  * transcript alone — no server/protocol changes: the TUI already sees every
- * top-level tool call and its result, and the Spine control tools answer
- * with a literal `accepted` receipt, so the panel can be driven entirely
- * app-side, through the same channel the legacy `TodoList` scrape uses.
+ * top-level tool call and its result, and core's contract is accepted ⟺
+ * non-error tool result (a rejected transition surfaces its reason as an
+ * error), so the panel can be driven entirely app-side, through the same
+ * channel the legacy `TodoList` scrape uses.
  *
  * The tree is rebuilt from accepted transitions in transcript order:
  *   spine_open(summary)         → push a child under the cursor; cursor = child
@@ -14,9 +15,10 @@
  * The panel renders the mirrored tree directly (closed → done, the open
  * cursor chain → in_progress, cursor flagged `active`), folding done
  * subtrees panel-side; see `projectSpineTree`. Rejected transitions (error
- * results, or stored results whose text is not the `accepted` receipt) never
- * touch the state; that also bounds drift to a single transition when core
- * drops a pending move (e.g. abort before the afterStep commit).
+ * results live; stored results whose text lacks the `accepted` receipt
+ * prefix on replay) never touch the state; that also bounds drift to a
+ * single transition when core drops a pending move (e.g. abort before the
+ * afterStep commit).
  *
  * Subagents route their sub-tool calls through `subagent.*` events rather
  * than the top-level tool result stream, so the projection only ever tracks
@@ -33,7 +35,10 @@ const SPINE_CONTROL_TOOL_NAMES: ReadonlySet<string> = new Set([
   'spine_next',
 ]);
 
-/** Literal output the spine control tools return when core accepts the intent. */
+/** Prefix of the receipt the spine control tools return when core accepts the
+ *  intent — core's ACCEPTED_OUTPUT is `accepted — commits after this step
+ *  completes`; the replay scan matches the prefix so suffix wording tweaks
+ *  don't break resume. */
 export const SPINE_ACCEPTED_RECEIPT = 'accepted';
 
 export function isSpineControlToolName(name: string): name is SpineControlToolName {
@@ -69,8 +74,8 @@ function readSummary(args: Record<string, unknown>): string | null {
 
 /**
  * Applies one accepted transition. Callers must only pass results core
- * accepted (`event.isError === false` live; the `accepted` receipt on replay)
- * — rejected or malformed calls leave the state untouched.
+ * accepted (`event.isError === false` live; an `accepted`-prefixed receipt
+ * on replay) — rejected or malformed calls leave the state untouched.
  */
 export function applyAcceptedSpineTransition(
   state: SpineProjectionState,
@@ -216,7 +221,7 @@ export function scanSpineProjectionFromHistory(
     const call = pending.get(message.toolCallId);
     if (call === undefined) continue;
     pending.delete(message.toolCallId);
-    if (textContent(message.content).trim() !== SPINE_ACCEPTED_RECEIPT) continue;
+    if (!textContent(message.content).trim().startsWith(SPINE_ACCEPTED_RECEIPT)) continue;
     state = applyAcceptedSpineTransition(state, call.name, call.args);
   }
   return state;

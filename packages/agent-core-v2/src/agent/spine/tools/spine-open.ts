@@ -43,7 +43,7 @@ export class SpineOpenTool implements BuiltinTool<SpineOpenInput> {
     return {
       approvalRule: this.name,
       description: 'Open a Spine child node',
-      execute: async (ctx) => toControlResult(this.spine.acceptOpen(input.summary, ctx.toolCallId)),
+      execute: async (_ctx) => toControlResult(this.spine.acceptOpen(input.summary)),
     };
   }
 }

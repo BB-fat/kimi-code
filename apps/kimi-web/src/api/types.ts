@@ -55,6 +55,9 @@ export interface AppSessionUsage {
   cacheCreationTokens: number;
   totalCostUsd: number;
   contextTokens: number;
+  /** Unfolded-request cost (>= contextTokens once a fold reclaimed context).
+   *  Absent until the daemon reports it (old daemons never do). */
+  rawContextTokens?: number;
   contextLimit: number;
   turnCount: number;
 }
@@ -99,6 +102,8 @@ export interface AppSessionRuntimeStatus {
   planMode: boolean;
   swarmMode: boolean;
   contextTokens: number;
+  /** Unfolded-request cost; 0 when the daemon predates the field. */
+  rawContextTokens: number;
   maxContextTokens: number;
   contextUsage: number;
 }

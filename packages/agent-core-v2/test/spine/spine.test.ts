@@ -6,12 +6,6 @@ import {
   resetUnexpectedErrorHandler,
   setUnexpectedErrorHandler,
 } from '#/_base/errors/unexpectedError';
-import { Disposable } from '#/_base/di/lifecycle';
-import {
-  IAgentLoopService,
-  type AfterStepContext,
-  type BeforeStepContext,
-} from '#/agent/loop/loop';
 import { ACCEPTED_OUTPUT, toControlResult } from '#/agent/spine/tools/controlResult';
 import { SPINE_FLAG_ID } from '#/agent/spine/flag';
 import { SpineCloseTool } from '#/agent/spine/tools/spine-close';
@@ -23,11 +17,8 @@ import { IFlagService } from '#/app/flag/flag';
 import { getToolContributions } from '#/agent/toolRegistry/toolContribution';
 import type { ServicesAccessor } from '#/_base/di/instantiation';
 import type { ContextMessage } from '#/agent/contextMemory/types';
-import type { PersistedWireRecord } from '#/agent/wireRecord/wireRecord';
-import type { PersistedRecord } from '#/wire/wireService';
 import {
   IAgentSpineService,
-  IAgentWireRecordService,
   IAgentWireService,
   SPINE_VOID_OPENED_AT,
   SpineModel,
@@ -40,14 +31,11 @@ import {
 import type { Message } from '#/app/llmProtocol/message';
 
 import {
-  agentService,
   createCommandRunner,
   execEnvServices,
-  InMemoryWireRecordPersistence,
   testAgent,
   type TestAgentContext,
   type TestAgentOptions,
-  type TestAgentServiceOverride,
 } from '../harness';
 
 const SPINE_ENV = 'KIMI_CODE_SPINE';
@@ -103,7 +91,7 @@ describe('Spine reducers (via wire)', () => {
 
   it('starts with an open root epoch and startup node', () => {
     const ctx = testAgent();
-    const state = readSpine(ctx);
+    const state = readOps(ctx);
     expect(state.rootEpoch).toBe(1);
     expect(state.openStack).toEqual(['1', '1.1']);
     expect(state.nodes['1']?.children).toEqual(['1.1']);
@@ -116,7 +104,7 @@ describe('Spine reducers (via wire)', () => {
 
     wire.dispatch(spineOpen({ id: '1.1.1', summary: 'task A', parentId: '1.1', openedAt: 0 }));
 
-    const state = readSpine(ctx);
+    const state = readOps(ctx);
     expect(state.openStack).toEqual(['1', '1.1', '1.1.1']);
     expect(state.nodes['1.1']?.children).toEqual(['1.1.1']);
     expect(state.nodes['1.1.1']?.summary).toBe('task A');
@@ -128,10 +116,10 @@ describe('Spine reducers (via wire)', () => {
     const wire = ctx.get(IAgentWireService);
     wire.dispatch(spineOpen({ id: '1.1.1', summary: 'task A', parentId: '1.1', openedAt: 0 }));
 
-    const before = readSpine(ctx);
+    const before = readOps(ctx);
     wire.dispatch(spineClose({ id: '1.1.1', closedAt: 5, memory: 'did A' }));
 
-    const state = readSpine(ctx);
+    const state = readOps(ctx);
     expect(state.openStack).toEqual(['1', '1.1']);
     expect(state.nodes['1.1.1']?.closedAt).toBe(5);
     expect(state.nodes['1.1.1']?.memory).toBe('did A');
@@ -144,7 +132,7 @@ describe('Spine reducers (via wire)', () => {
 
     wire.dispatch(spineClose({ id: '1.1', closedAt: 3, memory: 'startup done' }));
 
-    const state = readSpine(ctx);
+    const state = readOps(ctx);
     expect(state.openStack).toEqual(['1']);
     expect(state.nodes['1.1']?.closedAt).toBe(3);
     expect(state.nodes['1.1']?.memory).toBe('startup done');
@@ -162,7 +150,7 @@ describe('Spine reducers (via wire)', () => {
 
     wire.dispatch(spineTruncateRepair({ cut: 8 }));
 
-    const state = readSpine(ctx);
+    const state = readOps(ctx);
     // Straddling span [2, 9]: fold only the surviving prefix.
     expect(state.nodes['1.1.1']?.closedAt).toBe(7);
     // Span fully inside the truncated range: voided (fold-excluded).
@@ -181,11 +169,11 @@ describe('Spine reducers (via wire)', () => {
     wire.dispatch(spineOpen({ id: '1.1.1', summary: 'task A', parentId: '1.1', openedAt: 22 }));
     wire.dispatch(spineClose({ id: '1.1.1', closedAt: 30, memory: 'did A' }));
     wire.dispatch(spineRootCompact({ epoch: 2, epochStartAt: 20, epochMemoryAt: 19 }));
-    const before = readSpine(ctx);
+    const before = readOps(ctx);
 
     wire.dispatch(spineTruncateRepair({ cut: 25 }));
 
-    const state = readSpine(ctx);
+    const state = readOps(ctx);
     expect(state.epochStartAt).toBe(20);
     expect(state.epochMemoryAt).toBe(19);
     // Only the straddling span is repaired; the boundary is untouched.
@@ -197,32 +185,32 @@ describe('Spine reducers (via wire)', () => {
     const ctx = testAgent();
     const wire = ctx.get(IAgentWireService);
     wire.dispatch(spineOpen({ id: '1.1.1', summary: 'task A', parentId: '1.1', openedAt: 2 }));
-    const before = readSpine(ctx);
+    const before = readOps(ctx);
 
     wire.dispatch(spineTruncateRepair({ cut: 8 }));
 
-    expect(readSpine(ctx)).toBe(before);
+    expect(readOps(ctx)).toBe(before);
   });
 
   it('rejects closing a root epoch (no-op, same reference)', () => {
     const ctx = testAgent();
     const wire = ctx.get(IAgentWireService);
-    const before = readSpine(ctx);
+    const before = readOps(ctx);
 
     wire.dispatch(spineClose({ id: '1', closedAt: 5, memory: 'nope' }));
 
-    expect(readSpine(ctx)).toBe(before);
+    expect(readOps(ctx)).toBe(before);
   });
 
   it('rejects closing a node that is not the cursor', () => {
     const ctx = testAgent();
     const wire = ctx.get(IAgentWireService);
     wire.dispatch(spineOpen({ id: '1.1.1', summary: 'task A', parentId: '1.1', openedAt: 0 }));
-    const before = readSpine(ctx);
+    const before = readOps(ctx);
 
     wire.dispatch(spineClose({ id: '1.1', closedAt: 5, memory: 'nope' }));
 
-    expect(readSpine(ctx)).toBe(before);
+    expect(readOps(ctx)).toBe(before);
   });
 
   it('commits next atomically (close cursor, open sibling under the same parent)', () => {
@@ -240,7 +228,7 @@ describe('Spine reducers (via wire)', () => {
       }),
     );
 
-    const state = readSpine(ctx);
+    const state = readOps(ctx);
     expect(state.openStack).toEqual(['1', '1.1', '1.1.2']);
     expect(state.nodes['1.1.1']?.closedAt).toBe(5);
     expect(state.nodes['1.1.1']?.memory).toBe('did A');
@@ -254,11 +242,11 @@ describe('Spine reducers (via wire)', () => {
   it('rejects opening under a parent that is not the cursor', () => {
     const ctx = testAgent();
     const wire = ctx.get(IAgentWireService);
-    const before = readSpine(ctx);
+    const before = readOps(ctx);
 
     wire.dispatch(spineOpen({ id: '1.2', summary: 'task X', parentId: '1', openedAt: 0 }));
 
-    expect(readSpine(ctx)).toBe(before);
+    expect(readOps(ctx)).toBe(before);
   });
 });
 
@@ -336,10 +324,10 @@ describe('Spine control tools', () => {
   });
 
   it('commits a spine transition after an undo shrank the history', async () => {
-    // Reproduces the pre-fix defect: undo truncated the context below
-    // `lastObservedIndex`, so the next transition's evidence search started
-    // past the end of the history, found nothing, and dropped the transition
-    // even though the accepted receipt landed in the transcript.
+    // The pre-fix defect dropped the post-undo transition because the evidence
+    // search started past the shrunk history. Derivation has no such cursor:
+    // the tree rebuilds from the surviving stream and the next transition
+    // nests under the surviving node.
     const ctx = loopContext();
     await configureLoop(ctx);
     for (let i = 0; i < 3; i++) ctx.appendExchange(i + 1, `seed u${i}`, `seed a${i}`, 100);
@@ -349,6 +337,10 @@ describe('Spine control tools', () => {
     await ctx.untilTurnEnd();
     expect(readSpine(ctx).nodes['1.1.1']?.summary).toBe('task A');
 
+    // A work turn inside the node, then undo it — the node itself survives.
+    ctx.mockNextResponse({ type: 'text', text: 'work' });
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'work a bit' }] });
+    await ctx.untilTurnEnd();
     await ctx.rpc.undoHistory({ count: 1 });
 
     ctx.mockNextResponse(toolCallPart('call_open_2', 'spine_open', { summary: 'task B' }));
@@ -361,11 +353,12 @@ describe('Spine control tools', () => {
     expect(state.openStack).toEqual(['1', '1.1', '1.1.1', '1.1.1.1']);
   });
 
-  it('keeps post-undo messages out of a truncated closed span', async () => {
-    // Reproduces the pre-fix defect: undo cutting into a closed span left its
-    // indices dangling; the fold emitted the stale memory at `openedAt` and
-    // jumped past the end of the truncated history, swallowing every message
-    // appended after the undo — the model never saw the fresh prompt.
+  it('reopens a closed span when an undo truncates its close evidence', async () => {
+    // Derivation semantics: the tree is rebuilt from the surviving message
+    // stream, so an undo that cuts into a closed span removes the close
+    // transition with its carrier — the node reopens and its memory is gone.
+    // The fold must still show every surviving and post-undo message (the
+    // original defect swallowed everything appended after the undo).
     let lastRequestText = '';
     const generate: GenerateFn = async (_provider, _system, _tools, history) => {
       lastRequestText = historyText(history);
@@ -373,26 +366,31 @@ describe('Spine control tools', () => {
     };
     const ctx = testAgent(execEnvServices({ hostFs: recordingHostFs().fs }), { generate });
     await configureLoop(ctx);
-    for (let i = 0; i < 10; i++) ctx.appendExchange(i + 1, `u${String(i)}`, `a${String(i)}`, 100);
-    const wire = ctx.get(IAgentWireService);
-    wire.dispatch(spineOpen({ id: '1.1.1', parentId: '1.1', summary: 'old work', openedAt: 2 }));
-    wire.dispatch(spineClose({ id: '1.1.1', closedAt: 9, memory: 'old memory' }));
+    ctx.appendExchange(1, 'u0', 'a0', 100);
+    ctx.context.append(assistantSpineCall('call_open', 'spine_open', { summary: 'old work' }));
+    ctx.context.append(spineReceipt('call_open'));
+    for (let i = 1; i < 4; i++) ctx.appendExchange(i + 1, `u${String(i)}`, `a${String(i)}`, 100);
+    ctx.context.append(assistantSpineCall('call_close', 'spine_close', { memory: 'old memory' }));
+    ctx.context.append(spineReceipt('call_close'));
+    for (let i = 4; i < 10; i++) ctx.appendExchange(i + 1, `u${String(i)}`, `a${String(i)}`, 100);
 
-    // Cut lands at index 8 — inside the closed span [2, 9].
-    await ctx.rpc.undoHistory({ count: 6 });
-    expect(readSpine(ctx).nodes['1.1.1']?.closedAt).toBe(7);
+    // Cut lands at index 8 — inside the (formerly) closed span [2, 9].
+    await ctx.rpc.undoHistory({ count: 7 });
+    expect(readSpine(ctx).nodes['1.1.1']?.closedAt).toBeUndefined();
 
     await ctx.rpc.prompt({ input: [{ type: 'text', text: 'FRESH-PROMPT-MARKER' }] });
     await ctx.untilTurnEnd();
 
     expect(lastRequestText).toContain('FRESH-PROMPT-MARKER');
-    expect(lastRequestText).toContain('old memory');
+    expect(lastRequestText).toContain('u1');
+    expect(lastRequestText).not.toContain('old memory');
   });
 
-  it('keeps the rebuilt history visible after /clear with a dangling epoch boundary', async () => {
-    // Reproduces the pre-fix defect: /clear emptied the context while the tree
-    // kept its epoch boundary, so the fold dropped every rebuilt message
-    // (`i < epochStartAt`) and the model saw nothing but the status line.
+  it('keeps the rebuilt history visible after /clear', async () => {
+    // Derivation semantics: /clear empties the stored history, so the derived
+    // tree resets with it — no dangling epoch boundary, no stale nodes — and
+    // the fold shows everything rebuilt from then on. (The original defect:
+    // a boundary that outlived the history dropped every rebuilt message.)
     let lastRequestText = '';
     const generate: GenerateFn = async (_provider, _system, _tools, history) => {
       lastRequestText = historyText(history);
@@ -401,16 +399,16 @@ describe('Spine control tools', () => {
     const ctx = testAgent(execEnvServices({ hostFs: recordingHostFs().fs }), { generate });
     await configureLoop(ctx);
     for (let i = 0; i < 11; i++) ctx.appendExchange(i + 1, `u${String(i)}`, `a${String(i)}`, 100);
-    const wire = ctx.get(IAgentWireService);
-    wire.dispatch(spineRootCompact({ epoch: 2, epochStartAt: 22, epochMemoryAt: 21 }));
 
     await ctx.rpc.clearContext({});
 
     const state = readSpine(ctx);
+    expect(state.rootEpoch).toBe(1);
     expect(state.epochStartAt).toBe(0);
     expect(state.epochMemoryAt).toBeUndefined();
-    // The old epochs stay in the tree for their archives.
-    expect(state.nodes['2']).toBeDefined();
+    // The cleared history carries no epoch evidence, so the old epoch nodes
+    // are gone from the tree (their archives remain on disk).
+    expect(state.nodes['2']).toBeUndefined();
 
     await ctx.rpc.prompt({ input: [{ type: 'text', text: 'AFTER-CLEAR-MARKER' }] });
     await ctx.untilTurnEnd();
@@ -419,33 +417,26 @@ describe('Spine control tools', () => {
   });
 
   it('folds a closed startup node memory into the next projection', async () => {
-    let lastRequestText = '';
-    const generate: GenerateFn = async (_provider, _system, _tools, history) => {
-      lastRequestText = historyText(history);
-      return textResult('answer');
-    };
-    const ctx = testAgent(execEnvServices({ hostFs: recordingHostFs().fs }), { generate });
+    const ctx = loopContext();
     await configureLoop(ctx);
-
+    ctx.mockNextResponse(
+      toolCallPart('call_close', 'spine_close', { memory: 'STARTUP-MEMORY-MARKER' }),
+    );
+    ctx.mockNextResponse({ type: 'text', text: 'done' });
     await ctx.rpc.prompt({ input: [{ type: 'text', text: 'STARTUP-PHASE-PROMPT' }] });
     await ctx.untilTurnEnd();
-    ctx
-      .get(IAgentWireService)
-      .dispatch(
-        spineClose({
-          id: '1.1',
-          closedAt: ctx.context.get().length - 1,
-          memory: 'STARTUP-MEMORY-MARKER',
-        }),
-      );
 
+    ctx.mockNextResponse({ type: 'text', text: 'answer' });
     await ctx.rpc.prompt({ input: [{ type: 'text', text: 'AFTER-STARTUP-CLOSE' }] });
     await ctx.untilTurnEnd();
 
-    expect(lastRequestText).toContain('<spine_memory>');
-    expect(lastRequestText).toContain('STARTUP-MEMORY-MARKER');
-    expect(lastRequestText).toContain('AFTER-STARTUP-CLOSE');
-    expect(lastRequestText).not.toContain('STARTUP-PHASE-PROMPT');
+    const projected = historyText(ctx.project());
+    expect(projected).toContain('<spine_memory>');
+    expect(projected).toContain('STARTUP-MEMORY-MARKER');
+    // The closing span's user request is compiled into the memory body.
+    expect(projected).toContain('## User Message [U1]');
+    expect(projected).toContain('STARTUP-PHASE-PROMPT');
+    expect(projected).toContain('AFTER-STARTUP-CLOSE');
   });
 
   it('compiles the closing span user requests into the memory body', async () => {
@@ -479,12 +470,15 @@ describe('Spine control tools', () => {
     };
     const ctx = testAgent(execEnvServices({ hostFs: recordingHostFs().fs }), { generate });
     await configureLoop(ctx);
-    for (let i = 0; i < 5; i++) {
-      ctx.appendExchange(i + 1, `seed-u${String(i)}`, `seed-a${String(i)}`, 100);
-    }
-    const wire = ctx.get(IAgentWireService);
-    wire.dispatch(spineOpen({ id: '1.1.1', parentId: '1.1', summary: 'old work', openedAt: 2 }));
-    wire.dispatch(spineClose({ id: '1.1.1', closedAt: 5, memory: 'old memory' }));
+    ctx.appendExchange(1, 'seed-u0', 'seed-a0', 100);
+    ctx.context.append(assistantSpineCall('call_open', 'spine_open', { summary: 'old work' }));
+    ctx.context.append(spineReceipt('call_open'));
+    ctx.appendExchange(2, 'seed-u1', 'seed-a1', 100);
+    ctx.context.append(assistantSpineCall('call_close', 'spine_close', { memory: 'old memory' }));
+    ctx.context.append(spineReceipt('call_close'));
+    ctx.appendExchange(3, 'seed-u2', 'seed-a2', 100);
+    ctx.appendExchange(4, 'seed-u3', 'seed-a3', 100);
+    ctx.appendExchange(5, 'seed-u4', 'seed-a4', 100);
 
     await ctx.rpc.prompt({ input: [{ type: 'text', text: 'NUMBER-CHECK-PROMPT' }] });
     await ctx.untilTurnEnd();
@@ -493,7 +487,8 @@ describe('Spine control tools', () => {
     expect(lastRequestText).toContain('[U4] seed-u3');
     expect(lastRequestText).toContain('[U6] NUMBER-CHECK-PROMPT');
     expect(lastRequestText).toContain('old memory');
-    expect(lastRequestText).not.toContain('seed-u1');
+    // The folded span's request survives as a citation inside the memory body.
+    expect(lastRequestText).toContain('## User Message [U2]');
   });
 
   it('commits next atomically across a single step', async () => {
@@ -763,165 +758,6 @@ describe('Spine durability', () => {
     expect(reported.some((err) => String(err).includes('disk full'))).toBe(true);
   });
 
-  it('reports an accepted receipt that lost its committed op on restore', async () => {
-    const records = await recordSpineTurn();
-    const stripped = records.filter((record) => record.type !== 'spine.close');
-
-    const reported = await restoreAndCaptureReports(stripped);
-
-    const spineReports = reported.filter((err) => String(err).includes('Spine:'));
-    expect(spineReports).toHaveLength(1);
-    expect(String(spineReports[0])).toContain('spine_close');
-  });
-
-  it('stays quiet on restore when every receipt has its op', async () => {
-    const reported = await restoreAndCaptureReports(await recordSpineTurn());
-
-    expect(reported.filter((err) => String(err).includes('Spine:'))).toHaveLength(0);
-  });
-
-  it('stays quiet when ops outnumber receipts (a compaction can fold receipts away)', async () => {
-    const records = await recordSpineTurn();
-    const stripped = records.filter((record) => !isToolResultRecord(record, 'call_close'));
-
-    const reported = await restoreAndCaptureReports(stripped);
-
-    expect(reported.filter((err) => String(err).includes('Spine:'))).toHaveLength(0);
-  });
-
-  it('stays quiet on restore for legacy bare-accepted receipts', async () => {
-    const records = await recordSpineTurn();
-    const legacy = records.map((record) =>
-      isToolResultRecord(record, 'call_close') ? withToolResultText(record, 'accepted') : record,
-    );
-
-    const reported = await restoreAndCaptureReports(legacy);
-
-    expect(reported.filter((err) => String(err).includes('Spine:'))).toHaveLength(0);
-  });
-
-  it('reports a pending transition dropped when its step ends without evidence', async () => {
-    const { beforeStep, afterStep, reported, spine } = spineWithCapturedStepHooks();
-    await hookOf(beforeStep, 'spine')(beforeCtx(new AbortController().signal), noopNext);
-    expect(spine.acceptOpen('task A', 'call_open').accepted).toBe(true);
-
-    await hookOf(afterStep, 'spine')(afterCtx(new AbortController().signal), noopNext);
-
-    expect(reported).toHaveLength(1);
-    expect(String(reported[0])).toContain('call_open');
-
-    // The drop cleared the pending transition: the next step stays quiet.
-    await hookOf(beforeStep, 'spine')(beforeCtx(new AbortController().signal), noopNext);
-    expect(reported).toHaveLength(1);
-  });
-
-  it('stays quiet when the dropped transition belonged to an aborted step', async () => {
-    const { beforeStep, afterStep, reported, spine } = spineWithCapturedStepHooks();
-    const controller = new AbortController();
-    await hookOf(beforeStep, 'spine')(beforeCtx(controller.signal), noopNext);
-    spine.acceptOpen('task A', 'call_open');
-    controller.abort();
-
-    await hookOf(afterStep, 'spine')(afterCtx(controller.signal), noopNext);
-
-    expect(reported).toHaveLength(0);
-  });
-
-  it('attributes a leftover pending transition to its owning step across turns', async () => {
-    const { beforeStep, reported, spine } = spineWithCapturedStepHooks();
-    // Turn 1: the step owning the pending transition aborts before afterStep
-    // ever runs (turn-level cancel), leaving the pending behind.
-    const controller = new AbortController();
-    await hookOf(beforeStep, 'spine')(beforeCtx(controller.signal), noopNext);
-    spine.acceptOpen('task A', 'call_open');
-    controller.abort();
-
-    // Turn 2: dropping the leftover is routine — quiet.
-    await hookOf(beforeStep, 'spine')(beforeCtx(new AbortController().signal), noopNext);
-    expect(reported).toHaveLength(0);
-
-    // A leftover from a step that did NOT abort is anomalous — reported.
-    spine.acceptOpen('task B', 'call_open_2');
-    await hookOf(beforeStep, 'spine')(beforeCtx(new AbortController().signal), noopNext);
-    expect(reported).toHaveLength(1);
-    expect(String(reported[0])).toContain('call_open_2');
-  });
-
-  it('clamps the closing boundary at the span start', async () => {
-    // A truncation repair can restart an open span at the cut — past the end
-    // of the surviving history — so `assistantIndex - 1` would invert the
-    // span without the clamp.
-    const { beforeStep, afterStep, spine, ctx } = spineWithCapturedStepHooks(
-      execEnvServices({ hostFs: recordingHostFs().fs }),
-    );
-    ctx
-      .get(IAgentWireService)
-      .dispatch(spineOpen({ id: '1.1.1', summary: 'task A', parentId: '1.1', openedAt: 10 }));
-    ctx.context.append({
-      role: 'assistant',
-      content: [{ type: 'text', text: 'closing' }],
-      toolCalls: [{ type: 'function', id: 'call_close', name: 'spine_close', arguments: '{}' }],
-    });
-    ctx.context.append({
-      role: 'tool',
-      content: [{ type: 'text', text: ACCEPTED_OUTPUT }],
-      toolCalls: [],
-      toolCallId: 'call_close',
-    });
-
-    await hookOf(beforeStep, 'spine')(beforeCtx(new AbortController().signal), noopNext);
-    expect(spine.acceptClose('did A', 'call_close').accepted).toBe(true);
-    await hookOf(afterStep, 'spine')(afterCtx(new AbortController().signal), noopNext);
-
-    expect(readSpine(ctx).nodes['1.1.1']?.closedAt).toBe(10);
-  });
-
-  it('commits a leftover close at the next step start when its receipt landed', async () => {
-    // The abort path: afterStep never runs, so the close stays pending past its
-    // owning step. The next step's beforeStep must commit it (the receipt is
-    // already in context) so the tree catches up before the model sees the
-    // context — rather than dropping it and forking the tree from the receipt.
-    const { beforeStep, reported, spine, ctx } = spineWithCapturedStepHooks(
-      execEnvServices({ hostFs: recordingHostFs().fs }),
-    );
-    ctx
-      .get(IAgentWireService)
-      .dispatch(spineOpen({ id: '1.1.1', summary: 'task A', parentId: '1.1', openedAt: 0 }));
-    ctx.context.append({
-      role: 'assistant',
-      content: [{ type: 'text', text: 'work a' }],
-      toolCalls: [],
-    });
-    ctx.context.append({
-      role: 'assistant',
-      content: [{ type: 'text', text: 'work b' }],
-      toolCalls: [],
-    });
-    ctx.context.append({
-      role: 'assistant',
-      content: [{ type: 'text', text: 'closing' }],
-      toolCalls: [toolCallPart('call_close', 'spine_close', {})],
-    });
-    ctx.context.append({
-      role: 'tool',
-      content: [{ type: 'text', text: ACCEPTED_OUTPUT }],
-      toolCalls: [],
-      toolCallId: 'call_close',
-    });
-
-    // Owning step: accept the close, then abort before afterStep can commit it.
-    const controller = new AbortController();
-    await hookOf(beforeStep, 'spine')(beforeCtx(controller.signal), noopNext);
-    expect(spine.acceptClose('did A', 'call_close').accepted).toBe(true);
-    controller.abort();
-
-    // The next step begins: the leftover is committed (boundary = the carrier's
-    // predecessor), not dropped — and nothing is reported.
-    await hookOf(beforeStep, 'spine')(beforeCtx(new AbortController().signal), noopNext);
-
-    expect(readSpine(ctx).nodes['1.1.1']?.closedAt).toBe(1);
-    expect(reported).toHaveLength(0);
-  });
 });
 
 describe('spine control tool main-agent gating', () => {
@@ -961,7 +797,13 @@ describe('spine control tool main-agent gating', () => {
   });
 });
 
+// The live tree is derived from the message stream; read it through the service.
 function readSpine(ctx: TestAgentContext) {
+  return ctx.get(IAgentSpineService).currentState();
+}
+
+// The legacy op reducers are exercised directly against the wire model.
+function readOps(ctx: TestAgentContext) {
   return ctx.get(IAgentWireService).getModel(SpineModel);
 }
 
@@ -1011,110 +853,6 @@ function textOf(message: { content?: readonly { type: string; text?: string }[] 
   );
 }
 
-async function recordSpineTurn(): Promise<readonly PersistedWireRecord[]> {
-  const persistence = new InMemoryWireRecordPersistence();
-  const ctx = testAgent({ persistence }, execEnvServices({ hostFs: recordingHostFs().fs }));
-  await configureLoop(ctx);
-  ctx.mockNextResponse(toolCallPart('call_open', 'spine_open', { summary: 'task A' }));
-  ctx.mockNextResponse(toolCallPart('call_close', 'spine_close', { memory: 'did A' }));
-  ctx.mockNextResponse({ type: 'text', text: 'finished' });
-  await ctx.rpc.prompt({ input: [{ type: 'text', text: 'start' }] });
-  await ctx.untilTurnEnd();
-  return persistence.records;
-}
-
-async function restoreAndCaptureReports(
-  records: readonly PersistedWireRecord[],
-): Promise<unknown[]> {
-  const reported: unknown[] = [];
-  setUnexpectedErrorHandler((err) => {
-    reported.push(err);
-  });
-  try {
-    const ctx = testAgent();
-    // Force the Eager spine service up so its onRestored audit is registered
-    // before the replay fires the restored handlers.
-    ctx.get(IAgentSpineService);
-    const wireRecord = ctx.get(IAgentWireRecordService);
-    await wireRecord.restore(records);
-    const restored = wireRecord.getRecords() as readonly PersistedRecord[];
-    await ctx.get(IAgentWireService).replay(...restored);
-  } finally {
-    resetUnexpectedErrorHandler();
-  }
-  return reported;
-}
-
-function isToolResultRecord(record: PersistedWireRecord, toolCallId: string): boolean {
-  const r = record as {
-    readonly type?: string;
-    readonly event?: { readonly type?: string; readonly toolCallId?: string };
-  };
-  return (
-    r.type === 'context.append_loop_event' &&
-    r.event?.type === 'tool.result' &&
-    r.event?.toolCallId === toolCallId
-  );
-}
-
-function withToolResultText(record: PersistedWireRecord, text: string): PersistedWireRecord {
-  const r = record as {
-    readonly event?: { readonly result?: { readonly output?: unknown } };
-  };
-  if (r.event?.result === undefined) return record;
-  return {
-    ...record,
-    event: { ...r.event, result: { ...r.event.result, output: text } },
-  } as unknown as PersistedWireRecord;
-}
-
-type BeforeStepHook = (ctx: BeforeStepContext, next: () => Promise<void>) => Promise<void>;
-type AfterStepHook = (ctx: AfterStepContext, next: () => Promise<void>) => Promise<void>;
-
-const noopNext = async (): Promise<void> => {};
-
-/**
- * Stand up the spine service against a fake loop that captures the registered
- * step hooks, so tests can drive beforeStep / afterStep by hand instead of
- * racing a real turn.
- */
-function spineWithCapturedStepHooks(...overrides: readonly TestAgentServiceOverride[]): {
-  readonly beforeStep: Map<string, BeforeStepHook>;
-  readonly afterStep: Map<string, AfterStepHook>;
-  readonly reported: unknown[];
-  readonly spine: IAgentSpineService;
-  readonly ctx: TestAgentContext;
-} {
-  const beforeStep = new Map<string, BeforeStepHook>();
-  const afterStep = new Map<string, AfterStepHook>();
-  const fakeLoop = {
-    _serviceBrand: undefined,
-    run: async () => ({ type: 'completed' as const, steps: 0, truncated: false }),
-    hooks: {
-      onWillBeginStep: {
-        register: (name: string, fn: BeforeStepHook) => {
-          beforeStep.set(name, fn);
-          return Disposable.None;
-        },
-      },
-      onDidFinishStep: {
-        register: (name: string, fn: AfterStepHook) => {
-          afterStep.set(name, fn);
-          return Disposable.None;
-        },
-      },
-      onError: { register: () => Disposable.None },
-    },
-    registerLoopErrorHandler: () => Disposable.None,
-  } as unknown as IAgentLoopService;
-  const reported: unknown[] = [];
-  setUnexpectedErrorHandler((err) => {
-    reported.push(err);
-  });
-  const ctx = testAgent(agentService(IAgentLoopService, fakeLoop), ...overrides);
-  return { beforeStep, afterStep, reported, spine: ctx.get(IAgentSpineService), ctx };
-}
-
 /**
  * Tool-call pairing invariant over a folded history: every tool result must
  * appear after the assistant message carrying its call. Returns the ids of
@@ -1137,16 +875,23 @@ function toolPairingGaps(messages: readonly ContextMessage[]): string[] {
   return gaps;
 }
 
-function hookOf<THook>(hooks: Map<string, THook>, name: string): THook {
-  const hook = hooks.get(name);
-  if (hook === undefined) throw new Error(`hook '${name}' was not registered`);
-  return hook;
+function assistantSpineCall(
+  id: string,
+  name: string,
+  args: Record<string, unknown>,
+): ContextMessage {
+  return {
+    role: 'assistant',
+    content: [{ type: 'text', text: `calling ${name}` }],
+    toolCalls: [{ type: 'function', id, name, arguments: JSON.stringify(args) }],
+  };
 }
 
-function beforeCtx(signal: AbortSignal): BeforeStepContext {
-  return { turnId: 1, step: 1, signal };
-}
-
-function afterCtx(signal: AbortSignal): AfterStepContext {
-  return { turnId: 1, step: 1, signal } as unknown as AfterStepContext;
+function spineReceipt(toolCallId: string): ContextMessage {
+  return {
+    role: 'tool',
+    content: [{ type: 'text', text: ACCEPTED_OUTPUT }],
+    toolCalls: [],
+    toolCallId,
+  };
 }

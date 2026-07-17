@@ -88,14 +88,19 @@ Conventions:
   memory in a fresh sibling.
 * \`spine_tree\` is read-only; actual transitions happen only through \`spine_open\`,
   \`spine_close\`, and \`spine_next\`.
+* Spine transitions change task scope, not communication state. A final response,
+  status update, or user-facing report does not by itself require a \`spine_open\`,
+  \`spine_next\`, or \`spine_close\` call; never create a reporting node or perform
+  a transition solely for delivery.
 * Root-epoch ids such as \`1\` or \`2\` cannot be closed. The initial \`1.1\` is a
   startup work node, not a concrete task node; use \`spine_open\` before doing task work.
 * \`<spine_status>\` gives current node orientation; \`<spine_memory>\` gives
   continuation memory from closed work.
 * \`[U#]\` anchors refer to numbered user requests. When writing memory, preserve
-  \`[U#]\` anchors and record each request's status. After \`<spine_memory>\`
-  continuity or a node transition, use that record to report only new results,
-  blockers, or requested details.
+  \`[U#]\` anchors for user requests that still matter. Do not maintain a separate
+  request-status ledger when the relevant intent is already captured in ordinary
+  continuation state. After \`<spine_memory>\` continuity or a node transition,
+  report only new results, blockers, or requested details.
 * Place user-facing replies where they are most useful: local intermediate
   results may wait for later merge, while complete conclusions, blocking status,
   or decisions needing user input should be surfaced promptly.

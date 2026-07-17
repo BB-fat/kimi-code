@@ -3,6 +3,7 @@ export default {
   connectionConnecting: '连接中…',
   connectionDisconnected: '未连接',
   ctxTooltip: '使用 {used} / {max} tokens ({pct}%)',
+  ctxTooltipRaw: '投影 {used} · 原始 {raw} / {max} tokens ({pct}%)',
   modelLabel: '模型',
   permissionManual: '逐条确认',
   permissionAuto: '完全自主',

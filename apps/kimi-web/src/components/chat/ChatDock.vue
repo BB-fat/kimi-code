@@ -3,9 +3,9 @@
 <!-- pending question/approval cards, and the composer. Only rendered inside a -->
 <!-- chat-pane group so it never leaks into files/tasks/preview/btw panes. -->
 <script setup lang="ts">
-import { onUnmounted, ref, watch } from 'vue';
+import { computed, onUnmounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
-import type { ActivationBadges, ApprovalBlock, ConversationStatus, PermissionMode, QueuedPromptView, TaskItem, TodoView, UIQuestion } from '../../types';
+import type { ActivationBadges, ApprovalBlock, ConversationStatus, PermissionMode, QueuedPromptView, TaskItem, TodoTreeNode, TodoView, UIQuestion } from '../../types';
 import type { AppGoal, AppModel, AppSkill, QuestionResponse, ThinkingLevel } from '../../api/types';
 import type { FileItem } from './MentionMenu.vue';
 import Composer from './Composer.vue';
@@ -46,6 +46,9 @@ const props = defineProps<{
   todoDoneCount: number;
   hasDockWork: boolean;
   todos?: TodoView[];
+  /** Spine task tree mirrored from the transcript — when non-empty it
+      replaces the flat todo list in the 'todos' dock panel. */
+  todoTree?: TodoTreeNode[];
   pendingQuestion?: UIQuestion;
   /** Action kind in flight for the visible question (drives loading state). */
   questionBusyKind?: 'answer' | 'dismiss';
@@ -84,6 +87,24 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+
+/** True when the session drives its task list via spine — the tree then
+    replaces the flat todo list in the dock. */
+const spineActive = computed(() => (props.todoTree?.length ?? 0) > 0);
+const treeStats = computed(() => {
+  let done = 0;
+  let total = 0;
+  const visit = (nodes: TodoTreeNode[]): void => {
+    for (const node of nodes) {
+      total += 1;
+      if (node.status === 'done') done += 1;
+      visit(node.children);
+    }
+  };
+  visit(props.todoTree ?? []);
+  return { done, total };
+});
+
 const composerRef = ref<{
   loadForEdit: (value: string) => boolean;
   loadAttachmentsForEdit: (atts: { fileId?: string; kind: 'image' | 'video'; url: string; name?: string }[]) => void;
@@ -163,7 +184,8 @@ defineExpose({ loadForEdit, loadAttachmentsForEdit, focus });
             v-else-if="dockPanel === 'todos'"
             class="dock-work-tab static"
           >
-            {{ t('tasks.dockTodos') }} · {{ todoDoneCount }}/{{ todos?.length ?? 0 }}
+            <template v-if="spineActive">{{ t('tasks.dockSpine') }} · {{ treeStats.done }}/{{ treeStats.total }}</template>
+            <template v-else>{{ t('tasks.dockTodos') }} · {{ todoDoneCount }}/{{ todos?.length ?? 0 }}</template>
           </span>
         </div>
         <div class="dock-work-body">
@@ -181,6 +203,7 @@ defineExpose({ loadForEdit, loadAttachmentsForEdit, focus });
           <TodoCard
             v-else-if="dockPanel === 'todos'"
             :todos="todos ?? []"
+            :tree="todoTree"
           />
         </div>
       </div>
@@ -214,14 +237,14 @@ defineExpose({ loadForEdit, loadAttachmentsForEdit, focus });
         <span class="dw-count">(<b>{{ subagentTasks.length }}</b>)</span>
       </Pill>
       <Pill
-        v-if="(todos?.length ?? 0) > 0"
+        v-if="(todos?.length ?? 0) > 0 || spineActive"
         :active="dockPanel === 'todos'"
         :aria-pressed="dockPanel === 'todos'"
         @click="emit('toggle-dock-panel', 'todos')"
       >
         <Icon name="check-list" size="md" />
-        <span>{{ t('tasks.dockTodos') }}</span>
-        <span class="dw-count">(<b>{{ todoDoneCount }}/{{ todos?.length ?? 0 }}</b>)</span>
+        <span>{{ spineActive ? t('tasks.dockSpine') : t('tasks.dockTodos') }}</span>
+        <span class="dw-count">(<b>{{ spineActive ? `${treeStats.done}/${treeStats.total}` : `${todoDoneCount}/${todos?.length ?? 0}` }}</b>)</span>
       </Pill>
     </div>
 

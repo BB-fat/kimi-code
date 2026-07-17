@@ -116,6 +116,7 @@ interface SessionState {
   totalCacheRead: number;
   totalCacheCreate: number;
   contextTokens: number;
+  rawContextTokens: number;
   contextLimit: number;
   turnCount: number;
   model: string;
@@ -141,6 +142,7 @@ function createSessionState(): SessionState {
     totalCacheRead: 0,
     totalCacheCreate: 0,
     contextTokens: 0,
+    rawContextTokens: 0,
     contextLimit: 0,
     turnCount: 0,
     model: '',
@@ -471,6 +473,7 @@ function buildUsageSnapshot(state: SessionState): AppSessionUsage {
     cacheCreationTokens: state.totalCacheCreate,
     totalCostUsd: 0,
     contextTokens: state.contextTokens,
+    rawContextTokens: state.rawContextTokens,
     contextLimit: state.contextLimit,
     turnCount: state.turnCount,
   };
@@ -929,6 +932,7 @@ export function createAgentProjector(): AgentProjector {
       case 'agent.status.updated': {
         if (p?.model) s.model = p.model;
         if (p?.contextTokens !== undefined) s.contextTokens = p.contextTokens;
+        if (p?.rawContextTokens !== undefined) s.rawContextTokens = p.rawContextTokens;
         if (p?.maxContextTokens !== undefined) s.contextLimit = p.maxContextTokens;
 
         out.push({

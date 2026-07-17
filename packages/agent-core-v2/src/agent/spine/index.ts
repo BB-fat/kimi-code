@@ -9,6 +9,7 @@
 export * from './flag';
 export * from './instructions';
 export * from './spine';
+export * from './spineDerive';
 export * from './spineOps';
 export * from './spineService';
 export * from './spineTree';

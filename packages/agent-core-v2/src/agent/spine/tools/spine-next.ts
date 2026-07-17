@@ -49,8 +49,8 @@ export class SpineNextTool implements BuiltinTool<SpineNextInput> {
     return {
       approvalRule: this.name,
       description: 'Finish this node and open the next sibling',
-      execute: async (ctx) =>
-        toControlResult(this.spine.acceptNext(input.summary, input.memory, ctx.toolCallId)),
+      execute: async (_ctx) =>
+        toControlResult(this.spine.acceptNext(input.summary, input.memory)),
     };
   }
 }

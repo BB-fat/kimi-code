@@ -23,7 +23,6 @@ import { IAgentContextSizeService } from '#/agent/contextSize/contextSize';
 import { contextSizeMeasured } from '#/agent/contextSize/contextSizeOps';
 import { SPINE_FLAG_ID } from '#/agent/spine/flag';
 import { IAgentSpineService } from '#/agent/spine/spine';
-import { SpineModel, spineRootCompact } from '#/agent/spine/spineOps';
 import { IAgentLLMRequesterService, type LLMRequestFinish } from '#/agent/llmRequester/llmRequester';
 import { retryBackoffDelays, sleepForRetry } from '#/_base/utils/retry';
 import { IAgentLoopService, type AfterStepContext, type LoopErrorContext } from '#/agent/loop/loop';
@@ -794,11 +793,17 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
     // appending so the epoch archive records exactly what the model stops
     // seeing.
     const foldedMessages = this.context.get().slice(0, summaryAt);
+    // Compute the epoch from the PRE-append derived state and epochStartAt
+    // arithmetically. Reading either off the post-append stream would make them
+    // depend on the append landing synchronously — when a tool exchange defers
+    // it, a stale read would report the CURRENT epoch and archive the new
+    // epoch's folded history under its path, overwriting it.
+    const epoch = this.spine.currentState().rootEpoch + 1;
+    const epochStartAt = summaryAt + 1;
     this.context.append(summaryMessage);
-    const epochStartAt = this.context.get().length;
     const tokensAfter = estimateTokensForMessages([summaryMessage]);
-    const spineState = this.wire.getModel(SpineModel);
-    const epoch = spineState.rootEpoch + 1;
+    // The appended summary message IS the epoch boundary: the spine derivation
+    // reports the new epoch once it lands — no tree op to dispatch.
     const archivePath = await this.spine.archiveEpochRoot({
       epoch,
       epochStartAt,
@@ -816,12 +821,6 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
       );
     }
     this.wire.dispatch(
-      spineRootCompact({
-        epoch,
-        epochStartAt,
-        epochMemoryAt: summaryAt,
-        archivePath,
-      }),
       contextSizeMeasured({ length: epochStartAt, tokens: tokensAfter, kind: 'estimate' }),
     );
     return {
@@ -863,7 +862,7 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
   private epochScopedHistory(
     history: readonly ContextMessage[],
   ): readonly ContextMessage[] {
-    const spineState = this.wire.getModel(SpineModel);
+    const spineState = this.spine.currentState();
     const start = Math.min(spineState.epochStartAt, history.length);
     const scoped = history.slice(start);
     const summaryAt = spineState.epochMemoryAt;

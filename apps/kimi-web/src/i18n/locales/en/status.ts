@@ -3,6 +3,7 @@ export default {
   connectionConnecting: 'Connecting…',
   connectionDisconnected: 'Disconnected',
   ctxTooltip: 'Used {used} / {max} tokens ({pct}%)',
+  ctxTooltipRaw: 'Projected {used} · raw {raw} / {max} tokens ({pct}%)',
   modelLabel: 'Model',
   permissionManual: 'Manual',
   permissionAuto: 'Auto',

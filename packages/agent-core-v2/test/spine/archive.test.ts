@@ -5,9 +5,6 @@ import {
   AGENT_WIRE_PROTOCOL_VERSION,
   IAgentSpineService,
   IAgentWireService,
-  SpineModel,
-  spineClose,
-  spineOpen,
   type PersistedWireRecord,
 } from '#/index';
 
@@ -56,19 +53,21 @@ describe('Spine archive + resume', () => {
     await ctx.rpc.prompt({ input: [{ type: 'text', text: 'start' }] });
     await ctx.untilTurnEnd();
 
-    const node = readSpine(ctx).nodes['1.1.1'];
-    expect(node?.archivePath).toBeDefined();
-    const archivePath = node?.archivePath as string;
+    expect(readSpine(ctx).nodes['1.1.1']?.closedAt).toBeDefined();
     // Archives live under the per-agent session homedir, not the project
-    // workDir: `<sessionDir>/agents/<id>/spine/<node-id>.md`.
-    expect(archivePath.endsWith('/agents/main/spine/1-1-1.md')).toBe(true);
-    expect(writes.has(archivePath)).toBe(true);
-    const content = writes.get(archivePath) ?? '';
+    // workDir: `<sessionDir>/agents/<id>/spine/<node-id>.md`. The path is
+    // deterministic and published on the tree view; the node itself carries
+    // no persisted path any more.
+    const archivePath = [...writes.keys()].find((path) =>
+      path.endsWith('/agents/main/spine/1-1-1.md'),
+    );
+    expect(archivePath).toBeDefined();
+    const content = writes.get(archivePath!) ?? '';
     expect(content).toContain('did A');
     expect(content).toContain('task A');
     expect(content).toContain('## Trajectory');
 
-    expect(ctx.get(IAgentSpineService).renderTree()).toContain(archivePath);
+    expect(ctx.get(IAgentSpineService).renderTree()).toContain(archivePath!);
   });
 
   it('replays the tree (with memory and archive path) from persisted wire records', async () => {
@@ -77,17 +76,13 @@ describe('Spine archive + resume', () => {
       execEnvServices({ hostFs: recordingHostFs(new Map()) }),
       wireRecordPersistenceServices(persistence),
     );
+    await configureLoop(ctx);
+    ctx.mockNextResponse(toolCallPart('c_open', 'spine_open', { summary: 'task A' }));
+    ctx.mockNextResponse(toolCallPart('c_close', 'spine_close', { memory: 'did A' }));
+    ctx.mockNextResponse({ type: 'text', text: 'done' });
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'start' }] });
+    await ctx.untilTurnEnd();
 
-    const wire = ctx.get(IAgentWireService);
-    wire.dispatch(spineOpen({ id: '1.1.1', summary: 'task A', parentId: '1.1', openedAt: 0 }));
-    wire.dispatch(
-      spineClose({
-        id: '1.1.1',
-        closedAt: 5,
-        memory: 'did A',
-        archivePath: '/ws/spine/main/1-1-1.md',
-      }),
-    );
     // Upstream's wire persists through an async persistQueue (blob dehydrate
     // hop runs even without blobs) that only drains on the wire service's own
     // flush; the wireRecord service flush no longer covers it, so cloning the
@@ -107,12 +102,11 @@ describe('Spine archive + resume', () => {
     const after = readSpine(resumed);
     expect(after.openStack).toEqual(before.openStack);
     expect(after.rootEpoch).toBe(before.rootEpoch);
-    expect(after.nodes['1.1.1']).toMatchObject({
-      summary: 'task A',
-      memory: 'did A',
-      closedAt: 5,
-      archivePath: '/ws/spine/main/1-1-1.md',
-    });
+    expect(after.nodes['1.1.1']?.summary).toBe('task A');
+    expect(after.nodes['1.1.1']?.closedAt).toBe(before.nodes['1.1.1']?.closedAt);
+    expect(after.nodes['1.1.1']?.memory).toContain('did A');
+    // The archive path is recomputed deterministically on the tree view.
+    expect(resumed.get(IAgentSpineService).renderTree()).toContain('1-1-1.md');
   });
 });
 
@@ -122,7 +116,7 @@ async function configureLoop(ctx: TestAgentContext): Promise<void> {
 }
 
 function readSpine(ctx: TestAgentContext) {
-  return ctx.get(IAgentWireService).getModel(SpineModel);
+  return ctx.get(IAgentSpineService).currentState();
 }
 
 function recordingHostFs(writes: Map<string, string>) {

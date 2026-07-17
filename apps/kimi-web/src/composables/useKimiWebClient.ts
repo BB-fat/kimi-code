@@ -71,6 +71,7 @@ import { isPlaceholderSessionUsage, toAppEvent } from '../api/daemon/mappers';
 
 import { messagesToTurns } from './messagesToTurns';
 import { latestTodos } from './latestTodos';
+import { spineTreeFromMessages } from './spineTree';
 import { buildSwarmGroups, countSwarmMembers, swarmMembersByToolCall } from './swarmGroups';
 import type { SwarmGroup, SwarmMember } from './swarmGroups';
 import type {
@@ -87,6 +88,7 @@ import type {
   Session,
   TaskItem,
   TaskState,
+  TodoTreeNode,
   TodoView,
   UIQuestion,
   Workspace,
@@ -652,6 +654,7 @@ async function refreshSessionStatus(sessionId: string): Promise<void> {
     usage: {
       ...s.usage,
       contextTokens: st.contextTokens,
+      rawContextTokens: st.rawContextTokens,
       contextLimit: st.maxContextTokens,
     },
   }));
@@ -1911,6 +1914,16 @@ const todos = computed<TodoView[]>(() => {
   return latestTodos(rawState.messagesBySession[sid] ?? []);
 });
 
+/** Spine task tree of the active session, mirrored from the transcript's
+    spine control tools. Persists as all-done history after the last close;
+    empty only when the session never used spine — the dock then falls back
+    to the flat todo list. */
+const todoTree = computed<TodoTreeNode[]>(() => {
+  const sid = rawState.activeSessionId;
+  if (!sid) return [];
+  return spineTreeFromMessages(rawState.messagesBySession[sid] ?? []);
+});
+
 /** Live compaction state of the active session (present only while running). */
 const compaction = computed<CompactionStatus | null>(() => {
   const sid = rawState.activeSessionId;
@@ -2129,6 +2142,7 @@ const status = computed<ConversationStatus>(() => {
     // Raw id for exact comparison in pickers (display name diverges from id).
     modelId: matched?.id ?? rawModel,
     ctxUsed: activeSession?.usage.contextTokens ?? 0,
+    ctxRaw: activeSession?.usage.rawContextTokens ?? 0,
     ctxMax: activeSession?.usage.contextLimit ?? 0,
     permission: rawState.permission,
     branch,
@@ -2632,6 +2646,7 @@ export function useKimiWebClient() {
      *  sources a subagent's streaming `outputLines` from here. */
     activeAppTasks,
     todos,
+    todoTree,
     goal,
     swarms,
     swarmMembersByToolCallId,

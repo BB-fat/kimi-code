@@ -5,15 +5,38 @@
      Rows share StatusGlyph with the background bash/subagent task list so the
      two stay visually identical. -->
 <script setup lang="ts">
+import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
-import type { TodoView } from '../../types';
+import type { TodoTreeNode, TodoView } from '../../types';
 import StatusGlyph, { type StatusGlyphStatus } from './StatusGlyph.vue';
 
 const props = defineProps<{
   todos: TodoView[];
+  /** Spine task tree mirrored from the transcript — when non-empty it
+      replaces the flat todo list (spine sessions never emit TodoList). */
+  tree?: TodoTreeNode[];
 }>();
 
 const { t } = useI18n();
+
+interface TreeRow {
+  node: TodoTreeNode;
+  depth: number;
+}
+
+/** Depth-first flattening of the spine tree: every node renders (done
+    subtrees included) — the dock panel scrolls, so no folding like the TUI. */
+const treeRows = computed<TreeRow[]>(() => {
+  const rows: TreeRow[] = [];
+  const visit = (nodes: TodoTreeNode[], depth: number): void => {
+    for (const node of nodes) {
+      rows.push({ node, depth });
+      visit(node.children, depth + 1);
+    }
+  };
+  visit(props.tree ?? [], 0);
+  return rows;
+});
 
 function glyphStatus(status: TodoView['status']): StatusGlyphStatus {
   return status === 'in_progress' ? 'run' : status;
@@ -22,7 +45,7 @@ function glyphStatus(status: TodoView['status']): StatusGlyphStatus {
 
 <template>
   <div class="todo-card">
-    <div v-if="props.todos.length === 0" class="tc-empty">
+    <div v-if="treeRows.length === 0 && props.todos.length === 0" class="tc-empty">
       <svg class="tc-empty-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M9 11l2 2 4-4" />
         <rect x="4" y="4" width="16" height="16" rx="3" />
@@ -30,10 +53,29 @@ function glyphStatus(status: TodoView['status']): StatusGlyphStatus {
       <span>{{ t('tasks.emptyTodo') }}</span>
     </div>
 
-    <div v-for="(td, i) in props.todos" :key="i" class="tc-row" :class="`s-${td.status}`">
-      <StatusGlyph :status="glyphStatus(td.status)" />
-      <span class="tc-name">{{ td.title }}</span>
-    </div>
+    <template v-if="treeRows.length > 0">
+      <div
+        v-for="(row, i) in treeRows"
+        :key="i"
+        class="tc-row"
+        :class="[`s-${row.node.status}`, { 's-active': row.node.active }]"
+      >
+        <span
+          v-if="row.depth > 0"
+          class="tc-indent"
+          :style="{ width: `${row.depth * 14}px` }"
+          aria-hidden="true"
+        ></span>
+        <StatusGlyph :status="glyphStatus(row.node.status)" />
+        <span class="tc-name">{{ row.node.title }}</span>
+      </div>
+    </template>
+    <template v-else>
+      <div v-for="(td, i) in props.todos" :key="i" class="tc-row" :class="`s-${td.status}`">
+        <StatusGlyph :status="glyphStatus(td.status)" />
+        <span class="tc-name">{{ td.title }}</span>
+      </div>
+    </template>
   </div>
 </template>
 
@@ -58,6 +100,8 @@ function glyphStatus(status: TodoView['status']): StatusGlyphStatus {
   color: var(--color-text-faint);
   text-decoration: line-through;
 }
+.tc-row.s-active .tc-name { color: var(--color-accent); }
+.tc-indent { flex: none; }
 
 .tc-empty {
   display: flex;

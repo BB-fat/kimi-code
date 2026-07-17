@@ -275,6 +275,19 @@ export interface TodoView {
   status: 'pending' | 'in_progress' | 'done';
 }
 
+/**
+ * One node of the Spine task tree mirrored from the transcript (the
+ * spine_open / spine_close / spine_next control tools). Closed nodes render
+ * as done, the open cursor chain as in_progress, and the cursor node — the
+ * one the agent is working on right now — is flagged `active`.
+ */
+export interface TodoTreeNode {
+  title: string;
+  status: 'in_progress' | 'done';
+  active?: boolean;
+  children: TodoTreeNode[];
+}
+
 export type TaskState = 'run' | 'done' | 'fail';
 
 export interface TaskItem {
@@ -300,6 +313,9 @@ export interface ConversationStatus {
   /** Raw model id — the value selection lists compare against. */
   modelId: string;
   ctxUsed: number;
+  /** Unfolded ("raw") context size; 0 when the daemon hasn't reported it —
+   *  renders then fall back to the single-value projected display. */
+  ctxRaw: number;
   ctxMax: number;
   permission: 'manual' | 'auto' | 'yolo';
   branch: string;

@@ -62,6 +62,7 @@ export const LegacyStatusModel = defineDerivedModel<LegacyStatusState>(
 export interface LegacyStatusSnapshot {
   readonly usage?: UsageStatus;
   readonly contextTokens: number;
+  readonly rawContextTokens: number;
   readonly maxContextTokens: number;
   readonly model: string;
 }
@@ -81,9 +82,13 @@ export function readLegacyStatus(agent: IAgentScopeHandle): LegacyStatusSnapshot
   const contextSize = agent.accessor.get(IAgentContextSizeService);
   const measured = agent.accessor.get(IAgentWireService).getModel(ContextSizeModel);
   const contextTokens = Math.max(contextSize.get().size, measured.tokens);
+  // Unfolded twin of contextTokens, floored at the same reading so the wire
+  // invariant raw >= projected also holds in the transient window where the
+  // measured total outruns the live estimate (see above).
+  const rawContextTokens = Math.max(contextSize.rawSize(), contextTokens);
   const maxContextTokens = profile.getModelCapabilities().max_context_tokens;
   const model = profile.getModel();
-  return { usage, contextTokens, maxContextTokens, model };
+  return { usage, contextTokens, rawContextTokens, maxContextTokens, model };
 }
 
 /**

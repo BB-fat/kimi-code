@@ -42,6 +42,7 @@ export interface SpineFoldStatus {
   readonly cursorId: string;
   readonly summary: string;
   readonly parentId: string | null;
+  readonly parentSummary: string | null;
   readonly cursorContext: number;
   readonly contextLeft: number | undefined;
   /** Per-message estimate of the whole stored history (pre-fold, messages only). */
@@ -234,6 +235,8 @@ function prefixFirstText(content: readonly ContentPart[], anchor: string): Conte
 
 function statusMessage(status: SpineFoldStatus): ContextMessage {
   const parent = status.parentId === null ? '' : ` parent="${status.parentId}"`;
+  const parentSummary =
+    status.parentSummary === null ? '' : ` parent_summary="${escapeAttr(status.parentSummary)}"`;
   const cursorContext = ` cursor_context="~${formatTokens(status.cursorContext)}"`;
   const contextLeft =
     status.contextLeft === undefined ? '' : ` context_left="~${formatTokens(status.contextLeft)}"`;
@@ -242,7 +245,7 @@ function statusMessage(status: SpineFoldStatus): ContextMessage {
   const projectedContext = ` projected_context="${projectedPrefix}${formatTokens(
     status.projectedContext,
   )}"`;
-  const text = `<spine_status cursor="${status.cursorId}" summary="${escapeAttr(status.summary)}"${parent}${cursorContext}${contextLeft}${rawContext}${projectedContext} />`;
+  const text = `<spine_status cursor="${status.cursorId}" summary="${escapeAttr(status.summary)}"${parent}${parentSummary}${cursorContext}${contextLeft}${rawContext}${projectedContext} />`;
   return {
     role: 'user',
     content: [{ type: 'text', text }],

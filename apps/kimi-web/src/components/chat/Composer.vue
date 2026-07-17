@@ -597,9 +597,22 @@ const pct = computed(() => {
   return Math.min(100, Math.max(0, Math.round(((props.status?.ctxUsed ?? 0) / max) * 100)));
 });
 
+const rawPct = computed(() => {
+  const max = props.status?.ctxMax ?? 0;
+  if (max <= 0) return 0;
+  return Math.min(100, Math.max(0, Math.round(((props.status?.ctxRaw ?? 0) / max) * 100)));
+});
+// The raw (unfolded) reading only diverges from the projected one once a fold
+// actually reclaimed context — before that the ring and count stay single-value.
+const hasRaw = computed(() => (props.status?.ctxRaw ?? 0) > (props.status?.ctxUsed ?? 0));
+
 const ctxTooltip = computed(() => {
   const used = (props.status?.ctxUsed ?? 0).toLocaleString();
   const max = (props.status?.ctxMax ?? 0).toLocaleString();
+  if (hasRaw.value) {
+    const raw = (props.status?.ctxRaw ?? 0).toLocaleString();
+    return t('status.ctxTooltipRaw', { used, raw, max, pct: pct.value });
+  }
   return t('status.ctxTooltip', { used, max, pct: pct.value });
 });
 
@@ -1092,8 +1105,8 @@ function selectModel(modelId: string): void {
               tabindex="0"
               :aria-label="ctxTooltip"
             >
-              <ContextRing :pct="pct" />
-              <span class="ctx-num">{{ kFmt(status.ctxUsed) }}/{{ kFmt(status.ctxMax) }}</span>
+              <ContextRing :pct="pct" :raw-pct="hasRaw ? rawPct : undefined" />
+              <span class="ctx-num">{{ kFmt(status.ctxUsed) }}/<template v-if="hasRaw">{{ kFmt(status.ctxRaw) }}/</template>{{ kFmt(status.ctxMax) }}</span>
             </span>
           </Tooltip>
 

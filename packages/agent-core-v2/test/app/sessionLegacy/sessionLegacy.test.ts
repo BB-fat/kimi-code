@@ -75,7 +75,7 @@ describe('Session legacy status (best-effort runtime state)', () => {
       kind: LifecycleScope.Agent,
       accessor: accessor([
         [IAgentProfileService, profile],
-        [IAgentContextSizeService, { get: () => ({ size: 25, measured: 20, estimated: 5 }) }],
+        [IAgentContextSizeService, { get: () => ({ size: 25, measured: 20, estimated: 5 }), rawSize: () => 30 }],
         [IAgentPermissionModeService, { mode: 'manual' }],
         [IAgentPlanService, { status: () => Promise.resolve(null) }],
         [IAgentSwarmService, { isActive: false }],

@@ -135,6 +135,8 @@ export const sessionStatusResponseSchema = z.object({
   plan_mode: z.boolean(),
   swarm_mode: z.boolean(),
   context_tokens: z.number().int().nonnegative(),
+  // Unfolded-request cost (>= context_tokens); optional — older daemons omit it.
+  raw_context_tokens: z.number().int().nonnegative().optional(),
   max_context_tokens: z.number().int().nonnegative(),
   context_usage: z.number().min(0).max(1),
 });

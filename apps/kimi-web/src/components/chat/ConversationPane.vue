@@ -2,7 +2,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch, type ComponentPublicInstance } from 'vue';
 import { useI18n } from 'vue-i18n';
-import type { ActivationBadges, ApprovalBlock, ChatTurn, ConversationStatus, FilePreviewRequest, PermissionMode, QueuedPromptView, TaskItem, TodoView, ToolMedia, UIQuestion, WorkspaceView } from '../../types';
+import type { ActivationBadges, ApprovalBlock, ChatTurn, ConversationStatus, FilePreviewRequest, PermissionMode, QueuedPromptView, TaskItem, TodoTreeNode, TodoView, ToolMedia, UIQuestion, WorkspaceView } from '../../types';
 import type { AppGoal, AppModel, AppSkill, QuestionResponse, ThinkingLevel } from '../../api/types';
 import type { FileItem } from './MentionMenu.vue';
 import ChatPane from './ChatPane.vue';
@@ -26,6 +26,9 @@ const props = defineProps<{
   tasks: TaskItem[];
   /** Model-maintained todo list (TodoList tool) — shown as a floating card. */
   todos?: TodoView[];
+  /** Spine task tree mirrored from the transcript — when non-empty it
+      replaces the flat todo list in the dock (spine sessions never emit TodoList). */
+  todoTree?: TodoTreeNode[];
   goal?: AppGoal | null;
   activationBadges?: ActivationBadges;
   status: ConversationStatus;
@@ -247,6 +250,7 @@ const hasDockWork = computed(() =>
   bashTasks.value.length > 0 ||
   subagentTasks.value.length > 0 ||
   (props.todos?.length ?? 0) > 0 ||
+  (props.todoTree?.length ?? 0) > 0 ||
   (props.queued?.length ?? 0) > 0,
 );
 const dockPanel = ref<'bash' | 'subagent' | 'todos' | null>(null);
@@ -1450,6 +1454,7 @@ defineExpose({ loadComposerForEdit, focusComposer });
         :todo-done-count="todoDoneCount"
         :has-dock-work="hasDockWork"
         :todos="todos"
+        :todo-tree="todoTree"
         :pending-question="pendingQuestion"
         :question-busy-kind="questionBusyKind"
         :pending-approval="pendingApproval"

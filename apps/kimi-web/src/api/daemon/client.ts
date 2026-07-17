@@ -459,6 +459,7 @@ export class DaemonKimiWebApi implements KimiWebApi {
       planMode: data.plan_mode === true,
       swarmMode: data.swarm_mode === true,
       contextTokens: data.context_tokens ?? 0,
+      rawContextTokens: data.raw_context_tokens ?? 0,
       maxContextTokens: data.max_context_tokens ?? 0,
       contextUsage: data.context_usage ?? 0,
     };
