@@ -41,6 +41,7 @@ import {
   type ToolExecution,
 } from '#/tool/toolContract';
 import { registerTool } from '#/agent/toolRegistry/toolContribution';
+import { SPINE_TOOL_NAMES } from '#/agent/spine/spine';
 import { IAgentProfileCatalogService, type AgentProfile } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import { applyProfilePromptPrefix } from '#/app/agentProfileCatalog/promptPrefix';
 import { ILogService } from '#/_base/log/log';
@@ -443,6 +444,12 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
 registerTool(AgentTool);
 
 
+// Profiles whitelist the spine control tools so the main agent's active-tool
+// filter lets them through, but the tools register only for the main agent —
+// rendering the names here would show every agent (including sub-agents,
+// which carry this tool themselves) tools that are not in their schema.
+const DESCRIBED_TOOL_DENYLIST: ReadonlySet<string> = new Set(SPINE_TOOL_NAMES);
+
 function buildProfileDescriptions(
   profiles: readonly AgentProfile[],
 ): string {
@@ -452,10 +459,11 @@ function buildProfileDescriptions(
         (part): part is string => part !== undefined && part.length > 0,
       );
       const header = details.length === 0 ? `- ${profile.name}` : `- ${profile.name}: ${details.join(' ')}`;
-      if (profile.tools.length === 0) {
+      const tools = profile.tools.filter((name) => !DESCRIBED_TOOL_DENYLIST.has(name));
+      if (tools.length === 0) {
         return header;
       }
-      return `${header}\n  Tools: ${profile.tools.join(', ')}`;
+      return `${header}\n  Tools: ${tools.join(', ')}`;
     })
     .join('\n');
 }

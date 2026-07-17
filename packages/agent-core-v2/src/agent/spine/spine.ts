@@ -23,6 +23,19 @@ export const SPINE_TOOL_CLOSE = 'spine_close';
 export const SPINE_TOOL_NEXT = 'spine_next';
 export const SPINE_TOOL_TREE = 'spine_tree';
 
+/**
+ * All four spine control tool names. Profiles whitelist these so the main
+ * agent's active-tool filter lets the registered tools through; surfaces that
+ * merely display a profile's tool list (e.g. the `Agent` tool description)
+ * filter them out instead, since the tools register only for the main agent.
+ */
+export const SPINE_TOOL_NAMES = [
+  SPINE_TOOL_OPEN,
+  SPINE_TOOL_CLOSE,
+  SPINE_TOOL_NEXT,
+  SPINE_TOOL_TREE,
+] as const;
+
 export type SpineControlToolName =
   | typeof SPINE_TOOL_OPEN
   | typeof SPINE_TOOL_CLOSE

@@ -466,6 +466,17 @@ describe('Agent tool description', () => {
     expect(description).toContain('Tools: Agent, AgentSwarm, Bash');
   });
 
+  it('omits spine control tools from rendered profile tool sets', () => {
+    ctx = createTestAgent();
+
+    const description = agentDescription();
+
+    // The default `agent` profile whitelists the spine tool names so the main
+    // agent's active-tool filter lets them through, but they must not be
+    // rendered as text — the tools register only for the main agent.
+    expect(description).not.toContain('spine_');
+  });
+
   it('mentions resume preference and result visibility', () => {
     ctx = createTestAgent();
 
