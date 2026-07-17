@@ -11,7 +11,11 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { promptMetadataTextFromPayload } from '#/agent/rpc/prompt-metadata';
+import {
+  applyPromptMetadataUpdate,
+  promptMetadataPatchFromText,
+  promptMetadataTextFromPayload,
+} from '#/agent/prompt/promptMetadata';
 import { buildImageCompressionCaption } from '#/agent/media/image-compress';
 
 const CAPTION = buildImageCompressionCaption({
@@ -51,5 +55,36 @@ describe('promptMetadataTextFromPayload', () => {
     expect(text).toBe('能展示但是没有快捷键提示 [image]');
     expect(text).not.toContain('<system>');
     expect(text).not.toContain('Image compressed');
+  });
+});
+
+describe('promptMetadataPatchFromText', () => {
+  it('returns undefined for undefined text', () => {
+    expect(promptMetadataPatchFromText({ lastPrompt: undefined }, undefined)).toBeUndefined();
+  });
+
+  it('seeds an easy title when the session is untitled', () => {
+    for (const title of [undefined, '', 'New Session']) {
+      expect(promptMetadataPatchFromText({ title, lastPrompt: undefined }, 'hello')).toEqual({
+        lastPrompt: 'hello',
+        title: 'hello',
+        isCustomTitle: false,
+      });
+    }
+  });
+
+  it('leaves an existing or custom title untouched but updates lastPrompt', () => {
+    expect(
+      promptMetadataPatchFromText({ title: 'My Session', isCustomTitle: true, lastPrompt: 'old' }, 'next'),
+    ).toEqual({ lastPrompt: 'next' });
+    expect(promptMetadataPatchFromText({ title: 'auto title', lastPrompt: 'old' }, 'next')).toEqual({
+      lastPrompt: 'next',
+    });
+  });
+
+  it('returns undefined when the patch would not change anything', () => {
+    expect(
+      promptMetadataPatchFromText({ title: 'same text', lastPrompt: 'same text' }, 'same text'),
+    ).toBeUndefined();
   });
 });

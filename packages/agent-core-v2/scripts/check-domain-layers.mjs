@@ -347,6 +347,11 @@ const ALLOWED_EXCEPTIONS = new Set([
   'replayBuilder>sessionMetadata',
   'skill>contextMemory',
   'skill>prompt',
+  // `prompt` (L4) maintains the session's title / lastPrompt from its
+  // `enqueue` sink so entry surfaces that bypass `rpc` (the TUI facade,
+  // gateway) get the same easy-title behavior — same shape as
+  // `swarm>sessionMetadata` above.
+  'prompt>sessionMetadata',
   'swarm>sessionMetadata',
   'btw>agentLifecycle',
   'toolExecutor>loop',

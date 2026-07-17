@@ -62,7 +62,7 @@ import {
   promptMetadataTextFromPayload,
   promptMetadataTextFromPluginCommand,
   promptMetadataTextFromSkill,
-} from './prompt-metadata';
+} from '#/agent/prompt/promptMetadata';
 
 export interface PluginCommandActivatedEvent {
   readonly type: 'plugin_command.activated';

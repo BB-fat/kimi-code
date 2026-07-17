@@ -1,23 +1,18 @@
 /**
- * `rpc` domain (Agent) — v1-compatible prompt metadata helpers.
+ * `prompt` domain (L4) — v1-compatible prompt metadata helpers.
  *
- * Derives title and last-prompt text from native and legacy prompt payloads,
- * persists metadata through `sessionMetadata`, and publishes live updates
- * through `event`. Shared by the native `rpc` prompt path and the v1 legacy
- * prompt adapter so both surfaces keep the same easy-title behavior.
+ * Derives title and last-prompt text from prompt content, persists metadata
+ * through `sessionMetadata`, and publishes live updates through `event`.
+ * Applied by the `IAgentPromptService.enqueue` sink for every user-origin
+ * prompt, and directly by the rpc skill / plugin-command paths, so every
+ * entry surface keeps the same easy-title behavior.
  */
 
 import type { ContentPart } from '#/app/llmProtocol/message';
 import type { IEventService } from '#/app/event/event';
-import type { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
+import type { ISessionMetadata, SessionMeta } from '#/session/sessionMetadata/sessionMetadata';
 
 import { extractImageCompressionCaptions } from '#/agent/media/image-compress';
-
-import type {
-  ActivatePluginCommandPayload,
-  ActivateSkillPayload,
-  PromptPayload,
-} from './core-api';
 
 const MAX_TITLE_LENGTH = 200;
 const MAX_LAST_PROMPT_LENGTH = 4000;
@@ -26,7 +21,9 @@ export function titleFromPromptMetadataText(text: string): string {
   return text.slice(0, MAX_TITLE_LENGTH);
 }
 
-export function promptMetadataTextFromPayload(payload: PromptPayload): string | undefined {
+export function promptMetadataTextFromPayload(payload: {
+  readonly input: readonly ContentPart[];
+}): string | undefined {
   return promptMetadataTextFromContentParts(payload.input);
 }
 
@@ -41,7 +38,10 @@ export function promptMetadataTextFromContentParts(
   return sanitizeAndTruncatePromptText(texts.join('\n'), MAX_LAST_PROMPT_LENGTH);
 }
 
-export function promptMetadataTextFromSkill(payload: ActivateSkillPayload): string | undefined {
+export function promptMetadataTextFromSkill(payload: {
+  readonly name: string;
+  readonly args?: string | undefined;
+}): string | undefined {
   const args = payload.args?.trim();
   return sanitizeAndTruncatePromptText(
     args === undefined || args.length === 0 ? `/${payload.name}` : `/${payload.name} ${args}`,
@@ -49,9 +49,11 @@ export function promptMetadataTextFromSkill(payload: ActivateSkillPayload): stri
   );
 }
 
-export function promptMetadataTextFromPluginCommand(
-  payload: ActivatePluginCommandPayload,
-): string | undefined {
+export function promptMetadataTextFromPluginCommand(payload: {
+  readonly pluginId: string;
+  readonly commandName: string;
+  readonly args?: string | undefined;
+}): string | undefined {
   const args = payload.args?.trim();
   const command = `/${payload.pluginId}:${payload.commandName}`;
   return sanitizeAndTruncatePromptText(
@@ -70,12 +72,22 @@ export interface PromptMetadataUpdateTarget {
   readonly sessionId: string;
 }
 
-export async function applyPromptMetadataUpdate(
-  target: PromptMetadataUpdateTarget,
+export interface PromptMetadataPatch {
+  readonly lastPrompt: string;
+  readonly title?: string;
+  readonly isCustomTitle?: boolean;
+}
+
+/**
+ * Computes the metadata patch for a prompt text, or `undefined` when nothing
+ * would change — so sinks and rpc callers racing the same prompt never
+ * double-write or bump `updatedAt`.
+ */
+export function promptMetadataPatchFromText(
+  current: Pick<SessionMeta, 'title' | 'isCustomTitle' | 'lastPrompt'>,
   text: string | undefined,
-): Promise<void> {
-  if (text === undefined) return;
-  const current = await target.metadata.read();
+): PromptMetadataPatch | undefined {
+  if (text === undefined) return undefined;
   const patch: { lastPrompt: string; title?: string; isCustomTitle?: boolean } = {
     lastPrompt: text,
   };
@@ -83,6 +95,16 @@ export async function applyPromptMetadataUpdate(
     patch.title = titleFromPromptMetadataText(text);
     patch.isCustomTitle = false;
   }
+  if (patch.title === undefined && patch.lastPrompt === current.lastPrompt) return undefined;
+  return patch;
+}
+
+export async function applyPromptMetadataUpdate(
+  target: PromptMetadataUpdateTarget,
+  text: string | undefined,
+): Promise<void> {
+  const patch = promptMetadataPatchFromText(await target.metadata.read(), text);
+  if (patch === undefined) return;
   await target.metadata.update(patch);
   target.eventService.publish({
     type: 'session.meta.updated',
@@ -93,7 +115,7 @@ export async function applyPromptMetadataUpdate(
       patch: {
         title: patch.title,
         isCustomTitle: patch.isCustomTitle,
-        lastPrompt: text,
+        lastPrompt: patch.lastPrompt,
       },
     },
   });

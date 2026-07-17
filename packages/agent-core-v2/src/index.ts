@@ -433,7 +433,7 @@ export * from '#/agent/shellCommand/shellCommandService';
 export * from '#/agent/rpc/rpc';
 export * from '#/agent/rpc/rpcService';
 export type { McpServerInfo } from '#/agent/rpc/core-api';
-export * from '#/agent/rpc/prompt-metadata';
+export * from '#/agent/prompt/promptMetadata';
 export * from '#/agent/scopeContext/scopeContext';
 export * from '#/agent/stepRetry/stepRetry';
 export * from '#/agent/stepRetry/stepRetryService';

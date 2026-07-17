@@ -20,10 +20,13 @@ import { AgentPromptService } from '#/agent/prompt/promptService';
 import { IAgentSystemReminderService } from '#/agent/systemReminder/systemReminder';
 import { AgentSystemReminderService } from '#/agent/systemReminder/systemReminderService';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
+import { IEventService } from '#/app/event/event';
 import { IEventBus } from '#/app/event/eventBus';
 import { EventBusService } from '#/app/event/eventBusService';
 import { ErrorCodes, Error2 } from '#/errors';
 import { createHooks } from '#/hooks';
+import { ISessionContext, makeSessionContext } from '#/session/sessionContext/sessionContext';
+import { ISessionMetadata, type SessionMeta } from '#/session/sessionMetadata/sessionMetadata';
 import { IWireService } from '#/wire/wire';
 
 import { stubContextMemory } from '../contextMemory/stubs';
@@ -33,7 +36,34 @@ function message(text: string): ContextMessage {
   return { role: 'user', content: [{ type: 'text', text }], toolCalls: [], origin: { kind: 'user' } };
 }
 
-function harness() {
+function stubSessionMetadata(initial?: Partial<SessionMeta>) {
+  let data: SessionMeta = { id: 'session-1', createdAt: 0, updatedAt: 0, archived: false, ...initial };
+  const update = vi.fn(async (patch: Partial<SessionMeta>) => {
+    data = { ...data, ...patch, updatedAt: Date.now() };
+  });
+  const service = {
+    _serviceBrand: undefined,
+    ready: Promise.resolve(),
+    onDidChangeMetadata: Event.None,
+    read: () => Promise.resolve(data),
+    update,
+    setTitle: async (title: string) => { data = { ...data, title, isCustomTitle: true }; },
+    setArchived: async (archived: boolean) => { data = { ...data, archived }; },
+    registerAgent: () => Promise.resolve(),
+  } as unknown as ISessionMetadata;
+  return { service, update, read: () => data };
+}
+
+function stubEventService() {
+  return {
+    _serviceBrand: undefined,
+    onDidPublish: Event.None,
+    publish: vi.fn(),
+    subscribe: () => ({ dispose: () => {} }),
+  } as unknown as IEventService;
+}
+
+function harness(metaInitial?: Partial<SessionMeta>) {
   const disposables = new DisposableStore();
   onTestFinished(() => disposables.dispose());
   const context = stubContextMemory();
@@ -45,6 +75,8 @@ function harness() {
     hooks: createHooks(['onWillCompact']),
     onDidFinishCompaction: Event.None,
   } as unknown as IAgentFullCompactionService;
+  const sessionMeta = stubSessionMetadata(metaInitial);
+  const eventService = stubEventService();
   const ix = createServices(disposables, {
     strict: true, additionalServices: (reg) => {
       reg.defineInstance(IAgentContextMemoryService, context);
@@ -52,12 +84,21 @@ function harness() {
       reg.defineInstance(IWireService, stubWire());
       reg.defineInstance(IAgentToolExecutorService, stubToolExecutor());
       reg.defineInstance(IAgentFullCompactionService, fullCompaction);
+      reg.defineInstance(ISessionContext, makeSessionContext({
+        sessionId: 'session-1',
+        workspaceId: 'ws',
+        sessionDir: '/tmp/session-1',
+        sessionScope: 'sessions/session-1',
+        cwd: '/tmp',
+      }));
+      reg.defineInstance(ISessionMetadata, sessionMeta.service);
+      reg.defineInstance(IEventService, eventService);
       reg.define(IEventBus, EventBusService);
       reg.define(IAgentSystemReminderService, AgentSystemReminderService);
       reg.define(IAgentPromptService, AgentPromptService);
     }
   });
-  return { prompt: ix.get(IAgentPromptService), loop, context, fullCompaction };
+  return { prompt: ix.get(IAgentPromptService), loop, context, fullCompaction, sessionMeta, eventService };
 }
 
 describe('AgentPromptService', () => {
@@ -176,5 +217,45 @@ describe('AgentPromptService', () => {
     expect(
       parts.some((part) => part.type === 'text' && part.text.includes('image/avif')),
     ).toBe(true);
+  });
+});
+
+describe('AgentPromptService session metadata sink', () => {
+  it('writes title and lastPrompt for the first user prompt', async () => {
+    const { prompt, sessionMeta } = harness();
+    await prompt.enqueue({ message: message('hello world') });
+    expect(sessionMeta.update).toHaveBeenCalledTimes(1);
+    expect(sessionMeta.read()).toMatchObject({
+      title: 'hello world',
+      isCustomTitle: false,
+      lastPrompt: 'hello world',
+    });
+  });
+
+  it('dedupes repeated identical prompt text', async () => {
+    const { prompt, sessionMeta } = harness();
+    await prompt.enqueue({ message: message('same text') });
+    await prompt.enqueue({ message: message('same text') });
+    expect(sessionMeta.update).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips metadata writes for non-user origins', async () => {
+    const { prompt, sessionMeta } = harness();
+    await prompt.enqueue({
+      message: { ...message('subagent task'), origin: { kind: 'system_trigger', name: 'subagent' } },
+    });
+    expect(sessionMeta.update).not.toHaveBeenCalled();
+  });
+
+  it('updates lastPrompt while preserving a custom title', async () => {
+    const { prompt, sessionMeta } = harness({ title: 'My Session', isCustomTitle: true });
+    await prompt.enqueue({ message: message('next question') });
+    expect(sessionMeta.update).toHaveBeenCalledTimes(1);
+    expect(sessionMeta.update.mock.calls[0]?.[0]).not.toHaveProperty('title');
+    expect(sessionMeta.read()).toMatchObject({
+      title: 'My Session',
+      isCustomTitle: true,
+      lastPrompt: 'next question',
+    });
   });
 });

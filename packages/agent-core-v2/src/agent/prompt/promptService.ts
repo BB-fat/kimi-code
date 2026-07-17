@@ -4,7 +4,9 @@
  * Assigns prompt and message identities, serializes user prompts through an
  * active slot and FIFO, converts selected pending prompts into active-turn
  * steers, settles lifecycle handles, and keeps system input outside the prompt
- * resource model. Bound at Agent scope.
+ * resource model. Also maintains the session's title / lastPrompt metadata
+ * for user-origin prompts (see `promptMetadata.ts`), so entry surfaces that
+ * bypass `rpc` still get easy titles. Bound at Agent scope.
  */
 
 import { InstantiationType } from '#/_base/di/extensions';
@@ -24,9 +26,12 @@ import type { ExecutableToolResult } from '#/tool/toolContract';
 import type { ToolDidExecuteContext } from '#/agent/toolExecutor/toolHooks';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import type { ContentPart } from '#/app/llmProtocol/message';
+import { IEventService } from '#/app/event/event';
 import { IEventBus } from '#/app/event/eventBus';
 import { ErrorCodes, Error2 } from '#/errors';
 import { OrderedHookSlot } from '#/hooks';
+import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 import { IWireService } from '#/wire/wire';
 
 import {
@@ -39,6 +44,7 @@ import {
   type PromptState,
   type PromptSubmitContext,
 } from './prompt';
+import { applyPromptMetadataUpdate, promptMetadataTextFromContentParts } from './promptMetadata';
 import { PromptStepRequest, RetryStepRequest, SteerStepRequest } from './promptStepRequests';
 
 declare module '#/app/event/eventBus' {
@@ -74,6 +80,9 @@ export class AgentPromptService implements IAgentPromptService {
     @IAgentToolExecutorService toolExecutor: IAgentToolExecutorService,
     @IWireService private readonly wire: IWireService,
     @IEventBus private readonly eventBus: IEventBus,
+    @IEventService private readonly eventService: IEventService,
+    @ISessionContext private readonly sessionContext: ISessionContext,
+    @ISessionMetadata private readonly metadata: ISessionMetadata,
   ) {
     toolExecutor.hooks.onDidExecuteTool.register('prompt-service-delivery', async (ctx, next) => {
       await this.deliverToolResult(ctx);
@@ -84,6 +93,7 @@ export class AgentPromptService implements IAgentPromptService {
   async enqueue(input: PromptInput): Promise<PromptHandle> {
     const id = input.id ?? input.message.id ?? newMessageId();
     const message = { ...input.message, id };
+    await this.updatePromptMetadata(message);
     const launchedDeferred = deferred<Turn | undefined>();
     const completionDeferred = deferred<PromptCompletion>();
     const record = {} as Record;
@@ -231,6 +241,17 @@ export class AgentPromptService implements IAgentPromptService {
   private appendPrompt(message: ContextMessage, captions: readonly string[]): void {
     for (const caption of captions) this.reminders.appendSystemReminder(caption, { kind: 'injection', variant: 'image_compression' });
     if (message.content.length > 0) this.context.append(message);
+  }
+  private async updatePromptMetadata(message: ContextMessage): Promise<void> {
+    if ((message.origin ?? USER_PROMPT_ORIGIN).kind !== 'user') return;
+    await applyPromptMetadataUpdate(
+      {
+        metadata: this.metadata,
+        eventService: this.eventService,
+        sessionId: this.sessionContext.sessionId,
+      },
+      promptMetadataTextFromContentParts(message.content),
+    );
   }
   private async deliverToolResult(ctx: ToolDidExecuteContext): Promise<void> {
     const delivery = ctx.result.delivery; if (delivery === undefined) return;
