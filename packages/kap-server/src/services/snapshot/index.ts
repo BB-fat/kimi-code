@@ -1,6 +1,7 @@
 export type { ISnapshotReader } from './snapshot';
 export { SnapshotNotFoundError, SnapshotTimeoutError } from './snapshot';
 export {
+  deriveSpineTree,
   SnapshotReader,
   readWireRecords,
   type SnapshotReaderDeps,

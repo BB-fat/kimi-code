@@ -68,6 +68,35 @@ export const snapshotSubagentSchema = taskSchema.extend({
 });
 export type SnapshotSubagent = z.infer<typeof snapshotSubagentSchema>;
 
+/**
+ * One node of the server-derived spine task tree (agent-core-v2
+ * `spineTreeViewFromState`, flattened with snake_case keys).
+ */
+export const spineTreeNodeSchema = z.object({
+  id: z.string().min(1),
+  parent_id: z.string().min(1).nullable(),
+  title: z.string(),
+  memory: z.string(),
+  token_cost: z.number(),
+  status: z.enum(['active', 'closed', 'canceled']),
+  error: z.string().nullable(),
+});
+export type SpineTreeNode = z.infer<typeof spineTreeNodeSchema>;
+
+/**
+ * Seed of the session's FULL spine task tree, derived server-side from the
+ * complete (pre-window) transcript via `deriveSpineState` +
+ * `spineTreeViewFromState`, so a client rebuilding from the bounded
+ * `messages.items` page still sees nodes whose transitions fell outside the
+ * window. `covered_through_id` is the wire id of the last message in
+ * `messages.items`: the client folds only live messages arriving after it.
+ */
+export const spineTreeViewSchema = z.object({
+  covered_through_id: z.string().min(1).nullable(),
+  nodes: z.array(spineTreeNodeSchema),
+});
+export type SpineTreeView = z.infer<typeof spineTreeViewSchema>;
+
 export const sessionSnapshotResponseSchema = z.object({
   /** Durable event watermark this snapshot is consistent with. */
   as_of_seq: z.number().int().nonnegative(),
@@ -86,6 +115,13 @@ export const sessionSnapshotResponseSchema = z.object({
    * for cross-version tolerance: older servers do not send it.
    */
   subagents: z.array(snapshotSubagentSchema).optional(),
+  /**
+   * Seed of the full spine task tree, derived from the complete transcript
+   * (`deriveSpineState` + `spineTreeViewFromState`). Optional for
+   * cross-version tolerance: older servers do not send it, and a derivation
+   * failure drops the field instead of failing the snapshot.
+   */
+  spine_tree: spineTreeViewSchema.optional(),
   pending_approvals: z.array(approvalRequestSchema),
   pending_questions: z.array(questionRequestSchema),
 });

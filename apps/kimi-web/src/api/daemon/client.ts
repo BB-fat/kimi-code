@@ -47,6 +47,7 @@ import {
   toAppProvider,
   toAppQuestionRequest,
   toAppSession,
+  toAppSpineTreeSeed,
   toAppTask,
   toWireApprovalResponse,
   toWirePromptSubmission,
@@ -561,6 +562,9 @@ export class DaemonKimiWebApi implements KimiWebApi {
         pendingQuestions: data.pending_questions.map(toAppQuestionRequest),
         // Older servers omit the roster entirely; treat as an empty roster.
         subagents: (data.subagents ?? []).map(toAppTask),
+        // Older servers omit the spine seed; the consumer then replays the
+        // message window only (legacy behavior).
+        spineTree: data.spine_tree === undefined ? undefined : toAppSpineTreeSeed(data.spine_tree),
       };
       traceKeyEvent('session:snapshot:accepted', {
         sessionId,

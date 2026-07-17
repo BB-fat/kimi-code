@@ -8,6 +8,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  ACCEPTED_OUTPUT,
+  type ContextMessage,
   type DomainEvent,
   IAgentContextMemoryService,
   IEventBus,
@@ -19,6 +21,7 @@ import {
   ISessionLifecycleService,
   ISessionMetadata,
   IWorkspaceRegistry,
+  SPINE_TOOL_OPEN,
 } from '@moonshot-ai/agent-core-v2';
 import { sessionSnapshotResponseSchema } from '../src/protocol/rest-snapshot';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -167,6 +170,122 @@ describe('server-v2 snapshot route enrichment', () => {
         run_in_background: false,
       }),
     ]);
+  });
+
+  it('carries spine_tree derived from the full live history (legacy assembly)', async () => {
+    const sessionId = 'sess_snapshot_spine';
+    const workspaceId = 'wd_snapshot_012345abcdef';
+    const now = Date.parse('2026-01-01T00:00:00.000Z');
+    const history: ContextMessage[] = [
+      {
+        role: 'assistant',
+        content: [],
+        toolCalls: [
+          {
+            type: 'function',
+            id: 'call_open_1',
+            name: SPINE_TOOL_OPEN,
+            arguments: JSON.stringify({ summary: 'legacy task' }),
+          },
+        ],
+      },
+      {
+        role: 'tool',
+        content: [{ type: 'text', text: ACCEPTED_OUTPUT }],
+        toolCalls: [],
+        toolCallId: 'call_open_1',
+      },
+      { role: 'user', content: [{ type: 'text', text: 'later' }], toolCalls: [] },
+    ];
+    const main = {
+      accessor: fakeAccessor([
+        [IAgentContextMemoryService, { get: () => history }],
+        [IAgentPromptService, { list: () => ({ active: undefined, pending: [] }) }],
+      ]),
+    };
+    const session = {
+      accessor: fakeAccessor([
+        [ISessionContext, { workspaceId }],
+        [
+          ISessionMetadata,
+          {
+            read: async () => ({
+              id: sessionId,
+              title: 'Snapshot',
+              createdAt: now,
+              updatedAt: now,
+              archived: false,
+            }),
+          },
+        ],
+        [IAgentLifecycleService, { get: () => main }],
+        [ISessionInteractionService, { listPending: () => [] }],
+      ]),
+    };
+    const core = {
+      accessor: fakeAccessor([
+        [
+          ISessionLifecycleService,
+          { resume: async () => session, get: () => undefined },
+        ],
+        [IWorkspaceRegistry, { get: async () => ({ root: '/workspace' }) }],
+      ]),
+    };
+    const broadcaster = {
+      getSnapshotState: async () => ({
+        seq: 1,
+        epoch: 'ep_snapshot',
+        inFlightTurn: null,
+        subagents: [],
+      }),
+    };
+
+    let routeHandler:
+      | ((
+          req: { id: string; params: { session_id: string } },
+          reply: { send(payload: unknown): unknown },
+        ) => Promise<void> | void)
+      | undefined;
+    const previousReaderMode = process.env['KIMI_SNAPSHOT_READER'];
+    process.env['KIMI_SNAPSHOT_READER'] = 'legacy';
+    const unusedReader = { read: async () => ({}) as never };
+    try {
+      registerSnapshotRoutes(
+        {
+          get: (_path, _options, handler) => {
+            routeHandler = handler;
+          },
+        },
+        {
+          core: core as never,
+          broadcaster: broadcaster as never,
+          reader: unusedReader as never,
+        },
+      );
+    } finally {
+      if (previousReaderMode === undefined) delete process.env['KIMI_SNAPSHOT_READER'];
+      else process.env['KIMI_SNAPSHOT_READER'] = previousReaderMode;
+    }
+
+    let payload: unknown;
+    await routeHandler?.(
+      { id: 'req_snapshot_spine', params: { session_id: sessionId } },
+      {
+        send: (value) => {
+          payload = value;
+        },
+      },
+    );
+
+    const body = payload as { code: number; data: unknown };
+    expect(body.code).toBe(0);
+    const snap = sessionSnapshotResponseSchema.parse(body.data);
+    expect(snap.spine_tree).toBeDefined();
+    expect(snap.spine_tree!.covered_through_id).toBe(snap.messages.items.at(-1)!.id);
+    const node = snap.spine_tree!.nodes.find((n) => n.title === 'legacy task');
+    expect(node).toBeDefined();
+    expect(node!.status).toBe('active');
+    expect(node!.memory).toBe('');
   });
 });
 
@@ -364,8 +483,7 @@ describe('server-v2 GET /api/v1/sessions/:id/snapshot', () => {
   // — not from a live (resumed) context. We seed a wire log, restart so the
   // session is genuinely cold, then assert the snapshot returns the on-disk
   // transcript while the scope stays un-materialized.
-  it('auto reader returns messages read directly from wire.jsonl for a cold session', async () => {
-    const sid = await createSession();
+  it('auto reader returns messages read directly from wire.jsonl for a cold session', async () => {    const sid = await createSession();
     const live = server!.core.accessor.get(ISessionLifecycleService).get(sid);
     if (live === undefined) throw new Error(`session ${sid} not found`);
     const metaScope = live.accessor.get(ISessionContext).metaScope;
@@ -407,6 +525,71 @@ describe('server-v2 GET /api/v1/sessions/:id/snapshot', () => {
     expect((snap.messages.items[0]!.content[0] as { text: string }).text).toBe('hello-from-disk');
     expect((snap.messages.items[1]!.content[0] as { text: string }).text).toBe('hi-from-disk');
     expect(snap.epoch).toMatch(/^ep_/);
+  });
+
+  // The auto path must seed `spine_tree` from the FULL on-disk transcript, so
+  // a client rebuilding from the bounded messages page still sees early spine
+  // nodes. Same cold-session setup as the on-disk reader regression above.
+  it('auto reader seeds spine_tree from the on-disk transcript', async () => {
+    const sid = await createSession();
+    const live = server!.core.accessor.get(ISessionLifecycleService).get(sid);
+    if (live === undefined) throw new Error(`session ${sid} not found`);
+    const metaScope = live.accessor.get(ISessionContext).metaScope;
+
+    const wireDir = join(home as string, metaScope, 'agents', 'main');
+    await mkdir(wireDir, { recursive: true });
+    const records = [
+      { type: 'metadata', protocol_version: '1.4', created_at: Date.now() },
+      {
+        type: 'context.append_message',
+        message: {
+          role: 'assistant',
+          content: [],
+          toolCalls: [
+            {
+              type: 'function',
+              id: 'call_open_1',
+              name: SPINE_TOOL_OPEN,
+              arguments: JSON.stringify({ summary: 'seeded task' }),
+            },
+          ],
+        },
+      },
+      {
+        type: 'context.append_message',
+        message: {
+          role: 'tool',
+          content: [{ type: 'text', text: ACCEPTED_OUTPUT }],
+          toolCalls: [],
+          toolCallId: 'call_open_1',
+        },
+      },
+      {
+        type: 'context.append_message',
+        message: { role: 'user', content: [{ type: 'text', text: 'after' }], toolCalls: [] },
+      },
+    ];
+    await writeFile(
+      join(wireDir, 'wire.jsonl'),
+      records.map((r) => JSON.stringify(r)).join('\n') + '\n',
+      'utf-8',
+    );
+
+    await server!.close();
+    server = undefined;
+    server = await startServer({ host: '127.0.0.1', port: 0, homeDir: home, logLevel: 'silent' });
+    base = `http://127.0.0.1:${server.port}`;
+
+    // Guard: still cold — the auto reader must serve from disk, not resume.
+    expect(server!.core.accessor.get(ISessionLifecycleService).get(sid)).toBeUndefined();
+
+    const snap = await snapshot(sid);
+    expect(snap.session.id).toBe(sid);
+    expect(snap.spine_tree).toBeDefined();
+    expect(snap.spine_tree!.covered_through_id).toBe(snap.messages.items.at(-1)!.id);
+    const node = snap.spine_tree!.nodes.find((n) => n.title === 'seeded task');
+    expect(node).toBeDefined();
+    expect(node!.status).toBe('active');
   });
 
   // Regression for the v1-layout 50001 ("Invalid time value"): v1 persists

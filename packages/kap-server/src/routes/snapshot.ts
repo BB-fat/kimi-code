@@ -46,6 +46,7 @@ import { defineRoute } from '../middleware/defineRoute';
 import {
   SnapshotNotFoundError,
   SnapshotTimeoutError,
+  deriveSpineTree,
   loadSnapshotConfig,
 } from '../services/snapshot';
 import type { ISnapshotReader } from '../services/snapshot';
@@ -172,15 +173,18 @@ async function readViaLegacyAssembly(
 
   // Messages — most recent page of the main agent's live history.
   const main = handle.accessor.get(IAgentLifecycleService).get('main');
+  const history = main !== undefined ? main.accessor.get(IAgentContextMemoryService).get() : [];
   let items: Message[] = [];
   let hasMore = false;
   if (main !== undefined) {
-    const history = main.accessor.get(IAgentContextMemoryService).get();
     hasMore = history.length > SNAPSHOT_MESSAGE_PAGE_SIZE;
     const page = history.slice(-SNAPSHOT_MESSAGE_PAGE_SIZE);
     const offset = history.length - page.length;
     items = page.map((msg, i) => toProtocolMessage(sessionId, offset + i, msg, meta.createdAt));
   }
+  // Derived on the FULL history, not the sliced page — early spine
+  // transitions are exactly what the client cannot replay itself.
+  const spineTree = deriveSpineTree(history, items);
   const currentPromptId =
     snapState.inFlightTurn === null ? undefined : readCurrentPromptId(main);
   const inFlightTurn = attachCurrentPromptIdToInFlight(snapState.inFlightTurn, currentPromptId);
@@ -201,6 +205,7 @@ async function readViaLegacyAssembly(
     messages: { items, has_more: hasMore },
     in_flight_turn: inFlightTurn,
     subagents: snapState.subagents,
+    spine_tree: spineTree,
     pending_approvals: pendingApprovals,
     pending_questions: pendingQuestions,
   };

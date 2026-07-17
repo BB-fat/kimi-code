@@ -581,6 +581,27 @@ export interface WireInFlightTurn {
   current_prompt_id?: string;
 }
 
+/** One node of the server-derived spine task tree (kap-server's
+ *  `spineTreeNodeSchema`), flattened with snake_case keys. */
+export interface WireSpineTreeNode {
+  id: string;
+  parent_id: string | null;
+  title: string;
+  memory: string;
+  token_cost: number;
+  status: 'active' | 'closed' | 'canceled';
+  error: string | null;
+}
+
+/** Seed of the session's FULL spine task tree, derived server-side from the
+ *  complete (pre-window) transcript. `covered_through_id` is the wire id of
+ *  the last message in `messages.items`: the client folds only messages
+ *  arriving after it. Absent on older servers. */
+export interface WireSpineTreeSeed {
+  covered_through_id: string | null;
+  nodes: WireSpineTreeNode[];
+}
+
 /** `GET /sessions/{sid}/snapshot` — atomic rebuild state at a watermark. */
 export interface WireSessionSnapshot {
   as_of_seq: number;
@@ -590,6 +611,8 @@ export interface WireSessionSnapshot {
   in_flight_turn: WireInFlightTurn | null;
   /** Live subagent roster at the watermark (absent on older servers). */
   subagents?: WireTask[];
+  /** Full-transcript spine tree seed (absent on older servers). */
+  spine_tree?: WireSpineTreeSeed;
   pending_approvals: WireApprovalRequest[];
   pending_questions: WireQuestionRequest[];
 }

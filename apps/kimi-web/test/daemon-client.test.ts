@@ -208,6 +208,77 @@ describe('DaemonKimiWebApi.getSessionGoal', () => {
   });
 });
 
+describe('DaemonKimiWebApi.getSessionSnapshot', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const WIRE_SNAPSHOT_BASE = {
+    as_of_seq: 42,
+    epoch: 'epoch-1',
+    session: {
+      id: 'sess_1',
+      title: 't',
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+      busy: false,
+      archived: false,
+      metadata: { cwd: '/tmp' },
+      agent_config: { model: 'kimi' },
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+        total_cost_usd: 0,
+        context_tokens: 0,
+        context_limit: 0,
+        turn_count: 0,
+      },
+      permission_rules: [],
+      message_count: 2,
+      last_seq: 42,
+    },
+    messages: { items: [], has_more: false },
+    in_flight_turn: null,
+    pending_approvals: [],
+    pending_questions: [],
+  };
+
+  it('maps the spine_tree seed explicitly to its camelCase app view', async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      envelope({
+        ...WIRE_SNAPSHOT_BASE,
+        spine_tree: {
+          covered_through_id: 'msg_sess_1_000200',
+          nodes: [
+            { id: 'n1', parent_id: null, title: 'early task', memory: 'm1', token_cost: 12, status: 'closed', error: null },
+            { id: 'n2', parent_id: 'n1', title: 'child task', memory: '', token_cost: 0, status: 'active', error: 'boom' },
+          ],
+        },
+      }),
+    );
+    const snap = await createApi().getSessionSnapshot('sess_1');
+    expect(snap.spineTree).toEqual({
+      coveredThroughId: 'msg_sess_1_000200',
+      nodes: [
+        { id: 'n1', parentId: null, title: 'early task', memory: 'm1', tokenCost: 12, status: 'closed', error: null },
+        { id: 'n2', parentId: 'n1', title: 'child task', memory: '', tokenCost: 0, status: 'active', error: 'boom' },
+      ],
+    });
+  });
+
+  it('leaves spineTree undefined when an older server omits spine_tree', async () => {
+    vi.mocked(fetch).mockResolvedValue(envelope(WIRE_SNAPSHOT_BASE));
+    const snap = await createApi().getSessionSnapshot('sess_1');
+    expect(snap.spineTree).toBeUndefined();
+  });
+});
+
 describe('DaemonKimiWebApi.connectEvents', () => {
   let connection: KimiEventConnection | undefined;
 

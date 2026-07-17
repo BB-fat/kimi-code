@@ -65,6 +65,7 @@ import type {
   AppSession,
   AppSessionRuntimeStatus,
   AppSkill,
+  AppSpineTreeSeed,
   AppTask,
   AppWarning,
   AppWorkspace,
@@ -380,6 +381,10 @@ export interface ExtendedState extends KimiClientState {
   messagesHasMoreBySession: Record<string, boolean>;
   /** True when the last older-message fetch failed for a session. */
   messagesLoadMoreErrorBySession: Record<string, boolean>;
+  /** Server-derived full spine task tree seed installed from the session
+      snapshot, per session. Absent entries mean the server sent no seed (old
+      server) and the spine fold falls back to replaying the message window. */
+  spineSeedBySession: Record<string, AppSpineTreeSeed>;
   /** Whether the server has more sessions than currently loaded, per workspace. */
   sessionsHasMoreByWorkspace: Record<string, boolean>;
   /** True while the next page of sessions is being fetched for a workspace. */
@@ -431,6 +436,7 @@ const rawState: ExtendedState = reactive({
   messagesLoadingMoreBySession: {},
   messagesHasMoreBySession: {},
   messagesLoadMoreErrorBySession: {},
+  spineSeedBySession: {},
   sessionsHasMoreByWorkspace: {},
   sessionsLoadingMoreByWorkspace: {},
   sessionsCursorByWorkspace: {},
@@ -613,6 +619,7 @@ function forgetSession(sessionId: string): void {
   delete rawState.messagesLoadingMoreBySession[sessionId];
   delete rawState.messagesHasMoreBySession[sessionId];
   delete rawState.messagesLoadMoreErrorBySession[sessionId];
+  delete rawState.spineSeedBySession[sessionId];
   delete epochBySession[sessionId];
   sessionsRequiringSnapshot.delete(sessionId);
   sessionsRetryingStaleSnapshot.delete(sessionId);
@@ -1416,6 +1423,16 @@ async function syncSessionFromSnapshot(sessionId: string): Promise<SyncSessionRe
         rawState.tasksBySession[sessionId] ?? [],
       ),
     };
+    // Install the server-derived FULL spine tree seed: the fold then replays
+    // only transitions in messages newer than `coveredThroughId`, so nodes
+    // predating the snapshot window are restored instead of re-derived.
+    // Older servers omit the field — keep the legacy window-only replay.
+    if (snap.spineTree !== undefined) {
+      rawState.spineSeedBySession = {
+        ...rawState.spineSeedBySession,
+        [sessionId]: snap.spineTree,
+      };
+    }
     rawState.messagesHasMoreBySession = {
       ...rawState.messagesHasMoreBySession,
       [sessionId]: snap.hasMoreMessages,
@@ -2006,14 +2023,21 @@ const todos = computed<TodoView[]>(() => {
   return latestTodos(rawState.messagesBySession[sid] ?? []);
 });
 
-/** Spine task tree of the active session, mirrored from the transcript's
-    spine control tools. Persists as all-done history after the last close;
-    empty only when the session never used spine — the dock then falls back
-    to the flat todo list. */
+/** Spine task tree of the active session. When the snapshot carried a
+    server-derived seed (tree from the FULL transcript), the fold starts from
+    it and replays only transitions newer than its `coveredThroughId`
+    watermark; otherwise it replays the loaded message window (legacy). Either
+    way the computed re-runs on every live message append, so transitions keep
+    streaming in between snapshot installs. Persists as all-done history after
+    the last close; empty only when the session never used spine — the dock
+    then falls back to the flat todo list. */
 const todoTree = computed<TodoTreeNode[]>(() => {
   const sid = rawState.activeSessionId;
   if (!sid) return [];
-  return spineTreeFromMessages(rawState.messagesBySession[sid] ?? []);
+  return spineTreeFromMessages(
+    rawState.messagesBySession[sid] ?? [],
+    rawState.spineSeedBySession[sid],
+  );
 });
 
 /** Live compaction state of the active session (present only while running). */

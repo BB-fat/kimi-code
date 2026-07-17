@@ -22,6 +22,9 @@ import {
   spineNext,
   spineOpen,
   spineRootCompact,
+  spineTreeViewFromState,
+  type SpineTreeNodeView,
+  type SpineTreeView,
   type WireRecord,
 } from '#/index';
 
@@ -523,6 +526,120 @@ describe('Spine projection fold', () => {
   });
 });
 
+describe('Spine tree view projection', () => {
+  beforeEach(() => {
+    vi.stubEnv(MASTER_ENV, '0');
+    vi.stubEnv(SPINE_ENV, '1');
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('projects an empty transcript as the synthetic root epoch and startup node alone', () => {
+    expect(spineTreeViewFromState(deriveSpineState([]))).toStrictEqual({
+      nodes: [nodeView('1', 'root epoch 1', false, [nodeView('1.1', 'startup', false)])],
+    });
+  });
+
+  it('projects open and closed nodes in open order and skips rejected transitions', () => {
+    const ctx = testAgent();
+    buildNextChainHistory(ctx);
+
+    const view = spineTreeViewFromState(ctx.get(IAgentSpineService).currentState());
+
+    expect(view).toStrictEqual({
+      nodes: [
+        nodeView('1', 'root epoch 1', false, [
+          nodeView('1.1', 'startup', false, [
+            nodeView('1.1.1', 'task A', true),
+            nodeView('1.1.2', 'task B', true),
+            // The rejected close left the cursor open; the rejected open never
+            // landed at all (no 1.1.4).
+            nodeView('1.1.3', 'task C', false),
+          ]),
+        ]),
+      ],
+    });
+  });
+
+  it('marks a superseded root epoch closed while the current epoch stays open', () => {
+    const ctx = testAgent();
+    append(ctx, userMessage('start'));
+    append(ctx, createCompactionSummaryMessage(buildCompactionSummaryText('epoch summary')));
+    append(ctx, userMessage('new epoch work'));
+
+    const view = spineTreeViewFromState(ctx.get(IAgentSpineService).currentState());
+
+    expect(view.nodes.map((node) => `${node.id}:${String(node.closed)}`)).toEqual([
+      '1:true',
+      '2:false',
+    ]);
+  });
+
+  it('prices nodes and resolves archive paths only from the optional gauges input', () => {
+    const ctx = testAgent();
+    append(ctx, userMessage('start'));
+    append(ctx, assistantToolCall('o1', 'spine_open', JSON.stringify({ summary: 'task A' })));
+    append(ctx, spineAcceptedReceipt('o1'));
+    append(ctx, assistantToolCall('c1', 'spine_close', JSON.stringify({ memory: 'did A' })));
+    append(ctx, spineAcceptedReceipt('c1'));
+    append(ctx, assistantToolCall('o2', 'spine_open', JSON.stringify({ summary: 'task B' })));
+    append(ctx, spineAcceptedReceipt('o2'));
+    const state = ctx.get(IAgentSpineService).currentState();
+
+    // Without the live inputs the projection is structural only.
+    const bare = spineTreeViewFromState(state);
+    for (const id of ['1', '1.1', '1.1.1', '1.1.2']) {
+      const node = findViewNode(bare, id);
+      expect(node?.tokenCost).toBeUndefined();
+      expect(node?.archivePath).toBeUndefined();
+    }
+
+    const view = spineTreeViewFromState(state, {
+      currentUsed: 1_000,
+      baselines: new Map([
+        ['1.1', 100],
+        ['1.1.1', 200],
+        ['1.1.2', 1_600],
+      ]),
+      finals: new Map([['1.1.1', 800]]),
+      resolveArchivePath: (id, epoch, closed) =>
+        epoch || !closed ? undefined : `archive-${id}.md`,
+    });
+
+    // A closed node prices as closing high-water mark minus open baseline.
+    expect(findViewNode(view, '1.1.1')).toMatchObject({
+      closed: true,
+      tokenCost: 600,
+      archivePath: 'archive-1.1.1.md',
+    });
+    // An open node prices against the live gauge, clamped at zero.
+    expect(findViewNode(view, '1.1.2')).toMatchObject({ closed: false, tokenCost: 0 });
+    expect(findViewNode(view, '1.1.2')?.archivePath).toBeUndefined();
+    expect(findViewNode(view, '1.1')?.tokenCost).toBe(900);
+    // No baseline recorded for the synthetic root epoch: no cost.
+    expect(findViewNode(view, '1')?.tokenCost).toBeUndefined();
+  });
+
+  it('renders the service tree through the same projection', () => {
+    const ctx = testAgent();
+    buildNextChainHistory(ctx);
+    const spine = ctx.get(IAgentSpineService);
+
+    const view = spineTreeViewFromState(spine.currentState());
+    const rendered = spine.renderTree().split('\n');
+    const renderedIds = rendered.map((line) => /^(\S+) \[/.exec(line.trimStart())?.[1]);
+
+    expect(renderedIds).toEqual(flattenViewNodes(view).map((node) => node.id));
+    for (const node of flattenViewNodes(view)) {
+      const line = rendered.find((candidate) =>
+        candidate.trimStart().startsWith(`${node.id} [`),
+      );
+      expect(line).toContain(node.closed ? '[closed' : '[open');
+    }
+  });
+});
+
 describe('Spine logical session conformance', () => {
   beforeEach(() => {
     vi.stubEnv(MASTER_ENV, '0');
@@ -970,6 +1087,65 @@ function spineAcceptedReceipt(toolCallId: string): ContextMessage {
     toolCalls: [],
     toolCallId,
   };
+}
+
+function spineRejectedReceipt(toolCallId: string): ContextMessage {
+  return {
+    role: 'tool',
+    content: [{ type: 'text', text: 'rejected: nope' }],
+    toolCalls: [],
+    toolCallId,
+    isError: true,
+  };
+}
+
+/**
+ * Open A → close A → open B → next C, then a rejected open and a rejected
+ * close: the derivation must apply exactly the accepted chain (1.1.1 closed,
+ * 1.1.2 closed, 1.1.3 open) and leave the cursor open at C.
+ */
+function buildNextChainHistory(ctx: TestAgentContext): void {
+  append(ctx, userMessage('start'));
+  append(ctx, assistantToolCall('o1', 'spine_open', JSON.stringify({ summary: 'task A' })));
+  append(ctx, spineAcceptedReceipt('o1'));
+  append(ctx, assistantToolCall('c1', 'spine_close', JSON.stringify({ memory: 'did A' })));
+  append(ctx, spineAcceptedReceipt('c1'));
+  append(ctx, assistantToolCall('o2', 'spine_open', JSON.stringify({ summary: 'task B' })));
+  append(ctx, spineAcceptedReceipt('o2'));
+  append(
+    ctx,
+    assistantToolCall('n1', 'spine_next', JSON.stringify({ summary: 'task C', memory: 'did B' })),
+  );
+  append(ctx, spineAcceptedReceipt('n1'));
+  append(ctx, assistantToolCall('o3', 'spine_open', JSON.stringify({ summary: 'task D' })));
+  append(ctx, spineRejectedReceipt('o3'));
+  append(ctx, assistantToolCall('c2', 'spine_close', JSON.stringify({ memory: 'did C' })));
+  append(ctx, spineRejectedReceipt('c2'));
+}
+
+function nodeView(
+  id: string,
+  summary: string,
+  closed: boolean,
+  children: readonly SpineTreeNodeView[] = [],
+): SpineTreeNodeView {
+  return { id, summary, closed, archivePath: undefined, tokenCost: undefined, children };
+}
+
+function flattenViewNodes(view: SpineTreeView): SpineTreeNodeView[] {
+  const out: SpineTreeNodeView[] = [];
+  const walk = (nodes: readonly SpineTreeNodeView[]): void => {
+    for (const node of nodes) {
+      out.push(node);
+      walk(node.children);
+    }
+  };
+  walk(view.nodes);
+  return out;
+}
+
+function findViewNode(view: SpineTreeView, id: string): SpineTreeNodeView | undefined {
+  return flattenViewNodes(view).find((node) => node.id === id);
 }
 
 function toolCallPart(

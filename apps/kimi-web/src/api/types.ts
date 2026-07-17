@@ -518,6 +518,28 @@ export interface AppInFlightTurn {
   promptId?: string;
 }
 
+/** One node of the server-derived spine task tree (camelCase view of the
+ *  wire `spine_tree` node). The seed's nodes span the FULL transcript, not
+ *  just the snapshot message window — transitions predating the window are
+ *  exactly what the client cannot replay itself. */
+export interface AppSpineTreeNode {
+  id: string;
+  parentId: string | null;
+  title: string;
+  memory: string;
+  tokenCost: number;
+  status: 'active' | 'closed' | 'canceled';
+  error: string | null;
+}
+
+/** Seed of the session's full spine task tree. `coveredThroughId` is the
+ *  wire id of the last message the derivation covered (`null` for an empty
+ *  transcript): the client replays only transitions in messages after it. */
+export interface AppSpineTreeSeed {
+  coveredThroughId: string | null;
+  nodes: AppSpineTreeNode[];
+}
+
 /**
  * IM-style initial sync result: everything needed to rebuild a session's UI
  * state, consistent at `asOfSeq`. The standard flow is
@@ -533,6 +555,9 @@ export interface AppSessionSnapshot {
   inFlightTurn: AppInFlightTurn | null;
   /** Live subagent roster at the watermark — rebuilds swarm cards on refresh. */
   subagents: AppTask[];
+  /** Full-transcript spine tree seed (absent when the server is too old —
+   *  clients then replay the message window only, the legacy behavior). */
+  spineTree?: AppSpineTreeSeed;
   pendingApprovals: AppApprovalRequest[];
   pendingQuestions: AppQuestionRequest[];
 }

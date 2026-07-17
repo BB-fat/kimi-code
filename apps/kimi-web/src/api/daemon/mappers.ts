@@ -16,6 +16,7 @@ import type {
   AppQuestionRequest,
   AppSession,
   AppSessionUsage,
+  AppSpineTreeSeed,
   AppTask,
   AppTaskStatus,
   AppWorkspace,
@@ -46,6 +47,7 @@ import type {
   WireQuestionResponse,
   WireSession,
   WireSessionUsage,
+  WireSpineTreeSeed,
   WireWorkspace,
   WireEvent,
   WireConfig,
@@ -354,6 +356,27 @@ export function toWireQuestionResponse(input: QuestionResponse): WireQuestionRes
     answers: wireAnswers,
     method: input.method,
     note: input.note,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Spine tree seed mapper
+// ---------------------------------------------------------------------------
+
+/** Explicit snake_case → camelCase mapping of the snapshot's spine seed —
+ *  the fold consumes the local view, never the wire shape. */
+export function toAppSpineTreeSeed(wire: WireSpineTreeSeed): AppSpineTreeSeed {
+  return {
+    coveredThroughId: wire.covered_through_id,
+    nodes: wire.nodes.map((node) => ({
+      id: node.id,
+      parentId: node.parent_id,
+      title: node.title,
+      memory: node.memory,
+      tokenCost: node.token_cost,
+      status: node.status,
+      error: node.error,
+    })),
   };
 }
 

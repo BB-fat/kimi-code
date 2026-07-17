@@ -85,11 +85,13 @@ import { foldSpine, type SpineFoldStatus } from './spineFold';
 import { type SpineNode, type SpineState } from './spineOps';
 import {
   childNodeId,
+  epochRootIds,
   isRootEpoch,
   nextChildIndex,
   parentNodeId,
   renderTree,
-  type SpineTreeNodeView,
+  spineNodeViewFromState,
+  type SpineTreeViewInput,
 } from './spineTree';
 
 const REJECT_DISABLED: SpineTransitionResult = {
@@ -293,11 +295,11 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
 
   renderTree(): string {
     const state = this.state();
-    const used = this.contextSize.get().size;
+    const input = this.treeViewInput();
     return renderTree({
       cursorId: this.cursorId(),
       rootIds: epochRootIds(state),
-      resolve: (id) => this.nodeView(state, id, used),
+      resolve: (id) => spineNodeViewFromState(state, id, input),
     });
   }
 
@@ -384,21 +386,17 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     return topOf(this.derivedState());
   }
 
-  private nodeView(state: SpineState, id: string, used: number): SpineTreeNodeView | undefined {
-    const node = state.nodes[id];
-    if (node === undefined) return undefined;
-    const epoch = isRootEpoch(id);
-    const supersededEpoch = epoch && id !== String(state.rootEpoch);
-    const closed = node.closedAt !== undefined || supersededEpoch;
+  /**
+   * The live gauges the pure tree projection prices nodes with: the ephemeral
+   * baselines/finals recorded at accept time, and the deterministic archive
+   * paths (suppressed for this session's failed writes).
+   */
+  private treeViewInput(): SpineTreeViewInput {
     return {
-      id: node.id,
-      summary: node.summary,
-      closed,
-      archivePath: this.nodeArchivePath(id, epoch, closed),
-      tokenCost: nodeTokenCost(node, used, this.baselines, this.finals),
-      children: node.children
-        .map((childId) => this.nodeView(state, childId, used))
-        .filter((child): child is SpineTreeNodeView => child !== undefined),
+      currentUsed: this.contextSize.get().size,
+      baselines: this.baselines,
+      finals: this.finals,
+      resolveArchivePath: (id, epoch, closed) => this.nodeArchivePath(id, epoch, closed),
     };
   }
 
@@ -510,37 +508,12 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
   }
 }
 
-function epochRootIds(state: SpineState): readonly string[] {
-  return Object.keys(state.nodes)
-    .filter((id) => isRootEpoch(id))
-    .toSorted((a, b) => Number(a) - Number(b));
-}
-
 function topOf(state: SpineState): string {
   const top = state.openStack.at(-1);
   if (top === undefined) {
     throw new Error('Spine openStack is empty; the tree must always contain a root epoch.');
   }
   return top;
-}
-
-// Net projected-context growth attributable to the node: the gauge delta
-// between its open baseline and its closing high-water mark (or the live
-// gauge while still open). Folds committed inside the node can make the net
-// negative — the tree view only needs the "no lasting cost" signal there, so
-// it clamps at zero. Nodes without a recorded baseline (root epochs, startup
-// nodes, sessions restored before the gauges were recorded) render no cost.
-function nodeTokenCost(
-  node: SpineNode,
-  currentUsed: number,
-  baselines: ReadonlyMap<string, number>,
-  finals: ReadonlyMap<string, number>,
-): number | undefined {
-  const baseline = baselines.get(node.id);
-  if (baseline === undefined) return undefined;
-  const end = node.closedAt === undefined ? currentUsed : finals.get(node.id);
-  if (end === undefined) return undefined;
-  return Math.max(0, end - baseline);
 }
 
 function messageText(message: ContextMessage): string {

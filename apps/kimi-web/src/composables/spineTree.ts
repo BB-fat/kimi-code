@@ -17,8 +17,18 @@
 // to the flat todo list). Rejected transitions (error results) never touch
 // the tree. Differs from the TUI's spine-projection.ts, which returns [] at
 // the root epoch.
+//
+// Sessions resumed from a snapshot only hold the most recent ~100 messages,
+// so transitions predating that window are unreplayable client-side. When
+// the snapshot carries a server-derived seed (AppSpineTreeSeed — the tree
+// derived from the FULL transcript), the fold starts from it and replays
+// only messages NEWER than the seed's coveredThroughId watermark; older
+// pages loaded on demand stay out of the replay, which also keeps repeated
+// folds idempotent. Wire message ids embed the zero-padded transcript index
+// (`msg_<sessionId>_<index>`), so "newer" is a numeric-suffix comparison;
+// ids outside that grammar (client-synthesized live messages) always replay.
 
-import type { AppMessage } from '../api/types';
+import type { AppMessage, AppSpineTreeSeed } from '../api/types';
 import type { TodoTreeNode } from '../types';
 import { normalizeToolName } from '../lib/toolMeta';
 
@@ -123,13 +133,81 @@ function projectTree(nodes: SpineNode[], cursorStack: number[]): TodoTreeNode[] 
   return (childrenByParent.get(null) ?? []).map(build);
 }
 
-export function spineTreeFromMessages(messages: AppMessage[]): TodoTreeNode[] {
-  const nodes: SpineNode[] = [];
+/** Transcript index embedded in a wire message id (`msg_<sid>_<index>`, the
+ *  index zero-padded to ≥6 digits). Undefined for ids outside that grammar —
+ *  e.g. the client-side ULIDs stamped on live streaming messages — which are
+ *  therefore always treated as newer than any watermark. */
+const WIRE_ID_INDEX = /^msg_.+_(\d{6,})$/;
+function transcriptIndexOf(id: string): number | undefined {
+  const match = WIRE_ID_INDEX.exec(id);
+  return match === null ? undefined : Number(match[1]);
+}
+
+/** Convert the seed's flat parent-linked node list into the fold's initial
+ *  state. The cursor stack is the chain of nodes the server still reports
+ *  `active`, ordered root → cursor; `closed`/`canceled` nodes both fold as
+ *  closed (the web tree has no canceled rendering — canceled is terminal). */
+function seedInitialState(seed: AppSpineTreeSeed): { nodes: SpineNode[]; cursorStack: number[] } {
+  const indexById = new Map<string, number>();
+  const nodes: SpineNode[] = seed.nodes.map((node, index) => {
+    indexById.set(node.id, index);
+    return { summary: node.title, parentIndex: null, closed: node.status !== 'active' };
+  });
+  for (const [index, node] of seed.nodes.entries()) {
+    nodes[index]!.parentIndex =
+      node.parentId === null ? null : (indexById.get(node.parentId) ?? null);
+  }
+  const depthOf = (index: number): number => {
+    let depth = 0;
+    let current = index;
+    while (nodes[current]!.parentIndex !== null) {
+      current = nodes[current]!.parentIndex!;
+      depth += 1;
+      if (depth > nodes.length) return depth; // malformed links: never loop
+    }
+    return depth;
+  };
+  const cursorStack = seed.nodes
+    .map((_, index) => index)
+    .filter((index) => seed.nodes[index]!.status === 'active')
+    .sort((a, b) => depthOf(a) - depthOf(b));
+  return { nodes, cursorStack };
+}
+
+export function spineTreeFromMessages(messages: AppMessage[], seed?: AppSpineTreeSeed): TodoTreeNode[] {
+  let nodes: SpineNode[] = [];
   /** Ancestor chain root → cursor as node indexes; empty at the root epoch. */
-  const cursorStack: number[] = [];
+  let cursorStack: number[] = [];
+  /** Transcript index the seed covers; messages at or below it never replay. */
+  let coveredIndex: number | undefined;
+  if (seed !== undefined) {
+    const watermark = seed.coveredThroughId === null ? undefined : transcriptIndexOf(seed.coveredThroughId);
+    if (seed.coveredThroughId !== null && watermark === undefined) {
+      // A watermark outside the wire id grammar cannot order messages against
+      // the seed; replaying on top of the seed would double-apply transitions,
+      // so fall back to the legacy message-only fold.
+      seed = undefined;
+    } else {
+      ({ nodes, cursorStack } = seedInitialState(seed));
+      // Undefined watermark (coveredThroughId === null) means an empty
+      // transcript at snapshot time: replay from scratch, as without a seed.
+      coveredIndex = watermark;
+    }
+  }
   const pending = new Map<string, { name: SpineControlToolName; args: Record<string, unknown> }>();
+  /** Continuation-mode guard: each message id folds at most once, so feeding
+      the same batch twice cannot duplicate nodes. */
+  const seenMessageIds = new Set<string>();
 
   for (const msg of messages) {
+    if (seed !== undefined) {
+      const index = transcriptIndexOf(msg.id);
+      // The seed already covers the window and everything before it: skip
+      // snapshot window messages and older pages alike.
+      if (index !== undefined && coveredIndex !== undefined && index <= coveredIndex) continue;
+      if (seenMessageIds.has(msg.id)) continue;
+      seenMessageIds.add(msg.id);
+    }
     for (const c of msg.content) {
       if (c.type === 'toolUse') {
         const name = normalizeToolName(c.toolName);

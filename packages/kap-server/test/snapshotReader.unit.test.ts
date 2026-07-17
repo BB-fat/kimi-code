@@ -14,15 +14,19 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  ACCEPTED_OUTPUT,
   ISessionIndex,
   ISessionLifecycleService,
   IWorkspaceRegistry,
+  SPINE_TOOL_CLOSE,
+  SPINE_TOOL_OPEN,
   type ContextMessage,
   type SessionSummary,
 } from '@moonshot-ai/agent-core-v2';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  deriveSpineTree,
   loadSnapshotConfig,
   readWireRecords,
   SnapshotNotFoundError,
@@ -97,6 +101,20 @@ async function makeFixtureAsync(opts?: { cacheLimit?: number }): Promise<Fixture
 
 function userMessage(text: string): ContextMessage {
   return { role: 'user', content: [{ type: 'text', text }], toolCalls: [] };
+}
+
+/** Assistant message carrying a spine control-tool call. */
+function spineCall(callId: string, name: string, args: Record<string, string>): ContextMessage {
+  return {
+    role: 'assistant',
+    content: [],
+    toolCalls: [{ type: 'function', id: callId, name, arguments: JSON.stringify(args) }],
+  };
+}
+
+/** Tool receipt for a spine call; `text` defaults to the accepted carrier. */
+function spineReceipt(callId: string, text: string = ACCEPTED_OUTPUT): ContextMessage {
+  return { role: 'tool', content: [{ type: 'text', text }], toolCalls: [], toolCallId: callId };
 }
 
 async function seedSession(
@@ -485,6 +503,68 @@ describe('SnapshotReader.read', () => {
     const snap = await f.reader.read('sess_shrink');
     expect(snap.messages.items).toHaveLength(1);
     expect((snap.messages.items[0]!.content[0] as { text: string }).text).toBe('only-one');
+  });
+
+  it('seeds spine_tree from the FULL transcript when spine transitions predate the page window', async () => {
+    const f = await makeFixtureAsync();
+    await seedSession(f, 'sess_spine_paged');
+    await writeWire(f.sessionDir('sess_spine_paged'), [
+      // All spine transitions sit at the head of the transcript, far outside
+      // the 100-message page the snapshot serves.
+      { type: 'context.append_message', message: spineCall('call_open_1', SPINE_TOOL_OPEN, { summary: 'early task' }) },
+      { type: 'context.append_message', message: spineReceipt('call_open_1') },
+      { type: 'context.append_message', message: spineCall('call_close_1', SPINE_TOOL_CLOSE, { memory: 'early memory' }) },
+      { type: 'context.append_message', message: spineReceipt('call_close_1') },
+      ...Array.from({ length: 149 }, (_, i) => ({
+        type: 'context.append_message' as const,
+        message: userMessage(`m${i}`),
+      })),
+    ]);
+    const snap = await f.reader.read('sess_spine_paged');
+    expect(snap.messages.items).toHaveLength(100);
+    expect(snap.messages.has_more).toBe(true);
+    const tree = snap.spine_tree;
+    expect(tree).toBeDefined();
+    // covered_through_id is the wire id of the LAST message in the sliced
+    // page — the client's live-replay watermark.
+    expect(tree!.covered_through_id).toBe(snap.messages.items.at(-1)!.id);
+    const early = tree!.nodes.find((n) => n.title === 'early task');
+    expect(early).toBeDefined();
+    expect(early!.status).toBe('closed');
+    expect(early!.memory).toBe('early memory');
+    expect(typeof early!.token_cost).toBe('number');
+    expect(early!.error).toBeNull();
+  });
+
+  it('returns an empty spine_tree node list for a session without spine activity', async () => {
+    const f = await makeFixtureAsync();
+    await seedSession(f, 'sess_no_spine');
+    await writeWire(f.sessionDir('sess_no_spine'), [
+      { type: 'context.append_message', message: userMessage('plain one') },
+      { type: 'context.append_message', message: userMessage('plain two') },
+    ]);
+    const snap = await f.reader.read('sess_no_spine');
+    expect(snap.spine_tree).toEqual({
+      covered_through_id: snap.messages.items.at(-1)!.id,
+      nodes: [],
+    });
+  });
+
+  it('degrades a dirty spine sequence (non-accepted receipt) without failing the snapshot', async () => {
+    const f = await makeFixtureAsync();
+    await seedSession(f, 'sess_spine_dirty');
+    await writeWire(f.sessionDir('sess_spine_dirty'), [
+      { type: 'context.append_message', message: spineCall('call_bad', SPINE_TOOL_OPEN, { summary: 'lost task' }) },
+      // The receipt is NOT the accepted carrier — the transition does not happen.
+      { type: 'context.append_message', message: spineReceipt('call_bad', 'rejected — stale cursor') },
+      { type: 'context.append_message', message: userMessage('after') },
+    ]);
+    const snap = await f.reader.read('sess_spine_dirty');
+    expect(snap.messages.items).toHaveLength(3);
+    expect(snap.spine_tree).toEqual({
+      covered_through_id: snap.messages.items.at(-1)!.id,
+      nodes: [],
+    });
   });
 });
 

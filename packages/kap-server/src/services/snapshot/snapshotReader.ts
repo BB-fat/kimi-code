@@ -22,25 +22,35 @@ import { readFile, stat as fsStat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import {
+  deriveSpineState,
+  epochStartupNodeId,
   IAgentLifecycleService,
   IAgentPromptService,
   ISessionIndex,
   ISessionInteractionService,
   ISessionLifecycleService,
+  isRootEpoch,
   IWorkspaceRegistry,
   normalizeSessionMeta,
   reduceContextTranscript,
+  spineTreeViewFromState,
   toProtocolMessage,
   type ContextMessage,
   type Scope,
   type SessionMeta,
+  type SpineTreeNodeView,
 } from '@moonshot-ai/agent-core-v2';
 
 import { toWireApproval } from '../../routes/approvals';
 import { toWireQuestion } from '../../routes/questions';
 import { resolveSessionFacts, toWireSession } from '../../routes/sessions';
 import { type SessionEventBroadcaster } from '../../transport/ws/v1/sessionEventBroadcaster';
-import type { InFlightTurn, SessionSnapshotResponse } from '../../protocol/rest-snapshot';
+import type {
+  InFlightTurn,
+  SessionSnapshotResponse,
+  SpineTreeNode,
+  SpineTreeView,
+} from '../../protocol/rest-snapshot';
 import { SnapshotNotFoundError } from './snapshot';
 import type { ISnapshotReader } from './snapshot';
 import { type SnapshotConfig } from './snapshotConfig';
@@ -122,6 +132,10 @@ export class SnapshotReader implements ISnapshotReader {
       resolveSessionFacts(core, sid),
     );
 
+    // Derived on the FULL transcript (`full`), not the sliced page — early
+    // spine transitions are exactly what the client cannot replay itself.
+    const spineTree = deriveSpineTree(full, items);
+
     const inFlightTurn = this.attachCurrentPromptId(sid, live, snapState.inFlightTurn);
     const { approvals, questions } = this.readPending(sid, live);
 
@@ -143,6 +157,7 @@ export class SnapshotReader implements ISnapshotReader {
       messages: { items, has_more: hasMore },
       in_flight_turn: inFlightTurn,
       subagents: snapState.subagents,
+      spine_tree: spineTree,
       pending_approvals: approvals,
       pending_questions: questions,
     };
@@ -274,6 +289,71 @@ export class SnapshotReader implements ISnapshotReader {
 // ---------------------------------------------------------------------------
 // Pure reduction + parsing helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Derive the spine task tree from the COMPLETE (pre-window) transcript and
+ * adapt the engine's recursive camelCase view (`spineTreeViewFromState`) to
+ * the flat snake_case wire shape.
+ *
+ * The engine view includes synthetic scaffolding — root-epoch nodes and each
+ * epoch's `startup` node — that a client replaying raw spine transitions
+ * never produces; those are flattened away (their real children re-attach to
+ * the nearest emitted ancestor) so a session without spine activity seeds an
+ * empty node list. Node memory is read from the derived state verbatim; the
+ * derivation supplies no token gauges, so `token_cost` degrades to 0 (the
+ * same trade-off as post-restore) and `error` is always null.
+ *
+ * Fail-open by contract: `deriveSpineState` already treats dirty witness
+ * sequences as silence (a transition whose accepted receipt never landed, or
+ * one the guards reject, simply does not happen — it never throws on those),
+ * and any residual failure must not fail the snapshot, so this returns
+ * `undefined` (client falls back to replaying the messages window).
+ *
+ * `covered_through_id` is the wire id of the LAST message in the sliced
+ * `items` page — never a full-transcript index. Web message ids embed the
+ * page offset (`${sessionId}-${index}`), so an index computed against the
+ * full transcript would misalign the client's coverage watermark and make it
+ * treat nearly the whole tree as already covered, skipping live replay.
+ */
+export function deriveSpineTree(
+  messages: readonly ContextMessage[],
+  items: readonly { id: string }[],
+): SpineTreeView | undefined {
+  try {
+    const state = deriveSpineState(messages);
+    const view = spineTreeViewFromState(state);
+    const nodes: SpineTreeNode[] = [];
+    const walk = (views: readonly SpineTreeNodeView[], parentId: string | null): void => {
+      for (const node of views) {
+        // Synthetic scaffolding (root epoch / epoch startup node): skip but
+        // keep walking, re-attaching real children to the emitted ancestor.
+        if (isRootEpoch(node.id) || node.id === epochStartupNodeId(epochOf(node.id))) {
+          walk(node.children, parentId);
+          continue;
+        }
+        nodes.push({
+          id: node.id,
+          parent_id: parentId,
+          title: node.summary,
+          memory: state.nodes[node.id]?.memory ?? '',
+          token_cost: node.tokenCost ?? 0,
+          status: node.closed ? 'closed' : 'active',
+          error: null,
+        });
+        walk(node.children, node.id);
+      }
+    };
+    walk(view.nodes, null);
+    return { covered_through_id: items.at(-1)?.id ?? null, nodes };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Leading epoch segment of a spine node id (`<epoch>.<n>…` grammar). */
+function epochOf(id: string): number {
+  return Number(id.split('.')[0]);
+}
 
 interface ContextRecord {
   readonly type: string;
