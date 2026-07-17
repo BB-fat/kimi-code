@@ -23,7 +23,7 @@ import type {
   ProviderCatalogItem,
   RefreshProviderModelsResponse,
   SetDefaultModelResponse,
-} from '@moonshot-ai/protocol';
+} from './modelCatalog';
 
 import { InstantiationType } from '#/_base/di/extensions';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
@@ -37,6 +37,7 @@ import {
   IProviderService,
   type OAuthRef,
   type ProviderConfig,
+  type ProviderType,
   PROVIDERS_SECTION,
 } from '#/app/provider/provider';
 
@@ -67,7 +68,9 @@ export class ModelCatalogService implements IModelCatalogService {
 
   async listModels(): Promise<readonly ModelCatalogItem[]> {
     const models = this.modelService.list();
-    return Object.entries(models).map(([modelId, alias]) => toProtocolModel(modelId, alias));
+    return Object.entries(models).map(([modelId, alias]) =>
+      toProtocolModel(modelId, alias, this.providerTypeOf(alias)),
+    );
   }
 
   async listProviders(): Promise<readonly ProviderCatalogItem[]> {
@@ -100,8 +103,14 @@ export class ModelCatalogService implements IModelCatalogService {
     const updatedAlias = this.modelService.get(modelId) ?? alias;
     return {
       default_model: modelId,
-      model: toProtocolModel(modelId, updatedAlias),
+      model: toProtocolModel(modelId, updatedAlias, this.providerTypeOf(updatedAlias)),
     };
+  }
+
+  private providerTypeOf(alias: ModelAlias): ProviderType | undefined {
+    const providerId =
+      alias.providerId ?? alias.provider ?? this.config.get<string>('defaultProvider');
+    return this.providerService.get(providerId ?? '')?.type ?? alias.protocol;
   }
 
   refreshProviderModels(

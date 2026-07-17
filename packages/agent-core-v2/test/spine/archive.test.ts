@@ -2,10 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { MASTER_ENV } from '#/app/flag/flagService';
 import {
-  AGENT_WIRE_PROTOCOL_VERSION,
+  WIRE_PROTOCOL_VERSION,
   IAgentSpineService,
-  IAgentWireService,
-  type PersistedWireRecord,
+  IWireService,
+  type WireRecord,
 } from '#/index';
 
 import {
@@ -83,12 +83,10 @@ describe('Spine archive + resume', () => {
     await ctx.rpc.prompt({ input: [{ type: 'text', text: 'start' }] });
     await ctx.untilTurnEnd();
 
-    // Upstream's wire persists through an async persistQueue (blob dehydrate
-    // hop runs even without blobs) that only drains on the wire service's own
-    // flush; the wireRecord service flush no longer covers it, so cloning the
-    // persistence before an `IAgentWireService` flush misses the records.
-    await ctx.get(IAgentWireService).flush();
-    await ctx.wireRecord.flush();
+    // The wire persists through an async persistQueue (the blob dehydrate hop
+    // runs even without blobs) that only drains on the service's own flush, so
+    // cloning the persistence before an `IWireService` flush misses records.
+    await ctx.wire.flush();
 
     const before = readSpine(ctx);
     const resumed = testAgent(
@@ -140,10 +138,10 @@ function cloneRecords<T>(records: readonly T[]): T[] {
   return records.map((record) => structuredClone(record));
 }
 
-function withMetadata(records: readonly PersistedWireRecord[]): PersistedWireRecord[] {
+function withMetadata(records: readonly WireRecord[]): WireRecord[] {
   if (records[0]?.type === 'metadata') return [...records];
   return [
-    { type: 'metadata', protocol_version: AGENT_WIRE_PROTOCOL_VERSION, created_at: 1 },
+    { type: 'metadata', protocol_version: WIRE_PROTOCOL_VERSION, created_at: 1 },
     ...records,
   ];
 }

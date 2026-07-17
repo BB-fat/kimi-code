@@ -130,7 +130,10 @@ describe('SessionCronService — persistence and resume', () => {
       } finally {
         vi.unstubAllEnvs();
         vi.restoreAllMocks();
-        await rm(sessionDir, { recursive: true, force: true });
+        // Cron persistence can still be draining its final post-dispose write
+        // when cleanup starts (parallel load widens the window) — let rm ride
+        // out transient ENOTEMPTY instead of flaking the suite.
+        await rm(sessionDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       }
     }
   });

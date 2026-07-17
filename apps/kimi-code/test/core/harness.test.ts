@@ -11,6 +11,7 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  IAgentActivityView,
   IAgentBlobService,
   IAgentContextMemoryService,
   IAgentContextSizeService,
@@ -19,11 +20,12 @@ import {
   IAgentPermissionRulesService,
   IAgentPlanService,
   IAgentProfileService,
+  IAgentScopeContext,
   IAgentSwarmService,
   IAgentTaskService,
   IAgentToolRegistryService,
   IAgentUsageService,
-  IAgentWireRecordService,
+  IAppendLogStore,
   IBootstrapService,
   IConfigService,
   IEventBus,
@@ -32,7 +34,6 @@ import {
   IModelResolver,
   IPluginService,
   IProviderService,
-  ISessionActivity,
   ISessionApprovalService,
   ISessionContext,
   ISessionCronService,
@@ -44,6 +45,7 @@ import {
   ISessionQuestionService,
   ISessionTodoService,
   ISessionWorkspaceContext,
+  IWireService,
   IWorkspaceRegistry,
 } from '@moonshot-ai/agent-core-v2';
 import { CoreErrorCodes, isCoreError } from '../../src/core/errors';
@@ -173,7 +175,18 @@ function makeFixture(options?: {
         [IAgentUsageService, { status: () => usage }],
         [IAgentToolRegistryService, { list: () => [] }],
         [IAgentTaskService, { list: () => [] }],
-        [IAgentWireRecordService, { getRecords: () => [] }],
+        [
+          IAgentActivityView,
+          {
+            state: () =>
+              options?.activityStatus === 'running'
+                ? { lifecycle: 'ready', turn: { turnId: 1 }, background: [] }
+                : { lifecycle: 'ready', background: [] },
+          },
+        ],
+        [IWireService, { flush: () => Promise.resolve() }],
+        [IAgentScopeContext, { scope: () => 'agent-main' }],
+        [IAppendLogStore, { read: async function* () {} }],
         [IAgentBlobService, { loadParts: async (parts: readonly unknown[]) => parts }],
       ] as ReadonlyArray<readonly [unknown, unknown]>,
     };
@@ -223,7 +236,6 @@ function makeFixture(options?: {
           ISessionWorkspaceContext,
           { workDir, additionalDirs: ['/extra'], addAdditionalDir: record(`${sid}.addAdditionalDir`) },
         ],
-        [ISessionActivity, { status: () => options?.activityStatus ?? 'idle' }],
         [ISessionTodoService, { getTodos: () => [] }],
       ]),
     };

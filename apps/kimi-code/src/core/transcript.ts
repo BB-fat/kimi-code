@@ -13,12 +13,12 @@
  * be assignable to each other, so a transcript can never be fed to the model
  * by accident (and vice versa).
  *
- * Form: the reducer set is declared through v2's public `defineDerivedModel`
- * (the same shape a wire-attached derived model would use), but the TUI folds
- * it manually over `IAgentWireRecordService.getRecords()` — resume's
- * `wire.replay` runs inside v2 before the facade sees the session, so a
- * facade-side `wire.attach` would always miss the restore fold. Replay is
- * read exactly once per resume, so a one-shot reduce loses nothing.
+ * Form: the reducer set is a plain local table (the same shape a wire model
+ * would declare), folded one-shot over the persisted `wire.jsonl` records
+ * (`IAppendLogStore.read`) — resume's `wire.restore` runs inside v2 before
+ * the facade sees the session, so a facade-side live fold would always miss
+ * the restore. Replay is read exactly once per resume, so a one-shot reduce
+ * loses nothing.
  *
  * Record → entry mapping (op types not exported by the v2 barrel are keyed by
  * their literal wire names; payloads are declared locally):
@@ -50,7 +50,6 @@ import {
   contextApplyCompaction,
   contextClear,
   contextUndo,
-  defineDerivedModel,
   isRealUserInput,
   planModeCancel,
   planModeEnter,
@@ -485,10 +484,9 @@ function snapshotFromGoalStateLike(goal: GoalStateLike): GoalSnapshot {
 
 // -- public model + one-shot reduce -----------------------------------------
 
-export const TranscriptModel = defineDerivedModel<TranscriptModelState>(
-  'kimi.tui.transcript',
-  () => ({ entries: [], working: INITIAL_WORKING }),
-  {
+type TranscriptReducer = (state: TranscriptModelState, payload: unknown) => TranscriptModelState;
+
+const transcriptReducers: Record<string, TranscriptReducer> = {
     [contextAppendMessage.type]: (state, payload: unknown) =>
       applyAppendMessage(state, toMutableMessage((payload as { message: ContextMessageLike }).message)),
     [contextAppendLoopEvent.type]: (state, payload: unknown) =>
@@ -525,8 +523,13 @@ export const TranscriptModel = defineDerivedModel<TranscriptModelState>(
       entries: [...state.entries, { type: 'config_updated', config: payload as ConfigUpdateWirePayload }],
       working: state.working,
     }),
-  },
-);
+};
+
+export const TranscriptModel = {
+  name: 'kimi.tui.transcript',
+  initial: (): TranscriptModelState => ({ entries: [], working: INITIAL_WORKING }),
+  reducers: transcriptReducers,
+};
 
 function stripSummaryPrefix(text: string): string {
   return text.startsWith(COMPACTION_SUMMARY_PREFIX)

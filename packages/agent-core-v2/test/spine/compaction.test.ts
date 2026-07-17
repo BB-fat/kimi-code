@@ -60,7 +60,7 @@ describe('Spine / compaction interaction', () => {
     await ctx.rpc.beginCompaction({});
     await completed;
 
-    const recordTypes = ctx.recordHistory.map((record) => record.type);
+    const recordTypes = (await ctx.wireHistory()).map((record) => record.type);
     // The derivation reads the boundary from the summary message itself — no
     // tree op is dispatched for a root compaction any more.
     expect(recordTypes).not.toContain('spine.root_compact');
@@ -133,7 +133,7 @@ describe('Spine / compaction interaction', () => {
     await ctx.rpc.beginCompaction({});
     await completed;
 
-    const recordTypes = ctx.recordHistory.map((record) => record.type);
+    const recordTypes = (await ctx.wireHistory()).map((record) => record.type);
     expect(recordTypes).not.toContain('spine.root_compact');
     expect(recordTypes).toContain('full_compaction.complete');
     // The failed epoch archive write is tracked, so the tree view publishes no

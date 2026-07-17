@@ -36,11 +36,8 @@ import type {
   ExecutableToolOutput as ToolOutput,
   ExecutableToolResult,
 } from '#/tool/toolContract';
-import type {
-  PersistedWireRecord,
-  WireRecordRestoreOptions,
-  WireRecordRestoreResult,
-} from '#/agent/wireRecord/wireRecord';
+import { AGENT_WIRE_RECORD_KEY, wireRecordToPayload, type WireRecord } from '#/wire/record';
+import { OP_REGISTRY } from '#/wire/op';
 import { IOAuthService } from '#/app/auth/auth';
 import { IProtocolAdapterRegistry, type ProtocolAdapterConfig } from '#/app/protocol/protocol';
 import type { SkillCatalog } from '#/app/skillCatalog/types';
@@ -56,12 +53,13 @@ import type { ILogger, LogContext, LogLevel } from '#/_base/log/log';
 import { ILogOptions } from '#/_base/log/logConfig';
 import type { EnabledPluginSessionStart } from '#/app/plugin/types';
 import {
-  AGENT_WIRE_PROTOCOL_VERSION,
+  WIRE_PROTOCOL_VERSION,
   AgentTaskService,
   AgentExternalHooksService,
   FileStorageService,
   InMemoryStorageService,
   AgentFullCompactionService,
+  IAgentActivityView,
   IAgentRPCService,
   IAppendLogStore,
   IFileSystemStorageService,
@@ -98,7 +96,6 @@ import {
   IAgentBuiltinToolsRegistrar,
   IAgentUserToolService,
   IAgentUsageService,
-  IAgentWireRecordService,
   ISessionWorkspaceContext,
   AgentLLMRequesterService,
   IAgentLifecycleService,
@@ -110,7 +107,6 @@ import {
   AgentProfileService,
   SyncDescriptor,
   AgentUserToolService,
-  AgentWireRecordService,
   SessionWorkspaceContextService,
   bootstrap,
   bootstrapSeed,
@@ -122,11 +118,9 @@ import {
   type ScopeSeed,
   type ServiceIdentifier,
 } from '#/index';
-import { IAgentActivityService, ISessionActivityKernel } from '#/activity/activity';
 import { IEventBus } from '#/app/event/eventBus';
-import { IAgentWireService } from '#/wire/tokens';
-import type { PersistedRecord } from '#/wire/wireService';
-import { WireService } from '#/wire/wireServiceImpl';
+import { IWireService } from '#/wire/wire';
+import { WireService } from '#/wire/wireService';
 import { IModelService } from '#/app/model/model';
 import { type Model } from '#/app/model/modelInstance';
 import { IHostRequestHeaders } from '#/app/model/hostRequestHeaders';
@@ -211,32 +205,32 @@ interface Logger {
 }
 
 export interface WireRecordPersistence {
-  readonly records: readonly PersistedWireRecord[];
-  read(): AsyncIterable<PersistedWireRecord>;
-  append(event: PersistedWireRecord): void;
-  rewrite(records: readonly PersistedWireRecord[]): void;
+  readonly records: readonly WireRecord[];
+  read(): AsyncIterable<WireRecord>;
+  append(event: WireRecord): void;
+  rewrite(records: readonly WireRecord[]): void;
   flush(): Promise<void>;
   close(): Promise<void>;
 }
 
 export class InMemoryWireRecordPersistence implements WireRecordPersistence {
-  readonly records: PersistedWireRecord[];
+  readonly records: WireRecord[];
 
-  constructor(records: readonly PersistedWireRecord[] = []) {
+  constructor(records: readonly WireRecord[] = []) {
     this.records = records.map(cloneRecord);
   }
 
-  async *read(): AsyncIterable<PersistedWireRecord> {
+  async *read(): AsyncIterable<WireRecord> {
     for (const record of this.records) {
       yield cloneRecord(record);
     }
   }
 
-  append(event: PersistedWireRecord): void {
+  append(event: WireRecord): void {
     this.records.push(cloneRecord(event));
   }
 
-  rewrite(records: readonly PersistedWireRecord[]): void {
+  rewrite(records: readonly WireRecord[]): void {
     this.records.splice(0, this.records.length, ...records.map(cloneRecord));
   }
 
@@ -514,7 +508,7 @@ export function configServices(readConfig: () => KimiConfig): TestAgentServiceOv
 
 export function wireRecordPersistenceServices(
   persistence: WireRecordPersistence,
-  onRead: (event: PersistedWireRecord) => void = () => { },
+  onRead: (event: WireRecord) => void = () => { },
 ): TestAgentServiceOverride {
   return appService(IAppendLogStore, new PersistenceAppendLogStore(persistence, () => { }, onRead));
 }
@@ -774,28 +768,31 @@ function collectScopeSeed(
 
 class PersistenceAppendLogStore implements IAppendLogStore {
   declare readonly _serviceBrand: undefined;
+  private readonly history: WireRecord[] = [];
 
   constructor(
     private readonly persistence: WireRecordPersistence,
-    private readonly onAppend: (event: PersistedWireRecord) => void,
-    private readonly onRead: (event: PersistedWireRecord) => void,
+    private readonly onAppend: (event: WireRecord) => void,
+    private readonly onRead: (event: WireRecord) => void,
   ) { }
 
   append<R>(_scope: string, _key: string, record: R): void {
-    const event = record as PersistedWireRecord;
+    const event = record as WireRecord;
     this.onAppend(event);
     this.persistence.append(event);
+    this.history.push(cloneRecord(event));
   }
 
   async *read<R>(_scope: string, _key: string): AsyncIterable<R> {
     for await (const event of this.persistence.read()) {
       this.onRead(event);
+      this.history.push(cloneRecord(event));
       yield event as R;
     }
   }
 
   rewrite<R>(_scope: string, _key: string, records: readonly R[]): Promise<void> {
-    this.persistence.rewrite(records as readonly PersistedWireRecord[]);
+    this.persistence.rewrite(records as readonly WireRecord[]);
     return Promise.resolve();
   }
 
@@ -809,6 +806,14 @@ class PersistenceAppendLogStore implements IAppendLogStore {
 
   acquire(_scope: string, _key: string): IDisposable {
     return toDisposable(() => { });
+  }
+
+  snapshot(): WireRecord[] {
+    return this.persistence.records.map(cloneRecord);
+  }
+
+  historySnapshot(): WireRecord[] {
+    return this.history.map(cloneRecord);
   }
 }
 
@@ -861,7 +866,6 @@ export class AgentTestContext {
   private readonly serviceOverrides: readonly TestAgentScopedServiceOverride[];
   private readonly options: TestAgentOptions;
   private readonly scriptedGenerate = createScriptedGenerate();
-  readonly recordHistory: PersistedWireRecord[] = [];
   private readonly root: Scope;
   private readonly session: Scope;
   private readonly agent: Scope;
@@ -903,7 +907,7 @@ export class AgentTestContext {
       persistence.rewrite([
         {
           type: 'metadata',
-          protocol_version: AGENT_WIRE_PROTOCOL_VERSION,
+          protocol_version: WIRE_PROTOCOL_VERSION,
           created_at: 1,
         },
         ...persistence.records,
@@ -933,10 +937,8 @@ export class AgentTestContext {
             IAppendLogStore,
             new PersistenceAppendLogStore(
               persistence,
+              (event) => this.captureRecord(event),
               () => { },
-              (event) => {
-                this.recordHistory.push(cloneRecord(event));
-              },
             ),
           );
           reg.defineInstance(ILogService, createLogService(undefined));
@@ -1027,7 +1029,6 @@ export class AgentTestContext {
         'session',
       ),
     });
-    this.session.accessor.get(ISessionActivityKernel).markActive();
     const workspace = this.session.accessor.get(ISessionWorkspaceContext);
 
     this.agent = this.session.createChild(LifecycleScope.Agent, agentId, {
@@ -1035,12 +1036,8 @@ export class AgentTestContext {
         [
           (reg) => {
             reg.defineDescriptor(
-              IAgentWireRecordService,
-              new SyncDescriptor(AgentWireRecordService),
-            );
-            reg.defineDescriptor(
-              IAgentWireService,
-              new SyncDescriptor(WireService, [{ logScope: 'wire', logKey: agentId }]),
+              IWireService,
+              new SyncDescriptor(WireService),
             );
             reg.defineDescriptor(IAgentBlobService, new SyncDescriptor(AgentBlobServiceImpl));
             reg.defineDescriptor(IAgentProfileService, new SyncDescriptor(AgentProfileService));
@@ -1094,14 +1091,10 @@ export class AgentTestContext {
     });
 
     this.initializeRestorableServices();
-    this.get(IAgentActivityService).markReady();
+    // Resolve the activity view so its constructor subscriptions publish
+    // `agent.activity.updated` — production ignites it in agentLifecycle.
+    this.get(IAgentActivityView);
 
-    const wire = this.get(IAgentWireService);
-    this.disposables.push(
-      wire.onEmission((e) => {
-        this.captureRecord(e.record as PersistedWireRecord);
-      }),
-    );
     const eventBus = this.get(IEventBus);
     this.disposables.push(
       eventBus.subscribe((e) => {
@@ -1160,31 +1153,38 @@ export class AgentTestContext {
     return this.get(IAgentContextSizeService);
   }
 
-  get wireRecord(): IAgentWireRecordService {
-    return this.get(IAgentWireRecordService);
+  get wire(): IWireService {
+    return this.get(IWireService);
   }
 
-  async restorePersisted(options?: WireRecordRestoreOptions): Promise<WireRecordRestoreResult> {
-    const restoredStart = this.wireRecord.getRecords().length;
-    const result = await this.wireRecord.restore(undefined, options);
-    await this.replayRestoredRecordsSince(restoredStart);
-    return result;
+  async restorePersisted(): Promise<void> {
+    await this.wire.restore();
   }
 
-  private async restoreRecordsOnly(records: readonly PersistedWireRecord[]): Promise<void> {
-    const restoredStart = this.wireRecord.getRecords().length;
-    await this.wireRecord.restore(records);
-    await this.replayRestoredRecordsSince(restoredStart);
+  private async restoreRecordsOnly(records: readonly WireRecord[]): Promise<void> {
+    const scope = this.get(IAgentScopeContext).scope();
+    const log = this.get(IAppendLogStore);
+    await log.rewrite(scope, AGENT_WIRE_RECORD_KEY, records);
+    await this.wire.restore();
   }
 
-  private async replayRestoredRecordsSince(restoredStart: number): Promise<void> {
-    const restored = this.wireRecord.getRecords().slice(restoredStart);
-    await this.get(IAgentWireService).replay(...(restored as readonly PersistedRecord[]));
+  private async dispatchRecordsOnly(records: readonly WireRecord[]): Promise<void> {
+    for (const record of records) {
+      const descriptor = OP_REGISTRY.get(record.type);
+      if (descriptor === undefined) {
+        throw new Error(`Unknown wire record type in test harness: ${record.type}`);
+      }
+      this.wire.dispatch({
+        type: record.type,
+        payload: wireRecordToPayload(record),
+        descriptor,
+      });
+    }
+    await this.wire.flush();
   }
 
-  private async closeWireRecord(): Promise<void> {
-    await this.wireRecord.flush();
-    await this.wireRecord.close();
+  private async closeWire(): Promise<void> {
+    await this.wire.flush();
   }
 
   private initializeRestorableServices(): void {
@@ -1388,25 +1388,21 @@ export class AgentTestContext {
     return events;
   }
 
-  async dispatch(event: PersistedWireRecord): Promise<void> {
+  async dispatch(event: WireRecord): Promise<void> {
     this.suppressWireSnapshot = true;
     try {
-      await this.restoreRecordsOnly([event]);
-      this.captureRecord(event);
+      await this.dispatchRecordsOnly([event]);
     } finally {
       this.suppressWireSnapshot = false;
     }
   }
 
-  async restore(records: readonly PersistedWireRecord[]): Promise<void> {
+  async restore(records: readonly WireRecord[]): Promise<void> {
     this.suppressWireSnapshot = true;
     try {
       await this.restoreRecordsOnly(records);
     } finally {
       this.suppressWireSnapshot = false;
-    }
-    for (const record of records) {
-      this.captureRecord(record);
     }
   }
 
@@ -1539,14 +1535,15 @@ export class AgentTestContext {
     await this.drainWirePersistence();
     const profile = this.get(IAgentProfileService);
     const configSnapshot = structuredClone(this.get(IConfigService).getAll() as KimiConfig);
-    let resumedThroughRecord = this.recordHistory.length;
+    let wireHistory = await this.wireHistory();
+    let resumedThroughRecord = wireHistory.length;
     const resumed = createTestAgent(
       { autoConfigure: false, cwd: profile.data().cwd },
       ...this.serviceOverrides,
       configServices(() => configSnapshot),
       llmGenerateServices(failOnResumeGenerate),
       wireRecordPersistenceServices(
-        new InMemoryWireRecordPersistence(withMetadata(this.recordHistory.map(cloneRecord))),
+        new InMemoryWireRecordPersistence(withMetadata(wireHistory)),
       ),
     );
 
@@ -1555,10 +1552,11 @@ export class AgentTestContext {
       await resumed.waitForSessionMetadata();
       for (let i = 0; i < 5; i += 1) {
         await this.drainWirePersistence();
-        if (this.recordHistory.length === resumedThroughRecord) break;
-        const nextRecords = this.recordHistory.slice(resumedThroughRecord).map(cloneRecord);
-        resumedThroughRecord = this.recordHistory.length;
-        await resumed.restore(nextRecords);
+        wireHistory = await this.wireHistory();
+        if (wireHistory.length === resumedThroughRecord) break;
+        const nextRecords = wireHistory.slice(resumedThroughRecord);
+        resumedThroughRecord = wireHistory.length;
+        await resumed.dispatchRecordsOnly(nextRecords);
       }
 
       // oxlint-disable-next-line jest/no-standalone-expect
@@ -1574,22 +1572,41 @@ export class AgentTestContext {
   }
 
   private async drainWirePersistence(): Promise<void> {
-    const wireRecord = this.get(IAgentWireRecordService);
+    const wire = this.get(IWireService);
     let lastRecordCount = -1;
     for (let i = 0; i < 25; i += 1) {
       for (let j = 0; j < 5; j += 1) {
         await Promise.resolve();
       }
       await new Promise<void>((resolve) => setImmediate(resolve));
-      await wireRecord.flush();
+      await wire.flush();
+      const persistedRecords = await this.persistedRecords();
       if (
-        this.recordHistory.length === lastRecordCount &&
-        pendingTaskNotificationKeys(this.recordHistory).length === 0
+        persistedRecords.length === lastRecordCount &&
+        pendingTaskNotificationKeys(persistedRecords).length === 0
       ) {
         return;
       }
-      lastRecordCount = this.recordHistory.length;
+      lastRecordCount = persistedRecords.length;
     }
+  }
+
+  async persistedRecords(): Promise<WireRecord[]> {
+    const log = this.get(IAppendLogStore);
+    if (log instanceof PersistenceAppendLogStore) return log.snapshot();
+    const scope = this.get(IAgentScopeContext).scope();
+    const records: WireRecord[] = [];
+    for await (const record of log.read<WireRecord>(scope, AGENT_WIRE_RECORD_KEY)) {
+      records.push(cloneRecord(record));
+    }
+    return records;
+  }
+
+  async wireHistory(): Promise<WireRecord[]> {
+    const log = this.get(IAppendLogStore);
+    return log instanceof PersistenceAppendLogStore
+      ? log.historySnapshot()
+      : this.persistedRecords();
   }
 
   async close(_reason = 'Agent runtime test closed'): Promise<void> {
@@ -1598,7 +1615,7 @@ export class AgentTestContext {
     for (const disposable of this.disposables.splice(0)) {
       disposable.dispose();
     }
-    await this.closeWireRecord();
+    await this.closeWire();
     this.root.dispose();
   }
 
@@ -1613,7 +1630,7 @@ export class AgentTestContext {
     return this.snapshots.take(method);
   }
 
-  private recordWire(event: PersistedWireRecord): WireSnapshotEntry {
+  private recordWire(event: WireRecord): WireSnapshotEntry {
     const entry = this.snapshots.recordWire(event);
     this.emitter.emit(entry.event, entry);
     this.emitter.emit('event', entry);
@@ -1774,9 +1791,8 @@ export class AgentTestContext {
     };
   }
 
-  private captureRecord(event: PersistedWireRecord): void {
+  private captureRecord(event: WireRecord): void {
     const cloned = cloneRecord(event);
-    this.recordHistory.push(cloned);
     if (this.suppressWireSnapshot) return;
 
     this.recordWire(cloned);
@@ -1990,7 +2006,7 @@ function isSystemReminderMessage(message: ContextMessage): boolean {
   return text.startsWith('<system-reminder>');
 }
 
-function pendingTaskNotificationKeys(records: readonly PersistedWireRecord[]): readonly string[] {
+function pendingTaskNotificationKeys(records: readonly WireRecord[]): readonly string[] {
   const terminal = new Set<string>();
   const delivered = new Set<string>();
   for (const record of records) {
@@ -2011,7 +2027,7 @@ function pendingTaskNotificationKeys(records: readonly PersistedWireRecord[]): r
   return [...terminal].filter((key) => !delivered.has(key));
 }
 
-function contextMessagesFromRecord(record: PersistedWireRecord): readonly ContextMessage[] {
+function contextMessagesFromRecord(record: WireRecord): readonly ContextMessage[] {
   if (record.type === 'context.append_message') {
     const message = record['message'];
     return isContextMessageLike(message) ? [message] : [];
@@ -2271,7 +2287,7 @@ function capabilityNames(capabilities: ModelCapability | undefined): string[] {
     capabilities.audio_in ? 'audio_in' : undefined,
     capabilities.thinking ? 'thinking' : undefined,
     capabilities.tool_use ? 'tool_use' : undefined,
-    capabilities.select_tools ? 'select_tools' : undefined,
+    capabilities.dynamically_loaded_tools ? 'dynamically_loaded_tools' : undefined,
   ].filter((capability): capability is string => capability !== undefined);
 }
 
@@ -2429,6 +2445,10 @@ async function generateBackedResponse(
     {
       signal: options?.signal,
       auth: options?.auth,
+      // Forward the early-capture hook so a GenerateFn can fire the trace id
+      // as soon as its (simulated) response headers arrive — e.g. before a
+      // mid-stream failure — mirroring real kosong generate() behavior.
+      onTraceId: options?.onTraceId,
     },
   );
   return createStreamedMessage(
@@ -2440,6 +2460,7 @@ async function generateBackedResponse(
       usage: result.usage,
       finishReason: result.finishReason,
       rawFinishReason: result.rawFinishReason,
+      traceId: result.traceId,
     },
   );
 }
@@ -2508,13 +2529,17 @@ function normalizeProviderStreamParts(
 
 function createStreamedMessage(
   parts: readonly StreamedMessagePart[],
-  meta: Pick<Awaited<ReturnType<GenerateFn>>, 'id' | 'usage' | 'finishReason' | 'rawFinishReason'>,
+  meta: Pick<
+    Awaited<ReturnType<GenerateFn>>,
+    'id' | 'usage' | 'finishReason' | 'rawFinishReason' | 'traceId'
+  >,
 ): StreamedMessage {
   return {
     id: meta.id,
     usage: meta.usage,
     finishReason: meta.finishReason ?? null,
     rawFinishReason: meta.rawFinishReason ?? null,
+    traceId: meta.traceId ?? null,
     async *[Symbol.asyncIterator]() {
       for (const part of parts) {
         yield structuredClone(part);
@@ -2540,16 +2565,16 @@ function writeLog(
   logger[level](message, mergedPayload);
 }
 
-function cloneRecord<T extends PersistedWireRecord>(event: T): T {
+function cloneRecord<T extends WireRecord>(event: T): T {
   return structuredClone(event);
 }
 
-function withMetadata(events: readonly PersistedWireRecord[]): readonly PersistedWireRecord[] {
+function withMetadata(events: readonly WireRecord[]): readonly WireRecord[] {
   if (events.length === 0 || events[0]?.type === 'metadata') return events;
   return [
     {
       type: 'metadata',
-      protocol_version: AGENT_WIRE_PROTOCOL_VERSION,
+      protocol_version: WIRE_PROTOCOL_VERSION,
       created_at: 1,
     },
     ...events,

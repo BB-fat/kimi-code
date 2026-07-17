@@ -79,10 +79,14 @@ describe('Agent + Cron — subagent suppression', () => {
     let profile: IAgentProfileService;
     let listenerCountBeforeCreate: number;
 
-    beforeEach(() => {
+    beforeEach(async () => {
       listenerCountBeforeCreate = process.listenerCount('SIGUSR1');
       ctx = createTestAgent();
       ctx.announceMain();
+      // Upstream gates `SessionCronService.start()` (and with it the SIGUSR1
+      // binding) on the main wire's `onDidRestore` hook, so trigger a restore
+      // here for the binding to land before the test observes it.
+      await ctx.restorePersisted();
       profile = ctx.get(IAgentProfileService);
     });
 
@@ -112,10 +116,14 @@ describe('Agent + Cron — subagent suppression', () => {
     let profile: IAgentProfileService;
     let listenerCountBeforeCreate: number;
 
-    beforeEach(() => {
+    beforeEach(async () => {
       listenerCountBeforeCreate = process.listenerCount('SIGUSR1');
       ctx = createTestAgent();
       ctx.announceMain();
+      // Upstream gates `SessionCronService.start()` (and with it the SIGUSR1
+      // binding) on the main wire's `onDidRestore` hook, so trigger a restore
+      // here for the binding to land before the test observes it.
+      await ctx.restorePersisted();
       profile = ctx.get(IAgentProfileService);
     });
 

@@ -17,7 +17,11 @@
 import { z } from 'zod';
 
 import type { IAgentScopeHandle } from '#/_base/di/scope';
-import { isUserCancellation } from '#/_base/utils/abort';
+import {
+  isAbortError,
+  isUserCancellation,
+  userCancellationReason,
+} from '#/_base/utils/abort';
 import { toInputJsonSchema } from '#/tool/input-schema';
 import { matchesGlobRuleSubject } from '#/tool/rule-match';
 import {
@@ -29,7 +33,6 @@ import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMo
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentUserToolService } from '#/agent/userTool/userTool';
-import { isAbortError } from '#/_base/utils/abort';
 import {
   ToolAccesses,
   type BuiltinTool,
@@ -41,6 +44,7 @@ import { registerTool } from '#/agent/toolRegistry/toolContribution';
 import { IAgentProfileCatalogService, type AgentProfile } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import { applyProfilePromptPrefix } from '#/app/agentProfileCatalog/promptPrefix';
 import { ILogService } from '#/_base/log/log';
+import { IConfigService } from '#/app/config/config';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
 import { isSubagentMeta, subagentLabels, subagentParentAgentId } from '#/session/agentLifecycle/subagentMetadata';
 import { ISessionProcessRunner } from '#/session/process/processRunner';
@@ -49,6 +53,10 @@ import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceCo
 
 import { emitAgentRunSpawned, mirrorAgentRun } from '../mirrorAgentRun';
 import { ISessionSubagentService } from '../subagent';
+import {
+  formatSubagentTimeoutDescription,
+  resolveSubagentTimeoutMs,
+} from '../configSection';
 import { SubagentTask, type SubagentHandle } from './subagent-task';
 
 import AGENT_BACKGROUND_DISABLED_DESCRIPTION from './agent-background-disabled.md?raw';
@@ -57,8 +65,6 @@ import AGENT_DESCRIPTION_BASE from './agent.md?raw';
 
 const DEFAULT_PROFILE_NAME = 'coder';
 const RESUMED_LABEL = 'subagent';
-export const DEFAULT_SUBAGENT_TIMEOUT_MS = 30 * 60 * 1000;
-export const DEFAULT_SUBAGENT_TIMEOUT_DESCRIPTION = '30 minutes';
 
 export const AgentToolInputSchema = z.preprocess(
   (input) => {
@@ -124,7 +130,8 @@ const BACKGROUND_AGENT_UNAVAILABLE =
 const RESUME_WITH_TYPE_UNAVAILABLE =
   'Cannot set subagent_type when resuming an existing agent. Resume by agent id only.';
 const USER_INTERRUPTED_SUBAGENT_MESSAGE =
-  "The user manually interrupted this subagent (and any sibling agents launched alongside it). This was a deliberate user action, not a system error, a timeout, or a capacity/concurrency limit. Do not retry automatically or speculate about why it failed — wait for the user's next instruction.";
+  'The subagent was stopped before it finished by user.';
+const SUBAGENT_STOPPED_MESSAGE = 'The subagent was stopped before it finished.';
 
 
 export class AgentTool implements BuiltinTool<AgentToolInput> {
@@ -146,6 +153,7 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
     @ISessionMetadata private readonly sessionMetadata: ISessionMetadata,
     @ILogService private readonly log: ILogService,
     @IAgentPermissionModeService private readonly permissionMode: IAgentPermissionModeService,
+    @IConfigService private readonly config: IConfigService,
   ) {
     this.callerAgentId = scopeContext.agentId;
     this.canRunInBackground = () =>
@@ -334,6 +342,7 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
       if (runInBackground && !allowBackground) {
         return { output: BACKGROUND_AGENT_UNAVAILABLE, isError: true };
       }
+      const timeoutMs = resolveSubagentTimeoutMs(this.config);
 
       const controller = new AbortController();
       const abortBeforeRegister = (): void => {
@@ -363,7 +372,7 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
       try {
         const registerOptions: RegisterAgentTaskOptions = {
           detached: runInBackground,
-          timeoutMs: DEFAULT_SUBAGENT_TIMEOUT_MS,
+          timeoutMs,
           signal: runInBackground ? undefined : signal,
         };
         taskId = this.tasks.registerTask(
@@ -403,7 +412,7 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
           output: formatBackgroundAgentResult(taskId, handle, args.description, allowBackground),
         };
       }
-      return await this.formatForegroundResult(taskId, handle);
+      return await this.formatForegroundResult(taskId, handle, timeoutMs);
     } catch (error) {
       return { output: `subagent error: ${launchErrorMessage(error, signal)}`, isError: true };
     }
@@ -412,6 +421,7 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
   private async formatForegroundResult(
     taskId: string,
     handle: SubagentHandle,
+    timeoutMs: number,
   ): Promise<ExecutableToolResult> {
     const info = this.tasks.getTask(taskId);
     if (info?.status === 'completed') {
@@ -421,12 +431,8 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
     }
     const timedOut = info?.status === 'timed_out';
     const message = timedOut
-      ? `Agent timed out after ${DEFAULT_SUBAGENT_TIMEOUT_DESCRIPTION}.`
-      : info?.stopReason === 'Interrupted by user'
-        ? USER_INTERRUPTED_SUBAGENT_MESSAGE
-        : info?.stopReason !== undefined
-          ? info.stopReason
-          : 'The subagent was stopped before it finished.';
+      ? `Agent timed out after ${formatSubagentTimeoutDescription(timeoutMs)}.`
+      : formatSubagentStoppedMessage(info?.stopReason);
     return {
       output: formatForegroundAgentFailure(handle, message, timedOut),
       isError: true,
@@ -509,6 +515,19 @@ function formatForegroundAgentFailure(
 
 function launchErrorMessage(error: unknown, signal: AbortSignal): string {
   if (isUserCancellation(signal.reason)) return USER_INTERRUPTED_SUBAGENT_MESSAGE;
-  if (isAbortError(error)) return 'The subagent was stopped before it finished.';
+  if (isAbortError(error)) return formatSubagentStoppedMessage(errorMessage(signal.reason));
   return error instanceof Error ? error.message : String(error);
+}
+
+function formatSubagentStoppedMessage(reason: string | undefined): string {
+  const normalized = reason?.trim();
+  if (normalized === userCancellationReason().message) return USER_INTERRUPTED_SUBAGENT_MESSAGE;
+  if (normalized === undefined || normalized.length === 0) return SUBAGENT_STOPPED_MESSAGE;
+  return `${SUBAGENT_STOPPED_MESSAGE} Reason: ${normalized}`;
+}
+
+function errorMessage(error: unknown): string | undefined {
+  if (typeof error === 'string') return error;
+  if (error instanceof Error) return error.message;
+  return undefined;
 }

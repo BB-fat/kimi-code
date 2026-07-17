@@ -53,8 +53,8 @@ import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentContextSizeService } from '#/agent/contextSize/contextSize';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { ACCEPTED_OUTPUT } from '#/agent/spine/tools/controlResult';
-import { IAgentWireService } from '#/wire/tokens';
 import { IAgentGoalService } from '#/agent/goal/goal';
+import { IAgentTelemetryContextService } from '#/app/telemetry/agentTelemetryContext';
 import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
 
 type GenerateFn = NonNullable<TestAgentOptions['generate']>;
@@ -634,7 +634,7 @@ describe('FullCompaction', () => {
       if (attempts === 1) {
         throw new APIConnectionError('socket hang up');
       }
-      return textResult('Recovered compacted summary.');
+      return textResult('Recovered compacted summary.', 'trace-compact-1');
     };
     const ctx = testAgent({ generate, telemetry: recordingTelemetry(records) });
     ctx.configure({
@@ -657,6 +657,7 @@ describe('FullCompaction', () => {
         source: 'manual',
         tokens_before: 28,
         retry_count: 1,
+        trace_id: 'trace-compact-1',
       }),
     });
     await ctx.expectResumeMatches();
@@ -954,8 +955,9 @@ describe('FullCompaction', () => {
     await ctx.expectResumeMatches();
   });
 
-  it('cancels retry backoff without issuing another compaction request', async () => {
+  it('cancels retry backoff with the failed compaction request trace', async () => {
     vi.useFakeTimers();
+    const records: TelemetryRecord[] = [];
     const firstAttemptFailed = deferred<void>();
     let attempts = 0;
     const generate: GenerateFn = async () => {
@@ -963,9 +965,9 @@ describe('FullCompaction', () => {
       if (attempts === 1) {
         firstAttemptFailed.resolve();
       }
-      throw new APIConnectionError('socket hang up');
+      throw new APIStatusError(429, 'rate limited', null, null, 'trace-compact-retry');
     };
-    const ctx = testAgent({ generate });
+    const ctx = testAgent({ generate, telemetry: recordingTelemetry(records) });
     ctx.configure({
       provider: CATALOGUED_PROVIDER,
       modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
@@ -976,12 +978,24 @@ describe('FullCompaction', () => {
 
     await ctx.rpc.beginCompaction({});
     await firstAttemptFailed.promise;
+    const fullCompaction = ctx.get(IAgentFullCompactionService);
+    for (let i = 0; i < 10 && fullCompaction.compacting?.traceId === undefined; i += 1) {
+      await Promise.resolve();
+    }
+    expect(fullCompaction.compacting?.traceId).toBe('trace-compact-retry');
 
     void ctx.rpc.cancelCompaction({});
     await cancelled;
     await vi.advanceTimersByTimeAsync(10_000);
 
     expect(attempts).toBe(1);
+    expect(records).toContainEqual({
+      event: 'cancel',
+      properties: {
+        from: 'compacting',
+        trace_id: 'trace-compact-retry',
+      },
+    });
     vi.useRealTimers();
     await ctx.expectResumeMatches();
   });
@@ -1035,6 +1049,75 @@ describe('FullCompaction', () => {
     await ctx.expectResumeMatches();
   });
 
+  it('attaches the failed request trace id to compaction_failed', async () => {
+    const records: TelemetryRecord[] = [];
+    const generate: GenerateFn = async () => {
+      throw new APIStatusError(400, 'Bad request', null, null, 'trace-compact-fail');
+    };
+    const ctx = testAgent({ generate, telemetry: recordingTelemetry(records) });
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+    });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+    ctx.appendExchange(2, 'recent user two', 'recent assistant two', 80);
+    const failed = ctx.once('error');
+
+    await ctx.rpc.beginCompaction({});
+    await failed;
+
+    expect(records).toContainEqual({
+      event: 'compaction_failed',
+      properties: expect.objectContaining({
+        source: 'manual',
+        error_type: 'APIStatusError',
+        trace_id: 'trace-compact-fail',
+      }),
+    });
+    await ctx.expectResumeMatches();
+  });
+
+  it('attributes compaction_failed to the in-flight request trace on a mid-stream failure', async () => {
+    const records: TelemetryRecord[] = [];
+    // The stream delivers response headers (trace id) and one part, then fails
+    // — the error itself carries no trace, so attribution must come from the
+    // trace captured when the headers arrived.
+    const generate = realKosongGenerate(() => {
+      const base = mockStreamedMessage([], 'trace-mid-stream');
+      return {
+        ...base,
+        async *[Symbol.asyncIterator]() {
+          yield { type: 'text', text: 'partial summary' } as StreamedMessagePart;
+          throw new Error('stream reset');
+        },
+      };
+    });
+    const ctx = testAgent({ generate, telemetry: recordingTelemetry(records) });
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+    });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+    ctx.appendExchange(2, 'recent user two', 'recent assistant two', 80);
+    ctx.get(IAgentTelemetryContextService).set({ trace_id: 'trace-turn-1' });
+    const failed = ctx.once('error');
+
+    await ctx.rpc.beginCompaction({});
+    await failed;
+
+    const apiError = records.find((record) => record.event === 'api_error');
+    expect(apiError?.properties?.['trace_id']).toBe('trace-mid-stream');
+    expect(records).toContainEqual({
+      event: 'compaction_failed',
+      properties: expect.objectContaining({
+        source: 'manual',
+        trace_id: 'trace-mid-stream',
+      }),
+    });
+    expect(ctx.get(IAgentTelemetryContextService).get().trace_id).toBe('trace-turn-1');
+    await ctx.expectResumeMatches();
+  });
+
   it('fails a blocked turn when auto compaction generation fails', async () => {
     let attempts = 0;
     const generate: GenerateFn = async () => {
@@ -1066,7 +1149,9 @@ describe('FullCompaction', () => {
         },
       }),
     );
-    const errorEvents = ctx.newEvents();
+    const errorEvents = (ctx.newEvents() as readonly { event?: string }[]).filter(
+      (entry) => entry.event === 'error',
+    );
     expect(errorEvents).toHaveLength(1);
     expect(errorEvents[0]).toMatchObject({
       event: 'error',
@@ -1076,6 +1161,31 @@ describe('FullCompaction', () => {
       }),
     });
     await ctx.expectResumeMatches();
+  });
+
+  it('aborts an in-flight compaction when the agent is disposed', async () => {
+    const started = deferred<void>();
+    let signal: AbortSignal | undefined;
+    const generate: GenerateFn = async (_chat, _systemPrompt, _tools, _history, _callbacks, options) => {
+      signal = options?.signal;
+      started.resolve();
+      // Never settles — the compaction stays in flight until disposed.
+      return new Promise(() => {});
+    };
+    const ctx = testAgent({ generate });
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+    });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+    ctx.appendExchange(2, 'recent user two', 'recent assistant two', 80);
+
+    const pending = ctx.rpc.beginCompaction({}).catch(() => {});
+    await started.promise;
+    await ctx.dispose();
+
+    expect(signal?.aborted).toBe(true);
+    await pending;
   });
 
   it('names truncated compaction responses when retries are exhausted', async () => {
@@ -1821,7 +1931,7 @@ describe('FullCompaction', () => {
       modelCapabilities: {
         ...CATALOGUED_MODEL_CAPABILITIES,
         max_context_tokens: 2_000,
-        select_tools: true,
+        dynamically_loaded_tools: true,
       },
       tools: [LARGE_MCP_TOOL],
     });
@@ -1970,7 +2080,7 @@ describe('FullCompaction', () => {
     ctx.mockNextResponse({ type: 'text', text: 'Downshift summary.' });
     await ctx.get(IAgentProfileService).setModel('small-model');
 
-    const records = ctx.recordHistory;
+    const records = await ctx.wireHistory();
     const beginIndex = records.findIndex((record) => record.type === 'full_compaction.begin');
     const completeIndex = records.findIndex((record) => record.type === 'full_compaction.complete');
     // findLastIndex: the setup configure() also writes a small-model alias;
@@ -2005,7 +2115,7 @@ describe('FullCompaction', () => {
 
     await ctx.get(IAgentProfileService).setModel('big-model');
 
-    expect(ctx.recordHistory.some((record) => record.type === 'full_compaction.begin')).toBe(false);
+    expect((await ctx.wireHistory()).some((record) => record.type === 'full_compaction.begin')).toBe(false);
     expect(ctx.llmCalls).toHaveLength(0);
   });
 
@@ -2030,7 +2140,7 @@ describe('FullCompaction', () => {
 
     await ctx.get(IAgentProfileService).setModel('small-model');
 
-    expect(ctx.recordHistory.some((record) => record.type === 'full_compaction.begin')).toBe(false);
+    expect((await ctx.wireHistory()).some((record) => record.type === 'full_compaction.begin')).toBe(false);
     expect(ctx.llmCalls).toHaveLength(0);
   });
 
@@ -2713,6 +2823,23 @@ describe('FullCompaction', () => {
         }),
       }),
     );
+    type WireRequestEvent = {
+      type: '[wire]';
+      event: 'llm.request';
+      args: Record<string, unknown>;
+    };
+    const requestEvents = events.filter((event): event is WireRequestEvent => {
+      if (event === null || typeof event !== 'object') return false;
+      const candidate = event as { type?: unknown; event?: unknown };
+      return candidate.type === '[wire]' && candidate.event === 'llm.request';
+    });
+    expect(
+      requestEvents.map((event) => [event.args['kind'], event.args['droppedCount']]),
+    ).toEqual([
+      ['compaction', 0],
+      ['compaction', 2],
+      ['loop', undefined],
+    ]);
     expect(events).toContainEqual(
       expect.objectContaining({
         event: 'turn.ended',
@@ -2853,7 +2980,7 @@ describe('FullCompaction', () => {
       await ctx.untilTurnEnd();
     }
 
-    const begins = ctx.recordHistory.filter((record) => record.type === 'full_compaction.begin');
+    const begins = (await ctx.wireHistory()).filter((record) => record.type === 'full_compaction.begin');
     expect(begins).toHaveLength(1);
   });
 
@@ -2915,9 +3042,9 @@ describe('FullCompaction', () => {
     }
     await ctx.rpc.prompt({ input: [{ type: 'text', text: 'turn 0' }] });
     await ctx.untilTurnEnd();
-    const begins = () =>
-      ctx.recordHistory.filter((record) => record.type === 'full_compaction.begin').length;
-    expect(begins()).toBe(1);
+    const begins = async () =>
+      (await ctx.wireHistory()).filter((record) => record.type === 'full_compaction.begin').length;
+    expect(await begins()).toBe(1);
 
     // The 6k window still cannot fit the ~15k kept shape, but the futile
     // pause measured at 4k must not carry over.
@@ -2925,7 +3052,7 @@ describe('FullCompaction', () => {
     await ctx.rpc.prompt({ input: [{ type: 'text', text: 'turn 1' }] });
     await ctx.untilTurnEnd();
 
-    expect(begins()).toBe(2);
+    expect(await begins()).toBe(2);
   });
 
   describe('spine-mode gauge caliber', () => {    beforeEach(() => {
@@ -2978,7 +3105,7 @@ describe('FullCompaction', () => {
       await ctx.untilTurnEnd();
 
       expect(
-        ctx.recordHistory.filter((record) => record.type === 'full_compaction.begin'),
+        (await ctx.wireHistory()).filter((record) => record.type === 'full_compaction.begin'),
       ).toHaveLength(0);
     });
 
@@ -3119,7 +3246,7 @@ function providerMaxCompletionTokens(provider: Parameters<GenerateFn>[0]): unkno
   ).modelParameters?.['max_completion_tokens'];
 }
 
-function textResult(text: string): Awaited<ReturnType<GenerateFn>> {
+function textResult(text: string, traceId: string | null = null): Awaited<ReturnType<GenerateFn>> {
   return {
     id: 'mock-compaction-oauth-retry',
     message: {
@@ -3135,10 +3262,14 @@ function textResult(text: string): Awaited<ReturnType<GenerateFn>> {
     },
     finishReason: 'completed',
     rawFinishReason: 'stop',
+    traceId,
   };
 }
 
-function mockStreamedMessage(parts: readonly StreamedMessagePart[]): StreamedMessage {
+function mockStreamedMessage(
+  parts: readonly StreamedMessagePart[],
+  traceId: string | null = null,
+): StreamedMessage {
   return {
     get id(): string | null {
       return 'mock-stream';
@@ -3148,6 +3279,7 @@ function mockStreamedMessage(parts: readonly StreamedMessagePart[]): StreamedMes
     },
     finishReason: null,
     rawFinishReason: null,
+    traceId,
     async *[Symbol.asyncIterator](): AsyncIterator<StreamedMessagePart> {
       for (const part of parts) {
         yield part;

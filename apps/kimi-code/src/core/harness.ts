@@ -18,6 +18,7 @@ import { dirname } from 'node:path';
 import {
   bootstrap,
   ensureMainAgent,
+  IAgentActivityView,
   IAgentPermissionModeService,
   IAgentProfileService,
   IBootstrapService,
@@ -26,7 +27,6 @@ import {
   IModelResolver,
   IPluginService,
   IProviderService,
-  ISessionActivity,
   ISessionContext,
   ISessionExportService,
   ISessionIndex,
@@ -71,7 +71,6 @@ import type {
   FlagExplanation,
   PermissionMode,
   ResumedSessionState,
-  SessionEvent,
   TelemetryClient,
   TelemetryContextPatch,
   TelemetryProperties,
@@ -311,11 +310,15 @@ export class CoreHarness {
     // TODO(v2-gap): G-5 — v2 cannot replay plugin session-start reminders;
     // `input.forcePluginSessionStartReminder` is accepted and ignored.
     const active = this.activeSessions.get(id);
-    if (active !== undefined && active.handle.accessor.get(ISessionActivity).status() !== 'idle') {
-      throw new CoreError(
-        CoreErrorCodes.TURN_AGENT_BUSY,
-        `Session "${id}" is busy; wait for the current turn to finish before reloading.`,
-      );
+    if (active !== undefined) {
+      const main = await ensureMainAgent(active.handle);
+      const activity = main.accessor.get(IAgentActivityView).state();
+      if (activity.turn !== undefined || activity.background.length > 0) {
+        throw new CoreError(
+          CoreErrorCodes.TURN_AGENT_BUSY,
+          `Session "${id}" is busy; wait for the current turn to finish before reloading.`,
+        );
+      }
     }
     await this.deps.app.accessor.get(IPluginService).reloadPlugins();
     if (active !== undefined) {

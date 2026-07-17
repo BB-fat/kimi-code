@@ -9,10 +9,10 @@
  * session-level task root without writing back to it, reads
  * limits through `config`, records lifecycle and broadcasts through `wire`
  * (`task.started` / `task.terminated` Ops into `TaskModel`, plus the matching
- * signals), restores ghosts through a single `wire.onRestored` handler (wire
- * replay -> disk load -> reconcile, in that order), delivers live terminal
- * notifications by enqueueing `TaskNotificationStepRequest`s onto `loop` with
- * `activeOrNewTurn` admission (mid-turn ones fold into the active turn's
+ * signals), restores ghosts through a single `wire.hooks.onDidRestore` hook
+ * (wire replay -> disk load -> reconcile, in that order), delivers live
+ * terminal notifications by enqueueing `TaskNotificationStepRequest`s onto
+ * `loop` with `activeOrNewTurn` admission (mid-turn ones fold into the active turn's
  * following step; idle ones launch a fresh turn themselves, matching v1's
  * `turn.steer`, so the model consumes the notification without waiting for
  * the user), silently appends restored notifications through `contextMemory`,
@@ -36,7 +36,10 @@ import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
 import type { ContentPart } from '#/app/llmProtocol/message';
 
 import { Disposable } from '#/_base/di/lifecycle';
-import { abortable } from '#/_base/utils/abort';
+import {
+  abortable,
+  userCancellationReason,
+} from '#/_base/utils/abort';
 import { escapeXml, escapeXmlAttr } from '#/_base/utils/xml-escape';
 import { IEventBus } from '#/app/event/eventBus';
 import type { ContextMessage, TaskOrigin } from '#/agent/contextMemory/types';
@@ -58,12 +61,8 @@ import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
-import {
-  IAgentWireRecordService,
-  type PersistedWireRecord,
-} from '#/agent/wireRecord/wireRecord';
-import { IAgentWireService } from '#/wire/tokens';
-import type { IWireService } from '#/wire/wireService';
+import { defineModel } from '#/wire/model';
+import { IWireService } from '#/wire/wire';
 import {
   IAgentTaskService,
   type AgentTaskNotificationContext,
@@ -107,6 +106,21 @@ interface AgentTaskNotificationBuildContext {
   readonly origin: TaskOrigin;
   readonly notification: AgentTaskNotification;
 }
+
+const TaskNotificationDeliveryModel = defineModel<readonly string[]>(
+  'task.notificationDelivery',
+  () => [],
+  {
+    reducers: {
+      'context.append_message': (state, payload: { message?: unknown }) => {
+        const origin = taskOriginFromMessage(payload.message);
+        if (origin === undefined) return state;
+        const key = notificationKey(origin);
+        return state.includes(key) ? state : [...state, key];
+      },
+    },
+  },
+);
 
 interface ManagedTask {
   readonly taskId: string;
@@ -156,7 +170,6 @@ function outputLimitReason(): string {
 
 const SIGTERM_GRACE_MS = 5_000;
 const TASK_ID_ALPHABET = '0123456789abcdefghijklmnopqrstuvwxyz';
-const USER_INTERRUPT_REASON = 'Interrupted by user';
 const SESSION_CLOSED_REASON = 'Session closed';
 const NOTIFICATION_FALLBACK_PREVIEW_BYTES = 3_000;
 const ACTIVE_BACKGROUND_TASK_INJECTION_VARIANT = 'background_task_status';
@@ -215,8 +228,7 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     @ISessionContext session: ISessionContext,
     @IAgentScopeContext scopeContext: IAgentScopeContext,
     @ITaskService private readonly taskService: ITaskService,
-    @IAgentWireRecordService wireRecord: IAgentWireRecordService,
-    @IAgentWireService private readonly wire: IWireService,
+    @IWireService private readonly wire: IWireService,
     @IEventBus private readonly eventBus: IEventBus,
     @IAgentContextInjectorService injector: IAgentContextInjectorService,
     @IAgentLoopService private readonly loop: IAgentLoopService,
@@ -234,11 +246,12 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
       fallbackRoot,
     );
     this._register(
-      this.wire.onRestored(async () => {
-        for (const record of wireRecord.getRecords()) {
-          this.markDeliveredNotificationsFromRecord(record);
+      this.wire.hooks.onDidRestore.register('task', async (_ctx, next) => {
+        for (const key of this.wire.getModel(TaskNotificationDeliveryModel)) {
+          this.deliveredNotificationKeys.add(key);
         }
         await this.restoreAfterReplay();
+        await next();
       }),
     );
     this._register(
@@ -278,12 +291,6 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     for (const [taskId, info] of this.wire.getModel(TaskModel)) {
       if (this.tasks.has(taskId)) continue;
       this.ghosts.set(taskId, info);
-    }
-  }
-
-  private markDeliveredNotificationsFromRecord(record: PersistedWireRecord): void {
-    for (const origin of taskOriginsFromRecord(record)) {
-      this.markDeliveredNotification(origin);
     }
   }
 
@@ -616,6 +623,17 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     return this.terminateWithGrace(entry, {
       stopReason: normalized,
       abortReason: normalized,
+      finalStatus: 'killed',
+    });
+  }
+
+  async stopByUser(taskId: string): Promise<AgentTaskInfo | undefined> {
+    const entry = this.tasks.get(taskId);
+    if (entry === undefined) return undefined;
+    const reason = userCancellationReason();
+    return this.terminateWithGrace(entry, {
+      stopReason: reason.message,
+      abortReason: reason,
       finalStatus: 'killed',
     });
   }
@@ -1093,8 +1111,9 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
 
     const abortFromSignal = (): void => {
       if (this.isDetached(entry)) return;
+      const userReason = userCancellationReason();
       void this.terminateWithGrace(entry, {
-        stopReason: USER_INTERRUPT_REASON,
+        stopReason: userReason.message,
         abortReason: signal.reason,
         finalStatus: 'killed',
       });
@@ -1214,30 +1233,21 @@ function notificationKey(origin: TaskNotificationOrigin): string {
   return `${origin.taskId}\0${origin.status}\0${origin.notificationId}`;
 }
 
-function taskOriginsFromRecord(record: PersistedWireRecord): readonly TaskNotificationOrigin[] {
-  const raw = record as {
-    readonly type: string;
-    readonly message?: unknown;
-  };
-  if (raw.type === 'context.append_message') {
-    return taskOriginFromMessage(raw.message);
-  }
-  return [];
-}
-
-function taskOriginFromMessage(message: unknown): readonly TaskNotificationOrigin[] {
-  if (typeof message !== 'object' || message === null) return [];
+function taskOriginFromMessage(message: unknown): TaskNotificationOrigin | undefined {
+  if (typeof message !== 'object' || message === null) return undefined;
   const origin = (message as { readonly origin?: unknown }).origin;
-  return isTaskOrigin(origin) ? [origin] : [];
+  return isTaskOrigin(origin) ? origin : undefined;
 }
 
 function buildAgentTaskNotificationBody(info: AgentTaskInfo): string {
   const baseLine =
     info.status === 'timed_out'
       ? `${info.description} timed out.`
-      : info.stopReason
-        ? `${info.description} ${info.status === 'killed' ? 'was killed' : info.status}: ${info.stopReason}.`
-        : `${info.description} ${info.status}.`;
+      : info.status === 'killed' && isSerializedUserCancellation(info.stopReason)
+        ? `${info.description} was stopped by user.`
+        : info.stopReason
+          ? `${info.description} ${info.status === 'killed' ? 'was stopped' : info.status}. Reason: ${info.stopReason}`
+          : `${info.description} ${info.status}.`;
 
   if (info.kind !== 'agent') return baseLine;
   if (info.status === 'completed') return baseLine;
@@ -1267,6 +1277,10 @@ function generateTaskId(kind: string): string {
 function normalizeReason(reason: string | undefined): string | undefined {
   const trimmed = reason?.trim();
   return trimmed === undefined || trimmed.length === 0 ? undefined : trimmed;
+}
+
+function isSerializedUserCancellation(reason: string | undefined): boolean {
+  return reason === userCancellationReason().message;
 }
 
 function createForegroundRelease(): ForegroundRelease {

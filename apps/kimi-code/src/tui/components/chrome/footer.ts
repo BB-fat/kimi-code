@@ -3,7 +3,7 @@
  *
  * Layout:
  *   Line 1: [yolo] [plan] <model> <cwd>  <git-badge>  <shortcut hints>
- *   Line 2: context: XX.X% (raw X / projection Y / all Z)
+ *   Line 2: context: N% (raw X / projection Y / all Z)
  */
 
 import type { Component } from '@moonshot-ai/pi-tui';
@@ -23,7 +23,11 @@ import {
   type GitStatus,
   type GitStatusCache,
 } from '#/utils/git/git-status';
-import { safeUsageRatio } from '#/utils/usage/usage-format';
+import {
+  formatTokenCount,
+  usagePercent,
+  usagePercentFromRatio,
+} from '#/utils/usage/usage-format';
 
 const MAX_CWD_SEGMENTS = 3;
 const GOAL_TIMER_INTERVAL_MS = 1_000;
@@ -154,33 +158,33 @@ function shortenCwd(path: string): string {
   return `…/${tail}`;
 }
 
-function formatTokenCount(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-  return String(n);
-}
-
-function safeUsage(usage: number): number {
-  return safeUsageRatio(usage);
-}
-
+/**
+ * Footer context readout: the folded projection size against the window, with
+ * the raw stored-history size alongside for fold visibility. Percent comes
+ * from the exact token counts when both are known (the ratio can lag a step
+ * behind); otherwise it falls back to the precomputed ratio. Counts use the
+ * shared 1024-based formatter.
+ */
 function formatContextStatus(
   usage: number,
   tokens?: number,
   maxTokens?: number,
   rawTokens?: number,
 ): string {
-  const pct = `${(safeUsage(usage) * 100).toFixed(1)}%`;
-  if (maxTokens && maxTokens > 0 && tokens !== undefined) {
+  if (maxTokens !== undefined && maxTokens > 0 && tokens !== undefined) {
+    const pct = String(usagePercent(tokens, maxTokens));
     // raw = whole stored history, projection = folded view the model sees,
     // all = the context-window ceiling the percentage is measured against.
-    const raw = rawTokens ?? tokens;
-    return (
-      `context: ${pct} (raw ${formatTokenCount(raw)} / ` +
-      `projection ${formatTokenCount(tokens)} / all ${formatTokenCount(maxTokens)})`
-    );
+    // raw reads 0 until the first measurement — show the compact form then.
+    if (rawTokens !== undefined && rawTokens > 0) {
+      return (
+        `context: ${pct}% (raw ${formatTokenCount(rawTokens)} / ` +
+        `projection ${formatTokenCount(tokens)} / all ${formatTokenCount(maxTokens)})`
+      );
+    }
+    return `context: ${pct}% (${formatTokenCount(tokens)}/${formatTokenCount(maxTokens)})`;
   }
-  return `context: ${pct}`;
+  return `context: ${String(usagePercentFromRatio(usage))}%`;
 }
 
 export function formatFooterGitBadge(status: GitStatus, colors: ColorPalette): string {

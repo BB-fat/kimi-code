@@ -131,11 +131,15 @@ describe('SessionCronService — P1.8 manual tick + SIGUSR1', () => {
       let cron: ISessionCronService;
       let listenerCountBeforeCreate: number;
 
-      beforeEach(() => {
+      beforeEach(async () => {
         vi.stubEnv('KIMI_CRON_MANUAL_TICK', '1');
         listenerCountBeforeCreate = process.listenerCount('SIGUSR1');
         ctx = createTestAgent(cronServices());
         ctx.announceMain();
+        // Upstream gates `SessionCronService.start()` (and with it the
+        // SIGUSR1 binding) on the main wire's `onDidRestore` hook, so trigger
+        // a restore here for the binding to land before the test observes it.
+        await ctx.restorePersisted();
         cron = ctx.get(ISessionCronService);
       });
 
@@ -205,11 +209,15 @@ describe('SessionCronService — P1.8 manual tick + SIGUSR1', () => {
       let ctx: TestAgentContext;
       let cron: ISessionCronService;
 
-      beforeEach(() => {
+      beforeEach(async () => {
         vi.stubEnv('KIMI_CRON_MANUAL_TICK', '1');
         vi.stubEnv('KIMI_CRON_DEBUG', '1');
         ctx = createTestAgent(cronServices());
         ctx.announceMain();
+        // Upstream gates `SessionCronService.start()` (and with it the
+        // SIGUSR1 binding) on the main wire's `onDidRestore` hook, so trigger
+        // a restore here for the binding to land before the test observes it.
+        await ctx.restorePersisted();
         cron = ctx.get(ISessionCronService);
       });
 

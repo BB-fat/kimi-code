@@ -86,10 +86,12 @@ describe('estimateTokens character-class calibration', () => {
 
   const legacyEstimate = (text: string): number => {
     let ascii = 0;
+    let total = 0;
     for (const char of text) {
+      total += 1;
       if (char.codePointAt(0)! <= 127) ascii += 1;
     }
-    return Math.ceil(ascii / 4) + ([...text].length - ascii);
+    return Math.ceil(ascii / 4) + (total - ascii);
   };
 
   it('returns zero for empty text and at least one token for non-empty text', () => {

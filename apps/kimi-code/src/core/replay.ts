@@ -19,20 +19,24 @@ import {
   IAgentPermissionModeService,
   IAgentPermissionRulesService,
   IAgentPlanService,
+  AGENT_WIRE_RECORD_KEY,
   IAgentProfileService,
+  IAgentScopeContext,
   IAgentSwarmService,
   IAgentTaskService,
   IAgentToolRegistryService,
   IAgentUsageService,
-  IAgentWireRecordService,
+  IAppendLogStore,
   ISessionMetadata,
   ISessionTodoService,
+  IWireService,
   MAIN_AGENT_ID,
   type AgentMeta,
   type IAgentScopeHandle,
   type ISessionScopeHandle,
   type SessionMeta,
   type ToolInfo,
+  type WireRecord,
 } from '@moonshot-ai/agent-core-v2';
 
 import {
@@ -107,7 +111,17 @@ export async function buildResumedAgents(
 async function buildReplayFromWireRecords(
   accessor: IAgentScopeHandle['accessor'],
 ): Promise<AgentReplayRecord[]> {
-  const records = accessor.get(IAgentWireRecordService).getRecords();
+  // Flush first so the read sees every appended record, then fold the
+  // persisted journal one-shot — the same read pattern
+  // `MessageLegacyService.readTranscript` uses.
+  await accessor.get(IWireService).flush();
+  const scope = accessor.get(IAgentScopeContext).scope();
+  const records: WireRecord[] = [];
+  for await (const record of accessor
+    .get(IAppendLogStore)
+    .read<WireRecord>(scope, AGENT_WIRE_RECORD_KEY)) {
+    records.push(record);
+  }
   const { entries } = reduceTranscript(records);
   const rehydrated = await rehydrateTranscript(entries, accessor.get(IAgentBlobService));
   return rehydrated.map(projectTranscriptEntry);
@@ -190,7 +204,7 @@ function projectSessionMetadata(meta: SessionMeta): ResumedSessionMetadata {
 function projectAgentMeta(id: string, meta: AgentMeta): ResumedAgentMeta {
   const type = meta.type === 'main' || meta.type === 'sub' ? meta.type : id === MAIN_AGENT_ID ? 'main' : 'sub';
   return {
-    homedir: meta.homedir,
+    homedir: meta.homedir ?? '',
     type,
     parentAgentId: meta.labels?.['parentAgentId'] ?? meta.parentAgentId ?? null,
     swarmItem: meta.labels?.['swarmItem'] ?? meta.swarmItem,

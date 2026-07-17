@@ -9,7 +9,7 @@ import { collectSpanUserRequests } from '#/agent/spine/spineFold';
 import { MASTER_ENV } from '#/app/flag/flagService';
 import {
   ACCEPTED_OUTPUT,
-  AGENT_WIRE_PROTOCOL_VERSION,
+  WIRE_PROTOCOL_VERSION,
   appendSpineView,
   assembleMemoryBody,
   closedChildMemories,
@@ -18,14 +18,14 @@ import {
   IAgentLLMRequesterService,
   IAgentProfileService,
   IAgentSpineService,
-  IAgentWireService,
+  IWireService,
   loadSpineViewOverride,
   spineClose,
   SpineModel,
   spineNext,
   spineOpen,
   spineRootCompact,
-  type PersistedWireRecord,
+  type WireRecord,
 } from '#/index';
 
 import {
@@ -718,8 +718,7 @@ describe('Spine legacy-op restore compat', () => {
       { kind: 'spine_close', id: '2.1.2', memory: 'mem C' },
       { kind: 'user', text: 'tail' },
     ]);
-    await ctx.get(IAgentWireService).flush();
-    await ctx.wireRecord.flush();
+    await ctx.wire.flush();
 
     const resumed = testAgent(
       execEnvServices({ hostFs: recordingHostFs(new Map()) }),
@@ -733,7 +732,7 @@ describe('Spine legacy-op restore compat', () => {
     // the same tree the persisted legacy ops replay into: the derivation is
     // the single source of truth and the ops are now inert records.
     expect(resumed.get(IAgentSpineService).currentState()).toEqual(
-      resumed.get(IAgentWireService).getModel(SpineModel),
+      resumed.get(IWireService).getModel(SpineModel),
     );
   });
 });
@@ -751,10 +750,10 @@ function cloneRecords<T>(records: readonly T[]): T[] {
   return records.map((record) => structuredClone(record));
 }
 
-function withMetadata(records: readonly PersistedWireRecord[]): PersistedWireRecord[] {
+function withMetadata(records: readonly WireRecord[]): WireRecord[] {
   if (records[0]?.type === 'metadata') return [...records];
   return [
-    { type: 'metadata', protocol_version: AGENT_WIRE_PROTOCOL_VERSION, created_at: 1 },
+    { type: 'metadata', protocol_version: WIRE_PROTOCOL_VERSION, created_at: 1 },
     ...records,
   ];
 }
@@ -938,7 +937,7 @@ type LogicalEvent =
   | { readonly kind: 'root_compact'; readonly epoch: number; readonly summary: string };
 
 function replaySession(ctx: TestAgentContext, events: readonly LogicalEvent[]): void {
-  const wire = ctx.get(IAgentWireService);
+  const wire = ctx.get(IWireService);
   for (const event of events) {
     switch (event.kind) {
       case 'user':
@@ -1032,7 +1031,7 @@ function assembleClosingMemory(
   closedAt: number,
   nodeMemory: string,
 ): string {
-  const state = ctx.get(IAgentWireService).getModel(SpineModel);
+  const state = ctx.get(IWireService).getModel(SpineModel);
   const node = state.nodes[nodeId];
   if (node === undefined) return nodeMemory;
   return assembleMemoryBody({
@@ -1047,7 +1046,7 @@ function assembleClosingMemory(
 // the equivalence the reducer rewrite must preserve.
 function expectDerivationMatchesOps(ctx: TestAgentContext): void {
   expect(deriveSpineState(ctx.context.get())).toEqual(
-    ctx.get(IAgentWireService).getModel(SpineModel),
+    ctx.get(IWireService).getModel(SpineModel),
   );
 }
 

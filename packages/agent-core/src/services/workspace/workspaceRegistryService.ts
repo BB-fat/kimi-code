@@ -19,25 +19,12 @@ import {
   WorkspaceRootNotFoundError,
   type WorkspacePatch,
 } from './workspaceRegistry';
-
-const WORKSPACE_REGISTRY_FILE = 'workspaces.json';
-const WORKSPACE_REGISTRY_VERSION = 1;
-
-interface WorkspaceRegistryEntry {
-  root: string;
-  name: string;
-  created_at: string;
-  last_opened_at: string;
-}
-
-interface WorkspaceRegistryFile {
-  version: number;
-  workspaces: Record<string, WorkspaceRegistryEntry>;
-  /** Workspace ids the user explicitly removed. Their session buckets stay on
-   *  disk, so derived workspaces (computed from the session index) must skip
-   *  them to keep deletion durable. */
-  deleted_workspace_ids: string[];
-}
+import {
+  readWorkspaceRegistryFile,
+  writeWorkspaceRegistryFile,
+  type WorkspaceRegistryEntry,
+  type WorkspaceRegistryFile,
+} from '../../session/store/workspace-registry-file';
 
 type WorkspaceRegistryEvent =
   | { type: 'event.workspace.created'; workspace: Workspace }
@@ -49,7 +36,6 @@ export class WorkspaceRegistryService extends Disposable implements IWorkspaceRe
 
   private readonly homeDir: string;
   private readonly sessionsDir: string;
-  private readonly registryPath: string;
   private opQueue: Promise<unknown> = Promise.resolve();
 
   constructor(
@@ -60,7 +46,6 @@ export class WorkspaceRegistryService extends Disposable implements IWorkspaceRe
     super();
     this.homeDir = env.homeDir;
     this.sessionsDir = join(env.homeDir, 'sessions');
-    this.registryPath = join(env.homeDir, WORKSPACE_REGISTRY_FILE);
   }
 
   async list(): Promise<Workspace[]> {
@@ -258,16 +243,12 @@ export class WorkspaceRegistryService extends Disposable implements IWorkspaceRe
     entry: WorkspaceRegistryEntry,
     sessionCount?: number,
   ): Promise<Workspace> {
-    const [{ is_git_repo, branch }, session_count] = await Promise.all([
-      detectGit(entry.root),
-      sessionCount ?? countActiveSessions(join(this.sessionsDir, workspaceId)),
-    ]);
+    const session_count =
+      sessionCount ?? (await countActiveSessions(join(this.sessionsDir, workspaceId)));
     return {
       id: workspaceId,
       root: entry.root,
       name: entry.name,
-      is_git_repo,
-      branch,
       created_at: entry.created_at,
       last_opened_at: entry.last_opened_at,
       session_count,
@@ -298,81 +279,13 @@ export class WorkspaceRegistryService extends Disposable implements IWorkspaceRe
   }
 
   private async readRegistry(): Promise<WorkspaceRegistryFile> {
-    let raw: string;
-    try {
-      raw = await fsp.readFile(this.registryPath, 'utf8');
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code === 'ENOENT' || code === 'ENOTDIR') {
-        return { version: WORKSPACE_REGISTRY_VERSION, workspaces: {}, deleted_workspace_ids: [] };
-      }
-      throw err;
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (err) {
-      this.logger.warn(
-        { path: this.registryPath, err: String(err) },
-        'workspaces.json malformed; treating as empty',
-      );
-      return { version: WORKSPACE_REGISTRY_VERSION, workspaces: {}, deleted_workspace_ids: [] };
-    }
-    if (
-      typeof parsed !== 'object' ||
-      parsed === null ||
-      typeof (parsed as { workspaces?: unknown }).workspaces !== 'object' ||
-      (parsed as { workspaces?: unknown }).workspaces === null
-    ) {
-      this.logger.warn(
-        { path: this.registryPath },
-        'workspaces.json missing required keys; treating as empty',
-      );
-      return { version: WORKSPACE_REGISTRY_VERSION, workspaces: {}, deleted_workspace_ids: [] };
-    }
-    const rawWorkspaces = (parsed as { workspaces: Record<string, unknown> }).workspaces;
-    const workspaces: Record<string, WorkspaceRegistryEntry> = {};
-    for (const [id, value] of Object.entries(rawWorkspaces)) {
-      const entry = this.sanitizeEntry(value);
-      if (entry !== null) {
-        workspaces[id] = entry;
-      }
-    }
-    const version =
-      typeof (parsed as { version?: unknown }).version === 'number'
-        ? (parsed as { version: number }).version
-        : WORKSPACE_REGISTRY_VERSION;
-    const rawDeleted = (parsed as { deleted_workspace_ids?: unknown }).deleted_workspace_ids;
-    const deleted_workspace_ids = Array.isArray(rawDeleted)
-      ? rawDeleted.filter((id): id is string => typeof id === 'string')
-      : [];
-    return { version, workspaces, deleted_workspace_ids };
-  }
-
-  private sanitizeEntry(value: unknown): WorkspaceRegistryEntry | null {
-    if (typeof value !== 'object' || value === null) return null;
-    const v = value as Partial<WorkspaceRegistryEntry>;
-    if (
-      typeof v.root !== 'string' ||
-      typeof v.name !== 'string' ||
-      typeof v.created_at !== 'string' ||
-      typeof v.last_opened_at !== 'string'
-    ) {
-      return null;
-    }
-    return {
-      root: v.root,
-      name: v.name,
-      created_at: v.created_at,
-      last_opened_at: v.last_opened_at,
-    };
+    return readWorkspaceRegistryFile(this.homeDir, (context, message) =>
+      this.logger.warn(context, message),
+    );
   }
 
   private async writeRegistry(file: WorkspaceRegistryFile): Promise<void> {
-    await fsp.mkdir(dirname(this.registryPath), { recursive: true, mode: 0o700 });
-    const tmp = `${this.registryPath}.tmp`;
-    await fsp.writeFile(tmp, JSON.stringify(file, null, 2), 'utf8');
-    await fsp.rename(tmp, this.registryPath);
+    await writeWorkspaceRegistryFile(this.homeDir, file);
   }
 
   private runExclusive<T>(op: () => Promise<T>): Promise<T> {
@@ -388,52 +301,6 @@ export class WorkspaceRegistryService extends Disposable implements IWorkspaceRe
     if (this._store.isDisposed) return;
     super.dispose();
   }
-}
-
-export interface GitInfo {
-  is_git_repo: boolean;
-  branch: string | null;
-}
-
-export async function detectGit(root: string): Promise<GitInfo> {
-  let dotGit: Stats;
-  try {
-    dotGit = await fsp.lstat(join(root, '.git'));
-  } catch {
-    return { is_git_repo: false, branch: null };
-  }
-
-  let gitDir: string;
-  if (dotGit.isDirectory()) {
-    gitDir = join(root, '.git');
-  } else if (dotGit.isFile()) {
-    let text: string;
-    try {
-      text = await fsp.readFile(join(root, '.git'), 'utf8');
-    } catch {
-      return { is_git_repo: false, branch: null };
-    }
-    const m = /^gitdir:\s*(.+)$/m.exec(text);
-    if (m === null) return { is_git_repo: false, branch: null };
-    const ref = m[1] ?? '';
-    if (ref === '') return { is_git_repo: false, branch: null };
-    gitDir = ref.trim();
-
-    if (!gitDir.startsWith('/')) {
-      gitDir = join(root, gitDir);
-    }
-  } else {
-    return { is_git_repo: false, branch: null };
-  }
-
-  let head: string;
-  try {
-    head = (await fsp.readFile(join(gitDir, 'HEAD'), 'utf8')).trim();
-  } catch {
-    return { is_git_repo: true, branch: null };
-  }
-  const ref = /^ref:\s*refs\/heads\/(.+)$/.exec(head);
-  return { is_git_repo: true, branch: ref ? (ref[1] ?? null) : null };
 }
 
 async function countActiveSessions(dir: string): Promise<number> {

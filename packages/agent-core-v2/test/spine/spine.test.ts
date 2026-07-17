@@ -19,7 +19,7 @@ import type { ServicesAccessor } from '#/_base/di/instantiation';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import {
   IAgentSpineService,
-  IAgentWireService,
+  IWireService,
   SPINE_VOID_OPENED_AT,
   SpineModel,
   spineClose,
@@ -100,7 +100,7 @@ describe('Spine reducers (via wire)', () => {
 
   it('opens a child under the cursor and tracks parent linkage', () => {
     const ctx = testAgent();
-    const wire = ctx.get(IAgentWireService);
+    const wire = ctx.get(IWireService);
 
     wire.dispatch(spineOpen({ id: '1.1.1', summary: 'task A', parentId: '1.1', openedAt: 0 }));
 
@@ -113,7 +113,7 @@ describe('Spine reducers (via wire)', () => {
 
   it('closes the cursor and pops the open stack', () => {
     const ctx = testAgent();
-    const wire = ctx.get(IAgentWireService);
+    const wire = ctx.get(IWireService);
     wire.dispatch(spineOpen({ id: '1.1.1', summary: 'task A', parentId: '1.1', openedAt: 0 }));
 
     const before = readOps(ctx);
@@ -128,7 +128,7 @@ describe('Spine reducers (via wire)', () => {
 
   it('closes the startup node like any work node', () => {
     const ctx = testAgent();
-    const wire = ctx.get(IAgentWireService);
+    const wire = ctx.get(IWireService);
 
     wire.dispatch(spineClose({ id: '1.1', closedAt: 3, memory: 'startup done' }));
 
@@ -140,7 +140,7 @@ describe('Spine reducers (via wire)', () => {
 
   it('repairs spans and the epoch boundary at a truncation cut', () => {
     const ctx = testAgent();
-    const wire = ctx.get(IAgentWireService);
+    const wire = ctx.get(IWireService);
     wire.dispatch(spineOpen({ id: '1.1.1', summary: 'task A', parentId: '1.1', openedAt: 2 }));
     wire.dispatch(spineClose({ id: '1.1.1', closedAt: 9, memory: 'did A' }));
     wire.dispatch(spineOpen({ id: '1.1.2', summary: 'task B', parentId: '1.1', openedAt: 10 }));
@@ -165,7 +165,7 @@ describe('Spine reducers (via wire)', () => {
 
   it('keeps the epoch boundary when the cut stays after it', () => {
     const ctx = testAgent();
-    const wire = ctx.get(IAgentWireService);
+    const wire = ctx.get(IWireService);
     wire.dispatch(spineOpen({ id: '1.1.1', summary: 'task A', parentId: '1.1', openedAt: 22 }));
     wire.dispatch(spineClose({ id: '1.1.1', closedAt: 30, memory: 'did A' }));
     wire.dispatch(spineRootCompact({ epoch: 2, epochStartAt: 20, epochMemoryAt: 19 }));
@@ -183,7 +183,7 @@ describe('Spine reducers (via wire)', () => {
 
   it('keeps a same-shape state on a repair that changes nothing', () => {
     const ctx = testAgent();
-    const wire = ctx.get(IAgentWireService);
+    const wire = ctx.get(IWireService);
     wire.dispatch(spineOpen({ id: '1.1.1', summary: 'task A', parentId: '1.1', openedAt: 2 }));
     const before = readOps(ctx);
 
@@ -194,7 +194,7 @@ describe('Spine reducers (via wire)', () => {
 
   it('rejects closing a root epoch (no-op, same reference)', () => {
     const ctx = testAgent();
-    const wire = ctx.get(IAgentWireService);
+    const wire = ctx.get(IWireService);
     const before = readOps(ctx);
 
     wire.dispatch(spineClose({ id: '1', closedAt: 5, memory: 'nope' }));
@@ -204,7 +204,7 @@ describe('Spine reducers (via wire)', () => {
 
   it('rejects closing a node that is not the cursor', () => {
     const ctx = testAgent();
-    const wire = ctx.get(IAgentWireService);
+    const wire = ctx.get(IWireService);
     wire.dispatch(spineOpen({ id: '1.1.1', summary: 'task A', parentId: '1.1', openedAt: 0 }));
     const before = readOps(ctx);
 
@@ -215,7 +215,7 @@ describe('Spine reducers (via wire)', () => {
 
   it('commits next atomically (close cursor, open sibling under the same parent)', () => {
     const ctx = testAgent();
-    const wire = ctx.get(IAgentWireService);
+    const wire = ctx.get(IWireService);
     wire.dispatch(spineOpen({ id: '1.1.1', summary: 'task A', parentId: '1.1', openedAt: 0 }));
 
     wire.dispatch(
@@ -241,7 +241,7 @@ describe('Spine reducers (via wire)', () => {
 
   it('rejects opening under a parent that is not the cursor', () => {
     const ctx = testAgent();
-    const wire = ctx.get(IAgentWireService);
+    const wire = ctx.get(IWireService);
     const before = readOps(ctx);
 
     wire.dispatch(spineOpen({ id: '1.2', summary: 'task X', parentId: '1', openedAt: 0 }));
@@ -804,7 +804,7 @@ function readSpine(ctx: TestAgentContext) {
 
 // The legacy op reducers are exercised directly against the wire model.
 function readOps(ctx: TestAgentContext) {
-  return ctx.get(IAgentWireService).getModel(SpineModel);
+  return ctx.get(IWireService).getModel(SpineModel);
 }
 
 function spineToolNames(ctx: TestAgentContext): string[] {

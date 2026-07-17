@@ -18,14 +18,11 @@ import { IAgentToolExecutorService, type ToolExecutionResult } from '#/agent/too
 import { AgentToolExecutorService } from '#/agent/toolExecutor/toolExecutorService';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { AgentToolRegistryService } from '#/agent/toolRegistry/toolRegistryService';
-import { IAgentWireRecordService } from '#/agent/wireRecord/wireRecord';
-import { IAgentWireService } from '#/wire/tokens';
-import { WireService } from '#/wire/wireServiceImpl';
-import { stubWireRecord } from '../contextMemory/stubs';
 import { registerLogServices } from '../../_base/log/stubs';
 import { recordingTelemetry, type TelemetryRecord } from '../../app/telemetry/stubs';
 import { stubLoopWithHooks } from '../loop/stubs';
 import { registerToolResultTruncationServices } from '../toolResultTruncation/stubs';
+import { registerTestAgentWireServices } from '../../wire/stubs';
 
 const { REMINDER_TEXT_1, REMINDER_TEXT_3, makeReminderText2 } = toolDedupeTesting;
 const ZERO_USAGE = emptyUsage();
@@ -57,6 +54,7 @@ function createHarness(telemetry: ITelemetryService = recordingTelemetry(telemet
   const loop = stubLoopWithHooks();
   const ix = createServices(disposables, {
     additionalServices: (reg) => {
+      registerTestAgentWireServices(reg, 'wire/tool-dedupe');
       reg.defineInstance(ITelemetryService, telemetry);
       reg.defineInstance(IEventBus, noopEventBus);
       const homedir = '/tmp/tool-dedupe-homedir';
@@ -77,17 +75,11 @@ function createHarness(telemetry: ITelemetryService = recordingTelemetry(telemet
       } satisfies IAgentScopeContext);
       reg.defineInstance(IBootstrapService, {
         homeDir: homedir,
-        agentHomedir: () => homedir,
       } as unknown as IBootstrapService);
       reg.defineInstance(IAgentLoopService, loop);
       reg.define(IAgentToolRegistryService, AgentToolRegistryService);
       reg.define(IAgentToolExecutorService, AgentToolExecutorService);
       registerToolResultTruncationServices(reg);
-      reg.defineInstance(IAgentWireRecordService, stubWireRecord());
-      reg.defineInstance(
-        IAgentWireService,
-        disposables.add(new WireService({ logScope: 'wire', logKey: 'tool-dedupe' })),
-      );
       reg.define(IAgentToolDedupeService, AgentToolDedupeService);
       registerLogServices(reg);
     },
@@ -169,9 +161,10 @@ async function executeAll(
   calls: ToolCall[],
   turnId: number,
   signal = new AbortController().signal,
+  traceId?: string,
 ): Promise<ToolExecutionResult[]> {
   const results: ToolExecutionResult[] = [];
-  for await (const item of h.executor.execute(calls, { turnId, signal })) {
+  for await (const item of h.executor.execute(calls, { turnId, signal, trace: { traceId } })) {
     results.push(item);
   }
   return results;
@@ -682,6 +675,34 @@ describe('AgentToolDedupeService', () => {
       expect(telemetryEvents).toContainEqual({
         event: 'tool_call',
         properties: expect.objectContaining({ tool_call_id: 'c2', dup_type: 'cross_step' }),
+      });
+    });
+
+    it('merges the request trace id into dedupe and repeat telemetry', async () => {
+      const h = createHarness();
+      h.registry.register(new EchoTool('Read'));
+      await runStep(h, 7, 1, [toolCall('c1', 'Read', { path: '/a' })]);
+      telemetryEvents.length = 0;
+
+      const signal = new AbortController().signal;
+      await beforeStep(h, 7, 2, signal);
+      await executeAll(h, [toolCall('c2', 'Read', { path: '/a' })], 7, signal, 'trace-dedupe-1');
+
+      expect(telemetryEvents).toContainEqual({
+        event: 'tool_call_dedup_detected',
+        properties: expect.objectContaining({
+          tool_call_id: 'c2',
+          dup_type: 'cross_step',
+          trace_id: 'trace-dedupe-1',
+        }),
+      });
+      expect(telemetryEvents).toContainEqual({
+        event: 'tool_call_repeat',
+        properties: expect.objectContaining({
+          tool_name: 'Read',
+          repeat_count: 2,
+          trace_id: 'trace-dedupe-1',
+        }),
       });
     });
 

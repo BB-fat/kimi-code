@@ -1,16 +1,25 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { estimateTokensForMessages } from '#/_base/utils/tokens';
+import { IAgentContextSizeService } from '#/agent/contextSize/contextSize';
+import { ContextSizeModel, contextSizeMeasured } from '#/agent/contextSize/contextSizeOps';
 import { IEventBus } from '#/app/event/eventBus';
 import type { Message } from '#/app/llmProtocol/message';
 import type { TokenUsage } from '#/app/llmProtocol/usage';
+import { IAgentUsageService } from '#/agent/usage/usage';
+import { IWireService } from '#/wire/wire';
 import {
   IAgentContextMemoryService,
   IAgentContextProjectorService,
-  IAgentContextSizeService,
+  IAgentProfileService,
 } from '#/index';
 
 import { createTestAgent, type TestAgentContext } from '../../harness';
+
+function totalOf(usage: TokenUsage | undefined): number {
+  if (usage === undefined) return 0;
+  return usage.inputOther + usage.output + usage.inputCacheRead + usage.inputCacheCreation;
+}
 
 describe('Agent context size', () => {
   let ctx: TestAgentContext;
@@ -18,6 +27,9 @@ describe('Agent context size', () => {
   let contextSize: IAgentContextSizeService;
   let projector: IAgentContextProjectorService;
   let eventBus: IEventBus;
+  let profile: IAgentProfileService;
+  let usage: IAgentUsageService;
+  let wire: IWireService;
   let raws: number[];
 
   /** The unfolded-request cost the status line should show, computed independently. */
@@ -34,6 +46,9 @@ describe('Agent context size', () => {
     contextSize = ctx.get(IAgentContextSizeService);
     projector = ctx.get(IAgentContextProjectorService);
     eventBus = ctx.get(IEventBus);
+    profile = ctx.get(IAgentProfileService);
+    usage = ctx.get(IAgentUsageService);
+    wire = ctx.get(IWireService);
     raws = [];
     eventBus.subscribe((event) => {
       const e = event as { type?: string; rawContextTokens?: number };
@@ -44,7 +59,11 @@ describe('Agent context size', () => {
   });
 
   afterEach(async () => {
-    await ctx.dispose();
+    try {
+      await ctx.expectResumeMatches();
+    } finally {
+      await ctx.dispose();
+    }
   });
 
   it('publishes the raw (unfolded) cost on every context mutation', () => {
@@ -81,17 +100,17 @@ describe('Agent context size', () => {
 
   it('keeps the measured prefix aligned with settled storage across a streamed step', () => {
     // The loop opens a partial assistant at `step.begin` and settles it with
-    // the response content after the request returns, so the trailing partial
-    // in the measured input and the output message are the same stored
-    // message. Counting it twice would park the measured prefix one past the
-    // stored context: the whole-context read would fall off the exact
-    // measured aggregate onto a per-message estimate until the next append
-    // caught the length up, and the footer gauge would swing between estimate
-    // and request caliber at every turn boundary.
+    // the response content after the request returns, so the live input array
+    // already includes the folded output when `measured()` runs. Counting the
+    // folded output again would park the measured prefix one past the stored
+    // context: the whole-context read would fall off the exact measured
+    // aggregate onto a per-message estimate until the next append caught the
+    // length up, and the footer gauge would swing between estimate and
+    // request caliber at every turn boundary.
     ctx.appendUserMessage([{ type: 'text', text: 'hello world '.repeat(20) }]);
     context.appendLoopEvent({ type: 'step.begin', uuid: 'step-1' });
 
-    const usage: TokenUsage = {
+    const tokenUsage: TokenUsage = {
       inputCacheRead: 0,
       inputCacheCreation: 0,
       inputOther: 20_000,
@@ -102,7 +121,9 @@ describe('Agent context size', () => {
       content: [{ type: 'text', text: 'answer '.repeat(40) }],
       toolCalls: [],
     };
-    contextSize.measured(context.get(), [response], usage);
+    // Mirrors the llmRequester call site: `input` is the live request array
+    // (already holding the fold-opened assistant), `output` is informational.
+    contextSize.measured(context.get(), [response], tokenUsage);
     context.appendLoopEvent({
       type: 'content.part',
       stepUuid: 'step-1',
@@ -123,5 +144,74 @@ describe('Agent context size', () => {
     expect(after.measured).toBe(20_500);
     expect(after.estimated).toBeGreaterThan(0);
     expect(after.size).toBe(after.measured + after.estimated);
+  });
+
+  it('adopts the exchange totals as the measured context size after a turn', async () => {
+    profile.update({ activeToolNames: [] });
+
+    ctx.mockNextResponse({ type: 'text', text: 'Hi there!' });
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'hi' }] });
+    await ctx.untilTurnEnd();
+
+    const exchangeTotal = totalOf(usage.status().total);
+    expect(exchangeTotal).toBeGreaterThan(0);
+    expect(context.get()).toHaveLength(2);
+
+    // The assistant message is folded into the context before the exchange
+    // finishes, so the measured prefix must match the live history — an
+    // inflated length silently knocks `get()` off the measured path onto the
+    // per-message estimate branch (found as `tokenCount` reading ~50 while
+    // the provider reported ~29k for a system-prompt-heavy "hi").
+    expect(wire.getModel(ContextSizeModel)).toMatchObject({
+      length: context.get().length,
+      tokens: exchangeTotal,
+    });
+
+    const size = contextSize.get();
+    expect(size.measured).toBe(exchangeTotal);
+    expect(size.estimated).toBe(0);
+    expect(size.size).toBe(exchangeTotal);
+    expect((await ctx.rpc.getContext({})).tokenCount).toBe(exchangeTotal);
+  });
+
+  it('repoints the measured size at the last exchange across turns', async () => {
+    profile.update({ activeToolNames: [] });
+
+    ctx.mockNextResponse({ type: 'text', text: 'first' });
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'hi' }] });
+    await ctx.untilTurnEnd();
+
+    ctx.mockNextResponse({ type: 'text', text: 'second reply, a longer one' });
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'again' }] });
+    await ctx.untilTurnEnd();
+
+    const lastExchangeTotal = totalOf(usage.status().currentTurn);
+    expect(lastExchangeTotal).toBeGreaterThan(0);
+    expect(context.get()).toHaveLength(4);
+
+    expect(wire.getModel(ContextSizeModel)).toMatchObject({
+      length: context.get().length,
+      tokens: lastExchangeTotal,
+    });
+    expect(contextSize.get().measured).toBe(lastExchangeTotal);
+    expect((await ctx.rpc.getContext({})).tokenCount).toBe(lastExchangeTotal);
+  });
+
+  it('estimates the not-yet-measured tail instead of dropping it', () => {
+    ctx.appendUserMessage([{ type: 'text', text: 'hello world, not measured yet' }]);
+
+    const size = contextSize.get();
+    expect(size.measured).toBe(0);
+    expect(size.estimated).toBeGreaterThan(0);
+    expect(size.size).toBe(size.estimated);
+  });
+
+  it('tolerates a stored measured prefix longer than the live context', () => {
+    ctx.appendUserMessage([{ type: 'text', text: 'only one message' }]);
+
+    // A corrupt/overshooting record must not push reads onto the estimate
+    // branch; the measured total is clamped to the live context instead.
+    wire.dispatch(contextSizeMeasured({ length: 5, tokens: 1234 }));
+    expect(contextSize.get().measured).toBe(1234);
   });
 });

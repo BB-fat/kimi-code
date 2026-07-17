@@ -667,7 +667,7 @@ export class SessionReplayRenderer {
     switch (result.decision) {
       case 'rejected':
         content =
-          result.selected_label === 'Revise' ? 'Plan sent back for revision' : 'Plan review rejected';
+          result.selectedLabel === 'Revise' ? 'Plan sent back for revision' : 'Plan review rejected';
         break;
       case 'cancelled':
         content = 'Plan review cancelled';

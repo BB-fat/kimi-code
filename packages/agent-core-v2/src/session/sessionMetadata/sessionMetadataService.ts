@@ -4,8 +4,16 @@
  * Persists the session metadata document (`state.json`) through the `storage`
  * access-pattern store (`IAtomicDocumentStore`), rooted at the `metaScope`
  * namespace from `sessionContext`. Loads the existing document on
- * construction (creating it on first run), and logs through `log`. Bound at
- * Session scope.
+ * construction (creating it on first run), and logs through `log`. The
+ * document always carries the `agents` / `custom` maps that v1's
+ * `Session.resume()` reads unconditionally — seeded at creation, backfilled
+ * and persisted on load for documents written before the seeding existed
+ * (without touching `updatedAt`, so a format heal never reorders session
+ * listings) — keeping sessions on a shared `KIMI_CODE_HOME` resumable by
+ * released v1 builds. Re-registering an agent whose metadata is unchanged is
+ * a no-op (no write, no mirror, no event), so resuming a session — which
+ * re-registers its agents as they materialize — never bumps `updatedAt` and
+ * never reorders session listings. Bound at Session scope.
  *
  * Read-model mirroring (flag `persistence_minidb_readmodel`): after a metadata
  * update is persisted, the fresh summary is mirrored into the `IQueryStore`
@@ -94,6 +102,8 @@ export class SessionMetadata extends Disposable implements ISessionMetadata {
   async registerAgent(agentId: string, meta: AgentMeta): Promise<void> {
     return this.enqueueUpdate(async () => {
       await this.ready;
+      const existing = this.data.agents?.[agentId];
+      if (existing !== undefined && agentMetaEquals(existing, meta)) return;
       const agents = { ...this.data.agents, [agentId]: meta };
       await this.applyUpdate({ agents });
     });
@@ -131,6 +141,14 @@ export class SessionMetadata extends Disposable implements ISessionMetadata {
     const existing = await this.store.get<SessionMeta>(this.scope, META_KEY);
     if (existing !== undefined) {
       this.data = normalizeSessionMeta(existing, this.ctx.sessionId);
+      if (this.data.agents === undefined || this.data.custom === undefined) {
+        this.data = {
+          ...this.data,
+          agents: this.data.agents ?? {},
+          custom: this.data.custom ?? {},
+        };
+        await this.store.set(this.scope, META_KEY, this.data);
+      }
       return;
     }
     const now = Date.now();
@@ -141,10 +159,31 @@ export class SessionMetadata extends Disposable implements ISessionMetadata {
       createdAt: now,
       updatedAt: now,
       archived: false,
+      agents: {},
+      custom: {},
     };
     await this.store.set(this.scope, META_KEY, this.data);
     this.log.debug('session metadata created', { sessionId: this.ctx.sessionId });
   }
+}
+
+function agentMetaEquals(a: AgentMeta, b: AgentMeta): boolean {
+  return (
+    a.homedir === b.homedir &&
+    a.type === b.type &&
+    (a.parentAgentId ?? null) === (b.parentAgentId ?? null) &&
+    a.forkedFrom === b.forkedFrom &&
+    a.swarmItem === b.swarmItem &&
+    recordEquals(a.labels, b.labels)
+  );
+}
+
+function recordEquals(a: AgentMeta['labels'], b: AgentMeta['labels']): boolean {
+  const entriesA = Object.entries(a ?? {});
+  const entriesB = Object.entries(b ?? {});
+  return (
+    entriesA.length === entriesB.length && entriesA.every(([key, value]) => b?.[key] === value)
+  );
 }
 
 export function normalizeSessionMeta(raw: SessionMeta, sessionId: string): SessionMeta {

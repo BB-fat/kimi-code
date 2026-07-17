@@ -11,13 +11,15 @@ import {
   IAgentPermissionRulesService,
   IAgentPlanService,
   IAgentProfileService,
+  IAgentScopeContext,
   IAgentSwarmService,
   IAgentTaskService,
   IAgentToolRegistryService,
   IAgentUsageService,
-  IAgentWireRecordService,
+  IAppendLogStore,
   ISessionMetadata,
   ISessionTodoService,
+  IWireService,
 } from '@moonshot-ai/agent-core-v2';
 import { buildResumedAgents, buildResumedSessionState } from '../../src/core/replay';
 
@@ -141,7 +143,16 @@ function makeFixture(metaOverrides?: Record<string, unknown>) {
       [IAgentSwarmService, { isActive: true }],
       [IAgentUsageService, { status: () => usage }],
       [IAgentToolRegistryService, { list: () => toolInfos }],
-      [IAgentWireRecordService, { getRecords: () => wireRecords }],
+      [IWireService, { flush: () => Promise.resolve() }],
+      [IAgentScopeContext, { scope: () => 'agent-main' }],
+      [
+        IAppendLogStore,
+        {
+          read: async function* () {
+            for (const record of wireRecords) yield record;
+          },
+        },
+      ],
       [IAgentBlobService, { loadParts: async (parts: readonly unknown[]) => parts }],
       [
         IAgentTaskService,

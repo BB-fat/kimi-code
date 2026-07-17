@@ -17,9 +17,10 @@
  * handler, records `usage` through `IAgentUsageService`, resolves to an
  * `LLMRequestFinish` on the `finish` event, logs the request lifecycle
  * (config deduplicated by content, request/response/failure lines, plus
- * per-request fields) through `log`, records durable request-trace Ops
- * through `wire`, and reports provider failures through `telemetry`. Bound
- * at Agent scope.
+ * per-request fields) through `log`, publishes advisory model-capability
+ * warnings through `eventBus`, records durable request-trace Ops
+ * through `wire`, reports each request's `x-trace-id` to its caller, and
+ * reports provider failures through `telemetry`. Bound at Agent scope.
  */
 
 import { createHash } from 'node:crypto';
@@ -41,6 +42,7 @@ import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { IAgentToolSelectService } from '#/agent/toolSelect/toolSelect';
 import { IAgentUsageService } from '#/agent/usage/usage';
 import { IConfigService } from '#/app/config/config';
+import { IEventBus } from '#/app/event/eventBus';
 import {
   APIConnectionError,
   APIContextOverflowError,
@@ -66,22 +68,23 @@ import { applyCompletionBudget, resolveCompletionBudget } from '#/app/model/comp
 import type { Protocol } from '#/app/protocol/protocol';
 import type { ApiErrorEvent } from '#/app/telemetry/events';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
-import { IAgentWireService } from '#/wire/tokens';
+import { IWireService } from '#/wire/wire';
 import type { PayloadOf } from '#/wire/types';
-import type { IWireService } from '#/wire/wireService';
 import { THINKING_SECTION, type ThinkingConfig } from '#/agent/profile/configSection';
 import { resolveThinkingKeep } from '#/agent/profile/thinking';
 
-import type {
-  LLMRequestFinish,
-  LLMRequestLogFields,
-  LLMRequestOverrides,
-  LLMRequestPartHandler,
-  LLMRequestSource,
-  LLMStreamTiming,
-  SystemPromptContribution,
+import {
+  IAgentLLMRequesterService,
+  type LLMRequestFinish,
+  type LLMRequestLogFields,
+  type LLMRequestOverrides,
+  type LLMRequestPartHandler,
+  type LLMRequestSource,
+  type LLMRequestTask,
+  type LLMStreamTiming,
+  type SystemPromptContribution,
 } from './llmRequester';
-import { IAgentLLMRequesterService } from './llmRequester';
+import type { LLMRequestTrace } from '#/app/llmProtocol/requestTrace';
 import {
   LlmRequestTraceModel,
   llmRequest,
@@ -145,6 +148,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
   private readonly turnConfigs = new Map<number, TurnRequestConfig>();
   private readonly mediaDegradedTurns = new Set<number>();
   private readonly mediaStrippedTurns = new Map<number, MediaStripSnapshot>();
+  private readonly emittedThinkingEffortWarnings = new Set<string>();
 
   constructor(
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
@@ -157,8 +161,9 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     @IConfigService private readonly config: IConfigService,
     @ILogService private readonly log: ILogService,
     @ITelemetryService private readonly telemetry: ITelemetryService,
-    @IAgentWireService private readonly wire: IWireService,
+    @IWireService private readonly wire: IWireService,
     @IFaultInjectionService private readonly faultInjection: IFaultInjectionService,
+    @IEventBus private readonly eventBus: IEventBus,
   ) {}
 
   registerSystemPromptContribution(
@@ -176,36 +181,55 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     onPart: LLMRequestPartHandler = noopOnPart,
     signal?: AbortSignal,
   ): Promise<LLMRequestFinish> {
+    return this.start(overrides, onPart, signal).result;
+  }
+
+  start(
+    overrides: LLMRequestOverrides = {},
+    onPart: LLMRequestPartHandler = noopOnPart,
+    signal?: AbortSignal,
+  ): LLMRequestTask {
+    const trace = new MutableLLMRequestTrace();
+    return {
+      trace,
+      result: this.requestWithTrace(trace, overrides, onPart, signal),
+    };
+  }
+
+  private async requestWithTrace(
+    trace: MutableLLMRequestTrace,
+    overrides: LLMRequestOverrides,
+    onPart: LLMRequestPartHandler,
+    signal: AbortSignal | undefined,
+  ): Promise<LLMRequestFinish> {
     signal?.throwIfAborted();
-    return this.requestWithRetry(overrides, onPart, signal);
+    trace.set(undefined);
+    return this.requestWithRetry(trace, overrides, onPart, signal);
   }
 
   private async requestWithRetry(
+    trace: MutableLLMRequestTrace,
     overrides: LLMRequestOverrides,
     onPart: LLMRequestPartHandler,
     signal: AbortSignal | undefined,
   ): Promise<LLMRequestFinish> {
     const startedAt = Date.now();
     const maxAttempts = Math.max(overrides.retry?.maxAttempts ?? DEFAULT_MAX_RETRY_ATTEMPTS, 1);
-
-    if (maxAttempts <= 1) {
-      try {
-        return await this.executeRequestAttempt(overrides, onPart, signal, 1, maxAttempts);
-      } catch (error) {
-        this.logRequestFailure(error, overrides, signal, 1, maxAttempts);
-        this.trackApiError(error, startedAt, signal);
-        throw error;
-      }
-    }
-
     const delays = retryBackoffDelays(maxAttempts);
     for (let attempt = 1; ; attempt += 1) {
       try {
-        return await this.executeRequestAttempt(overrides, onPart, signal, attempt, maxAttempts);
+        return await this.executeRequestAttempt(
+          trace,
+          overrides,
+          onPart,
+          signal,
+          attempt,
+          maxAttempts,
+        );
       } catch (error) {
         if (attempt >= maxAttempts || !isRetryableGenerateError(error)) {
           this.logRequestFailure(error, overrides, signal, attempt, maxAttempts);
-          this.trackApiError(error, startedAt, signal);
+          trace.set(this.trackApiError(error, startedAt, signal, overrides.source, trace.traceId));
           throw error;
         }
 
@@ -224,6 +248,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
   }
 
   private async executeRequestAttempt(
+    trace: MutableLLMRequestTrace,
     overrides: LLMRequestOverrides,
     onPart: LLMRequestPartHandler,
     signal: AbortSignal | undefined,
@@ -235,7 +260,9 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
       overrides,
       attempt === 1 ? undefined : { attempt: `${String(attempt)}/${String(maxAttempts)}` },
     );
-    return this.runRequest(request, onPart, signal);
+    return this.runRequest(request, onPart, signal, (traceId) => {
+      trace.set(traceId);
+    });
   }
 
   private logRequestFailure(
@@ -259,10 +286,13 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     error: unknown,
     startedAt: number,
     signal: AbortSignal | undefined,
-  ): void {
-    if (isAbortError(error) || signal?.aborted === true) return;
+    source?: LLMRequestSource,
+    requestTraceId?: string,
+  ): string | undefined {
+    if (isAbortError(error) || signal?.aborted === true) return requestTraceId;
     const modelAlias = this.profile.data().modelAlias;
     const model = this.tryGetProvider();
+    const traceId = requestTraceId ?? apiTraceId(error);
     const properties: ApiErrorEvent = {
       error_type: apiErrorType(error),
       model: model?.id ?? modelAlias ?? 'unknown',
@@ -271,12 +301,18 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
       protocol: model?.protocol,
       retryable: isRetryableGenerateError(error),
       duration_ms: Math.max(0, Date.now() - startedAt),
+      trace_id: traceId,
     };
+    if (source?.type === 'turn') {
+      properties['turn_id'] = source.turnId;
+      if (source.step !== undefined) properties['step_no'] = source.step;
+    }
     const statusCode = apiStatusCode(error);
     if (statusCode !== undefined) properties['status_code'] = statusCode;
     const currentTurn = this.usage.status().currentTurn;
     if (currentTurn !== undefined) properties['input_tokens'] = inputTotal(currentTurn);
     this.telemetry.track2('api_error', properties);
+    return traceId;
   }
 
   private tryGetProvider(): Model | undefined {
@@ -291,6 +327,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     request: ResolvedLLMRequest,
     onPart: LLMRequestPartHandler,
     signal: AbortSignal | undefined,
+    onRequestTrace: (traceId: string | undefined) => void,
   ): Promise<LLMRequestFinish> {
     let mediaStripSnapshot = this.mediaStripSnapshotForTurn(request.source);
     const requestInput = (projection: RequestProjection) => {
@@ -315,11 +352,13 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     };
 
     const run = async (projection: RequestProjection): Promise<LLMRequestFinish> => {
+      onRequestTrace(undefined);
       const input = requestInput(projection);
       const fields =
         projection === 'normal'
           ? request.logFields
           : { ...request.logFields, projection };
+      this.warnAboutAnthropicThinkingEffort(request);
       const logInput: LLMRequestLogInput = {
         protocol: request.model.protocol,
         modelName: request.model.name,
@@ -344,7 +383,12 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
       let timing: LLMStreamTiming | undefined;
       let finish: Extract<ModelRequestEvent, { type: 'finish' }> | undefined;
 
-      for await (const event of request.model.request(input, signal)) {
+      const setTraceId = (traceId: string | null | undefined): void => {
+        const normalized = traceId ?? undefined;
+        onRequestTrace(normalized);
+      };
+
+      for await (const event of request.model.request(input, signal, { onTraceId: setTraceId })) {
         switch (event.type) {
           case 'part':
             await onPart(event.part);
@@ -355,6 +399,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
           case 'finish':
             finish = event;
             message = event.message;
+            setTraceId(event.traceId);
             break;
           case 'timing': {
             const { type: _type, ...streamTiming } = event;
@@ -380,6 +425,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
         rawFinishReason: finish.rawFinishReason,
         providerMessageId: finish.id,
         timing,
+        traceId: finish.traceId,
       };
     };
 
@@ -453,6 +499,45 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
         }
         throw error;
       }
+    }
+  }
+
+  private warnAboutAnthropicThinkingEffort(request: ResolvedLLMRequest): void {
+    if (request.model.protocol !== 'anthropic') return;
+    const effort = request.thinkingEffort;
+    if (effort === 'on') return;
+
+    let code: string;
+    let message: string;
+    let knownEfforts: string | undefined;
+    if (effort === 'off') {
+      if (!request.model.alwaysThinking) return;
+      code = 'anthropic-thinking-cannot-disable';
+      message = `Model "${request.model.name}" declares always-on thinking. The configured effort "off" will be sent unchanged to the Anthropic-compatible backend.`;
+    } else {
+      const supportEfforts = request.model.supportEfforts?.filter((value) => value.length > 0);
+      if (supportEfforts === undefined || supportEfforts.length === 0) return;
+      if (supportEfforts.includes(effort)) return;
+      code = 'anthropic-thinking-effort-not-listed';
+      knownEfforts = supportEfforts.join(',');
+      message = `Thinking effort "${effort}" is not listed for model "${request.model.name}" (known: ${supportEfforts.join(', ')}). The configured value will be sent unchanged to the Anthropic-compatible backend.`;
+    }
+
+    const key = [code, request.modelAlias, request.model.name, effort, knownEfforts].join('\u0000');
+    if (this.emittedThinkingEffortWarnings.has(key)) return;
+    this.emittedThinkingEffortWarnings.add(key);
+    try {
+      this.log.warn(message, {
+        modelAlias: request.modelAlias,
+        model: request.model.name,
+        effort,
+        knownEfforts,
+      });
+    } catch {
+    }
+    try {
+      this.eventBus.publish({ type: 'warning', code, message });
+    } catch {
     }
   }
 
@@ -668,6 +753,14 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
   }
 }
 
+class MutableLLMRequestTrace implements LLMRequestTrace {
+  traceId: string | undefined;
+
+  set(traceId: string | undefined): void {
+    this.traceId = traceId;
+  }
+}
+
 function logFieldsForSource(
   source: LLMRequestSource | undefined,
   extraFields?: LLMRequestLogFields,
@@ -768,6 +861,19 @@ function apiStatusCode(error: unknown): number | undefined {
     if (typeof details === 'object' && details !== null) {
       const statusCode = (details as Record<string, unknown>)['statusCode'];
       if (typeof statusCode === 'number') return statusCode;
+    }
+  }
+  return undefined;
+}
+
+function apiTraceId(error: unknown): string | undefined {
+  const raw = unwrapErrorCause(error);
+  if (raw instanceof APIStatusError && raw.traceId !== null) return raw.traceId;
+  if (typeof error === 'object' && error !== null) {
+    const details = (error as Record<string, unknown>)['details'];
+    if (typeof details === 'object' && details !== null) {
+      const traceId = (details as Record<string, unknown>)['traceId'];
+      if (typeof traceId === 'string') return traceId;
     }
   }
   return undefined;

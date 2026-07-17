@@ -36,6 +36,21 @@ import type { SlashCommandHost } from './dispatch';
 
 const MODEL_PICKER_REFRESH_TIMEOUT_MS = 2_000;
 
+const MODEL_SWITCH_CACHE_WARNING =
+  'Note: Switching models invalidates the existing prompt cache. Use /new to avoid extra token costs.';
+const EFFORT_SWITCH_CACHE_WARNING =
+  'Note: Switching effort invalidates the existing prompt cache. Use /new to avoid extra token costs.';
+
+/** True once the conversation has at least one user message: a switch from
+ * then on resends the accumulated context, losing the cache. Shell-command
+ * echoes are also 'user' transcript entries but carry an empty `bullet`, so
+ * they're excluded. */
+function hasConversationHistory(host: SlashCommandHost): boolean {
+  return host.state.transcriptEntries.some(
+    (entry) => entry.kind === 'user' && entry.bullet !== '',
+  );
+}
+
 function currentTuiConfig(host: SlashCommandHost): TuiConfig {
   return {
     theme: host.state.appState.theme,
@@ -44,6 +59,14 @@ function currentTuiConfig(host: SlashCommandHost): TuiConfig {
     notifications: host.state.appState.notifications,
     upgrade: host.state.appState.upgrade,
   };
+}
+
+function effectiveModelForHost(host: SlashCommandHost, model: ModelAlias): ModelAlias {
+  const providerType = host.state.appState.availableProviders[model.provider]?.type;
+  // Flat models (no named provider, e.g. inline base_url served by a v2
+  // backend) have no provider entry to look up; their own protocol declaration
+  // plays the provider-identity role, mirroring the resolver.
+  return effectiveModelAlias(model, providerType ?? model.protocol);
 }
 
 export async function handlePlanCommand(host: SlashCommandHost, args: string): Promise<void> {
@@ -252,7 +275,7 @@ export async function handleEffortCommand(host: SlashCommandHost, args: string):
     host.showError('No model selected. Run /model to select one first.');
     return;
   }
-  const effective = effectiveModelAlias(model);
+  const effective = effectiveModelForHost(host, model);
   const segments = segmentsFor(effective);
   const arg = args.trim().toLowerCase();
   if (arg.length === 0) {
@@ -260,10 +283,19 @@ export async function handleEffortCommand(host: SlashCommandHost, args: string):
     return;
   }
   if (!segments.includes(arg)) {
-    host.showError(
-      `Unsupported thinking effort "${arg}" for ${alias}. Available: ${segments.join(', ')}`,
+    const providerType = host.state.appState.availableProviders[effective.provider]?.type;
+    const protocol = effective.protocol ?? providerType;
+    if (protocol !== 'anthropic') {
+      host.showError(
+        `Unsupported thinking effort "${arg}" for ${alias}. Available: ${segments.join(', ')}`,
+      );
+      return;
+    }
+    const knownEfforts = effective.supportEfforts?.join(', ') ?? 'none declared';
+    host.showStatus(
+      `Thinking effort "${arg}" is not listed for ${alias} (known: ${knownEfforts}). Sending "${arg}" unchanged; the configured provider will validate it.`,
+      'warning',
     );
-    return;
   }
   await performModelSwitch(host, alias, arg, true);
 }
@@ -280,6 +312,7 @@ function showEffortPicker(
     new EffortSelectorComponent({
       efforts: segments,
       currentValue,
+      warning: hasConversationHistory(host) ? EFFORT_SWITCH_CACHE_WARNING : undefined,
       onSelect: (effort) => {
         host.restoreEditor();
         void performModelSwitch(host, alias, effort, true);
@@ -376,7 +409,13 @@ async function applyEditorChoice(host: SlashCommandHost, value: string): Promise
 }
 
 export function showModelPicker(host: SlashCommandHost, selectedValue: string = host.state.appState.model): void {
-  const entries = Object.entries(host.state.appState.availableModels);
+  const models = Object.fromEntries(
+    Object.entries(host.state.appState.availableModels).map(([alias, model]) => [
+      alias,
+      effectiveModelForHost(host, model),
+    ]),
+  );
+  const entries = Object.entries(models);
   if (entries.length === 0) {
     host.showNotice(
       'No models configured',
@@ -386,10 +425,11 @@ export function showModelPicker(host: SlashCommandHost, selectedValue: string = 
   }
   host.mountEditorReplacement(
     new TabbedModelSelectorComponent({
-      models: host.state.appState.availableModels,
+      models,
       currentValue: host.state.appState.model,
       selectedValue,
       currentThinkingEffort: host.state.appState.thinkingEffort,
+      warning: hasConversationHistory(host) ? MODEL_SWITCH_CACHE_WARNING : undefined,
       onSelect: ({ alias, thinking }) => {
         host.restoreEditor();
         void performModelSwitch(host, alias, thinking, true);

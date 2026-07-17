@@ -28,14 +28,12 @@ import { InstantiationType } from '#/_base/di/extensions';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
 import { estimateTokensForMessages } from '#/_base/utils/tokens';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
-import { ContextModel } from '#/agent/contextMemory/contextOps';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IEventBus } from '#/app/event/eventBus';
 import { IAgentContextProjectorService } from '#/agent/contextProjector/contextProjector';
 import type { Message } from '#/app/llmProtocol/message';
 import type { TokenUsage } from '#/app/llmProtocol/usage';
-import { IAgentWireService } from '#/wire/tokens';
-import type { IWireService } from '#/wire/wireService';
+import { IWireService } from '#/wire/wire';
 
 import { IAgentContextSizeService, type ContextSize, type ContextSizeMeasurement } from './contextSize';
 import { ContextSizeModel, type ContextSizeSnapshot, contextSizeMeasured } from './contextSizeOps';
@@ -50,7 +48,7 @@ export class AgentContextSizeService extends Disposable implements IAgentContext
 
   constructor(
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
-    @IAgentWireService private readonly wire: IWireService,
+    @IWireService private readonly wire: IWireService,
     @IEventBus private readonly eventBus: IEventBus,
     @IAgentContextProjectorService private readonly projector: IAgentContextProjectorService,
   ) {
@@ -60,8 +58,11 @@ export class AgentContextSizeService extends Disposable implements IAgentContext
     // measurement landing re-bases the measured prefix without touching the
     // history. Publishing the pair from one place keeps them mutually
     // consistent (raw >= projected) and in the same caliber as `getStatus()`.
-    this._register(this.wire.subscribe(ContextModel, () => this.publishSizes()));
-    this._register(this.wire.subscribe(ContextSizeModel, () => this.publishSizes()));
+    // The wire exposes no model-change subscription — instead every live
+    // `ContextModel` mutation publishes `context.spliced` (appends included),
+    // and measured-prefix updates land through `measured()` below (the op is
+    // live-only, so replay stays silent).
+    this._register(this.eventBus.subscribe('context.spliced', () => this.publishSizes()));
   }
 
   private publishSizes(): void {
@@ -86,12 +87,17 @@ export class AgentContextSizeService extends Disposable implements IAgentContext
   get(start?: number, end?: number): ContextSize {
     const context = this.context.get();
     const model = this.wire.getModel(ContextSizeModel);
+    // Defensive clamp: the measured prefix can never be longer than the live
+    // context. An op written against a mutated message array once inflated
+    // `model.length` past `context.length`, silently knocking every read off
+    // the measured path onto the per-message estimate branch.
+    const measuredLength = Math.min(model.length, context.length);
     const from = normalizeSliceIndex(start ?? 0, context.length);
     const to = normalizeSliceIndex(end ?? context.length, context.length);
-    const measuredEnd = Math.min(to, model.length);
-    const estimatedStart = Math.max(from, model.length);
+    const measuredEnd = Math.min(to, measuredLength);
+    const estimatedStart = Math.max(from, measuredLength);
     const measured =
-      from === 0 && measuredEnd === model.length
+      from === 0 && measuredEnd === measuredLength
         ? model.tokens
         : measuredSubRange(context, model.snapshots, from, measuredEnd);
     // Before the first measured exchange (e.g. right after a resume — the Op
@@ -139,25 +145,18 @@ export class AgentContextSizeService extends Disposable implements IAgentContext
   }
 
   measured(input: readonly Message[], output: readonly Message[], usage: TokenUsage): void {
-    // The loop opens a `partial` assistant at `step.begin` and settles it with
-    // the response content after the request returns: a trailing partial in
-    // `input` and the output message are the SAME stored message. Strip
-    // trailing partials from both sides so the match and the prefix length
-    // describe the settled storage. Counting the partial separately would
-    // inflate the prefix one past the stored context, knocking the
-    // whole-context read off the exact measured aggregate and onto a
-    // per-message estimate until the next append caught the length up — the
-    // footer gauge then swung between estimate and request caliber at every
-    // turn boundary.
-    const storedInput = stripTrailingPartials(input);
-    const storedContext = stripTrailingPartials(this.context.get());
-    // Only adopt the measurement when `input` still matches the live context.
-    // This rejects stale readings (e.g. the context was spliced, or the request
-    // used overridden messages) so a mismatched measurement cannot poison state.
-    if (!matchesContext(storedInput, storedContext)) return;
-    const length = storedInput.length + output.length;
+    const context = this.context.get();
+    if (!matchesContext(input, context)) return;
+    // The fold of the step's loop events creates the assistant message in the
+    // context BEFORE the exchange finishes (a skeleton at `step.begin`, filled
+    // by `content.part` folds during streaming), and `input` is that same live
+    // array — so it already includes `output` here. The measured prefix is the
+    // whole current context; `input.length + output.length` would count the
+    // folded output twice.
+    const length = context.length;
     const tokens = tokenUsageTotal(usage);
     this.wire.dispatch(contextSizeMeasured({ length, tokens }));
+    this.publishSizes();
   }
 
   latestMeasurement(): ContextSizeMeasurement | undefined {
@@ -204,18 +203,6 @@ function prefixTokens(
   }
   if (anchor === undefined) return undefined;
   return anchor.tokens + estimateTokensForMessages(context.slice(anchor.storageLength, end));
-}
-
-/**
- * Drop trailing in-progress (`partial`) messages — at most the open step's
- * assistant, which settles into the response message once the request returns.
- */
-function stripTrailingPartials<T extends { readonly partial?: boolean }>(
-  messages: readonly T[],
-): readonly T[] {
-  let end = messages.length;
-  while (end > 0 && messages[end - 1]!.partial === true) end -= 1;
-  return end === messages.length ? messages : messages.slice(0, end);
 }
 
 function matchesContext(input: readonly Message[], context: readonly ContextMessage[]): boolean {

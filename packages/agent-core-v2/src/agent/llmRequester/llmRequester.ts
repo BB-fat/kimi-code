@@ -4,6 +4,7 @@ import type { FinishReason } from '#/app/llmProtocol/finishReason';
 import type { Message, StreamedMessagePart } from '#/app/llmProtocol/message';
 import type { Tool } from '#/app/llmProtocol/tool';
 import type { TokenUsage } from '#/app/llmProtocol/usage';
+import type { LLMRequestTrace } from '#/app/llmProtocol/requestTrace';
 import type { LogContext } from '#/_base/log/log';
 
 export type LLMRequestLogFields = Readonly<LogContext>;
@@ -64,6 +65,8 @@ export interface LLMRequestFinish {
   rawFinishReason?: string;
   providerMessageId?: string;
   timing?: LLMStreamTiming;
+  /** Trace id of the request that produced this finish (Kimi `x-trace-id`). */
+  traceId?: string;
 }
 
 export type LLMRequestPartHandler = (part: StreamedMessagePart) => void | Promise<void>;
@@ -106,6 +109,10 @@ export type SystemPromptContribution = (
   context: SystemPromptContributionContext,
 ) => string;
 
+export interface LLMRequestTask {
+  readonly trace: LLMRequestTrace;
+  readonly result: Promise<LLMRequestFinish>;
+}
 export interface IAgentLLMRequesterService {
   readonly _serviceBrand: undefined;
 
@@ -124,6 +131,12 @@ export interface IAgentLLMRequesterService {
     id: string,
     contribution: SystemPromptContribution,
   ): IDisposable;
+
+  start(
+    overrides?: LLMRequestOverrides,
+    onPart?: LLMRequestPartHandler,
+    signal?: AbortSignal,
+  ): LLMRequestTask;
 }
 
 export const IAgentLLMRequesterService = createDecorator<IAgentLLMRequesterService>(

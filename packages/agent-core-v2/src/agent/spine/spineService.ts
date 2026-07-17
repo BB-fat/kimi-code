@@ -63,8 +63,7 @@ import { IFlagService } from '#/app/flag/flag';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
-import { IAgentWireService } from '#/wire/tokens';
-import type { IWireService } from '#/wire/wireService';
+import { IWireService } from '#/wire/wire';
 
 import { SPINE_FLAG_ID } from './flag';
 import { appendSpineView, loadSpineViewOverride } from './instructions';
@@ -156,7 +155,7 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     @IFlagService private readonly flags: IFlagService,
     @ISessionContext private readonly sessionCtx: ISessionContext,
     @IAgentScopeContext private readonly agentScope: IAgentScopeContext,
-    @IAgentWireService private readonly wire: IWireService,
+    @IWireService private readonly wire: IWireService,
     @IEventBus private readonly eventBus: IEventBus,
     @IAgentLoopService loop: IAgentLoopService,
     @IAgentContextProjectorService projector: IAgentContextProjectorService,
@@ -203,7 +202,7 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
       }),
     );
     this._register(
-      this.wire.onRestored(() => {
+      this.wire.hooks.onDidRestore.register('spine', async (_ctx, next) => {
         // The restored history re-derives the tree on first read; the ephemeral
         // gauges and archive ledger belong to the pre-restore session. Clearing
         // the archive ledger makes the first post-restore sweep rewrite every
@@ -215,6 +214,7 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
         this.finals.clear();
         this.archivedIds.clear();
         this.failedArchiveIds.clear();
+        await next();
       }),
     );
     this._register(
