@@ -5,14 +5,11 @@ import {
   createCompactionSummaryMessage,
 } from '#/agent/contextMemory/compactionHandoff';
 import type { ContextMessage } from '#/agent/contextMemory/types';
-import { collectSpanUserRequests } from '#/agent/spine/spineFold';
 import { MASTER_ENV } from '#/app/flag/flagService';
 import {
   ACCEPTED_OUTPUT,
   WIRE_PROTOCOL_VERSION,
   appendSpineView,
-  assembleMemoryBody,
-  closedChildMemories,
   deriveSpineState,
   IAgentContextSizeService,
   IAgentLLMRequesterService,
@@ -64,7 +61,7 @@ describe('Spine projection fold', () => {
     vi.unstubAllEnvs();
   });
 
-  it('replaces a closed node span with one memory message without mutating storage', () => {
+  it('folds a closed node span into a memory slot without mutating storage', () => {
     const ctx = testAgent();
     const idx = buildClosedNodeHistory(ctx);
 
@@ -72,22 +69,25 @@ describe('Spine projection fold', () => {
     const folded = fold(ctx);
 
     expect(stored).toHaveLength(idx.after + 1);
-    expect(folded).toHaveLength(6);
-    expect(textOf(folded[0])).toContain('[U1]');
-    expect(textOf(folded[0])).toContain('start');
-    expect(textOf(folded[1])).toContain('<spine_memory>');
-    expect(textOf(folded[1])).toContain('did A');
+    expect(folded).toHaveLength(7);
+    // The open startup node carries the structural landmark.
+    expect(textOf(folded[0])).toBe(
+      '<spine_node id="1.1" summary="startup" status="live" />',
+    );
+    expect(textOf(folded[1])).toContain('[U1]');
+    expect(textOf(folded[1])).toContain('start');
+    expect(textOf(folded[2])).toBe('<spine_memory node_id="1.1.1">\ndid A\n</spine_memory>');
     // The close carrier and its receipt stay visible past the folded span.
-    expect(textOf(folded[2])).toContain('calling spine_close');
-    expect(textOf(folded[4])).toContain('[U2]');
-    expect(textOf(folded[4])).toContain('after');
-    expect(textOf(folded[5])).toContain('<spine_status');
-    expect(textOf(folded[5])).toContain('cursor="1.1"');
+    expect(textOf(folded[3])).toContain('calling spine_close');
+    expect(textOf(folded[5])).toContain('[U2]');
+    expect(textOf(folded[5])).toContain('after');
+    expect(textOf(folded[6])).toContain('<spine_status');
+    expect(textOf(folded[6])).toContain('cursor="1.1"');
     // No usage anchor in this harness: the projected whole-context number
     // carries the estimate marker, and the raw stored history is contrasted
     // beside it.
-    expect(textOf(folded[5])).toMatch(/ raw_context="~\d/);
-    expect(textOf(folded[5])).toMatch(/ projected_context="~\d/);
+    expect(textOf(folded[6])).toMatch(/ raw_context="~\d/);
+    expect(textOf(folded[6])).toMatch(/ projected_context="~\d/);
   });
 
   it('carries the parent goal summary in the status line', () => {
@@ -100,14 +100,21 @@ describe('Spine projection fold', () => {
     expect(status).toContain('parent_summary="root epoch 1"');
   });
 
-  it('folds only the outermost closed node (no double folding)', () => {
+  it('flattens nested closed nodes into per-node memory slots', () => {
     const ctx = testAgent();
     buildNestedClosedHistory(ctx);
 
     const folded = fold(ctx);
-    const memoryMessages = folded.filter((m) => textOf(m).includes('<spine_memory>'));
-    expect(memoryMessages).toHaveLength(1);
-    expect(textOf(memoryMessages[0])).toContain('parent mem');
+    const memoryMessages = folded.filter((m) => textOf(m).includes('<spine_memory'));
+    expect(memoryMessages).toHaveLength(2);
+    // Each closed node contributes its own slot; nothing is inlined into the
+    // parent's memory.
+    expect(textOf(memoryMessages[0])).toBe(
+      '<spine_memory node_id="1.1.1.1">\nchild mem\n</spine_memory>',
+    );
+    expect(textOf(memoryMessages[1])).toBe(
+      '<spine_memory node_id="1.1.1">\nparent mem\n</spine_memory>',
+    );
   });
 
   it('is the identity transform when spine is disabled', () => {
@@ -116,7 +123,7 @@ describe('Spine projection fold', () => {
     buildClosedNodeHistory(ctx);
 
     const folded = fold(ctx);
-    expect(folded.some((m) => textOf(m).includes('<spine_memory>'))).toBe(false);
+    expect(folded.some((m) => textOf(m).includes('<spine_memory'))).toBe(false);
     expect(folded.some((m) => textOf(m).includes('<spine_status'))).toBe(false);
   });
 
@@ -125,7 +132,7 @@ describe('Spine projection fold', () => {
     buildClosedNodeHistory(ctx);
 
     const projected = ctx.project();
-    expect(projected.some((m) => textOf(m).includes('<spine_memory>'))).toBe(true);
+    expect(projected.some((m) => textOf(m).includes('<spine_memory'))).toBe(true);
     expect(projected.some((m) => textOf(m).includes('did A'))).toBe(true);
     expect(projected.some((m) => textOf(m).includes('working'))).toBe(false);
   });
@@ -136,7 +143,7 @@ describe('Spine projection fold', () => {
     buildClosedNodeHistory(ctx);
 
     const projected = ctx.project();
-    expect(projected.some((m) => textOf(m).includes('<spine_memory>'))).toBe(false);
+    expect(projected.some((m) => textOf(m).includes('<spine_memory'))).toBe(false);
     expect(projected.some((m) => textOf(m).includes('working'))).toBe(true);
   });
 
@@ -359,21 +366,24 @@ describe('Spine projection fold', () => {
     append(ctx, userMessage('finished'));
 
     const folded = fold(ctx);
-    const memories = folded.filter((m) => textOf(m).includes('<spine_memory>'));
+    const memories = folded.filter((m) => textOf(m).startsWith('<spine_memory node_id="'));
     expect(memories).toHaveLength(3);
+    expect(textOf(memories[0])).toContain('node_id="1.1.1"');
     expect(textOf(memories[0])).toContain('mem A');
+    expect(textOf(memories[1])).toContain('node_id="1.1.2"');
     expect(textOf(memories[1])).toContain('mem B');
+    expect(textOf(memories[2])).toContain('node_id="1.1.3"');
     expect(textOf(memories[2])).toContain('mem C');
     for (const body of ['A body', 'B body', 'C body']) {
       expect(folded.some((m) => textOf(m).includes(body))).toBe(false);
     }
-    expect(textOf(folded[0])).toContain('[U1] start');
-    expect(textOf(folded[6])).toContain('[U2] finished');
+    expect(textOf(folded[1])).toContain('[U1] start');
+    expect(textOf(folded[7])).toContain('[U2] finished');
   });
 
-  it('folds a closed subtree once at the outermost closed node', () => {
-    // Guards the drain change: re-firing nested closed spans would corrupt the
-    // projection (double memory injection, wrong [U#] anchors).
+  it('flattens a closed subtree into per-node memory slots, children first', () => {
+    // Every closed node in the subtree contributes its own slot in span order;
+    // the parent's memory lands last and inlines nothing.
     const ctx = testAgent();
     append(ctx, userMessage('start'));
     append(ctx, assistantToolCall('po', 'spine_open', JSON.stringify({ summary: 'parent' })));
@@ -401,14 +411,17 @@ describe('Spine projection fold', () => {
     append(ctx, userMessage('final'));
 
     const folded = fold(ctx);
-    const memories = folded.filter((m) => textOf(m).includes('<spine_memory>'));
-    expect(memories).toHaveLength(1);
-    expect(textOf(memories[0])).toContain('mem parent');
+    const memories = folded.filter((m) => textOf(m).startsWith('<spine_memory node_id="'));
+    expect(memories).toHaveLength(4);
+    expect(textOf(memories[0])).toBe('<spine_memory node_id="1.1.1.1">\nmem A\n</spine_memory>');
+    expect(textOf(memories[1])).toBe('<spine_memory node_id="1.1.1.2">\nmem B\n</spine_memory>');
+    expect(textOf(memories[2])).toBe('<spine_memory node_id="1.1.1.3">\nmem C\n</spine_memory>');
+    expect(textOf(memories[3])).toBe('<spine_memory node_id="1.1.1">\nmem parent\n</spine_memory>');
     for (const body of ['A body', 'B body', 'C body', 'parent tail']) {
       expect(folded.some((m) => textOf(m).includes(body))).toBe(false);
     }
-    expect(textOf(folded[0])).toContain('[U1] start');
-    expect(textOf(folded[4])).toContain('[U2] final');
+    expect(textOf(folded[1])).toContain('[U1] start');
+    expect(textOf(folded[8])).toContain('[U2] final');
   });
 
   it('skips nodes closed before the epoch boundary and still folds post-epoch nodes', () => {
@@ -430,12 +443,83 @@ describe('Spine projection fold', () => {
     const folded = fold(ctx);
     expect(textOf(folded[0])).toBe(buildCompactionSummaryText('epoch summary'));
     expect(folded.some((m) => textOf(m).includes('did A'))).toBe(false);
-    const memories = folded.filter((m) => textOf(m).includes('<spine_memory>'));
+    const memories = folded.filter((m) => textOf(m).includes('<spine_memory'));
     expect(memories).toHaveLength(1);
     expect(textOf(memories[0])).toContain('did B');
     expect(folded.some((m) => textOf(m).includes('B working'))).toBe(false);
     expect(folded.some((m) => textOf(m).includes('new epoch work'))).toBe(true);
     expect(folded.some((m) => textOf(m).includes('tail'))).toBe(true);
+  });
+
+  it('marks an open node boundary with a spine_node landmark before its carrier', () => {
+    const ctx = testAgent();
+    append(ctx, userMessage('start'));
+    append(ctx, assistantToolCall('c_open', 'spine_open', JSON.stringify({ summary: 'task A' })));
+    append(ctx, spineAcceptedReceipt('c_open'));
+    append(ctx, assistantText('working'));
+    append(ctx, userMessage('after'));
+
+    const folded = fold(ctx);
+    const texts = folded.map(textOf);
+    // The cursor itself is "live"; its open ancestor is "opened". Every
+    // landmark lands immediately before the carrier that opened the node.
+    expect(texts.slice(0, 3)).toEqual([
+      '<spine_node id="1.1" summary="startup" status="opened" />',
+      '[U1] start',
+      '<spine_node id="1.1.1" summary="task A" status="live" />',
+    ]);
+    expect(texts[3]).toContain('calling spine_open');
+    expect(texts[4]).toBe(ACCEPTED_OUTPUT);
+    expect(texts[5]).toBe('working');
+    expect(texts[6]).toBe('[U2] after');
+    expect(texts.at(-1)).toContain('<spine_status');
+    expect(texts.at(-1)).toContain('cursor="1.1.1"');
+  });
+
+  it('preserves media parts of a user request inside a closed span', () => {
+    const ctx = testAgent();
+    append(ctx, userMessage('start'));
+    append(ctx, assistantToolCall('c_open', 'spine_open', JSON.stringify({ summary: 'task A' })));
+    append(ctx, spineAcceptedReceipt('c_open'));
+    append(ctx, {
+      role: 'user',
+      content: [
+        { type: 'image_url', imageUrl: { url: 'https://example.com/pic.png' } },
+        { type: 'text', text: 'look at this' },
+      ],
+      toolCalls: [],
+      origin: { kind: 'user' },
+    });
+    append(ctx, assistantText('working'));
+    append(ctx, assistantToolCall('c_close', 'spine_close', JSON.stringify({ memory: 'did A' })));
+    append(ctx, spineAcceptedReceipt('c_close'));
+    append(ctx, userMessage('after'));
+
+    const folded = fold(ctx);
+    const surviving = folded.find((m) => m.content.some((part) => part.type === 'image_url'));
+    // The original parts ride through untouched (media included); only the
+    // first text part gains the [U#] tag.
+    expect(surviving?.role).toBe('user');
+    expect(surviving?.content).toEqual([
+      { type: 'image_url', imageUrl: { url: 'https://example.com/pic.png' } },
+      { type: 'text', text: '[U2] look at this' },
+    ]);
+  });
+
+  it('escapes the node summary inside the spine_node landmark', () => {
+    const ctx = testAgent();
+    append(ctx, userMessage('start'));
+    append(ctx, assistantToolCall('c_open', 'spine_open', JSON.stringify({ summary: 'a & "b" <c>' })));
+    append(ctx, spineAcceptedReceipt('c_open'));
+
+    const folded = fold(ctx);
+    expect(
+      folded.some((m) =>
+        textOf(m).includes(
+          '<spine_node id="1.1.1" summary="a &amp; &quot;b&quot; &lt;c&gt;" status="live" />',
+        ),
+      ),
+    ).toBe(true);
   });
 });
 
@@ -460,11 +544,12 @@ describe('Spine logical session conformance', () => {
     ]);
 
     // The close carrier and its receipt stay visible in the parent context;
-    // everything between the open carrier and the message before the close
-    // carrier folds into the memory.
+    // the open startup node keeps its boundary landmark; the closed node's
+    // span folds into its own memory slot.
     expect(canonicalProjection(fold(ctx))).toEqual([
+      'user (spine_node): <spine_node id="1.1" summary="startup" status="live" />',
       'user: [U1] 调研 X',
-      'user (spine_memory): <spine_memory>\ndid X\n</spine_memory>',
+      'user (spine_memory): <spine_memory node_id="1.1.1">\ndid X\n</spine_memory>',
       'assistant: calling spine_close',
       `tool: ${ACCEPTED_OUTPUT}`,
       'user: [U2] 下一步',
@@ -473,7 +558,7 @@ describe('Spine logical session conformance', () => {
     expectDerivationMatchesOps(ctx);
   });
 
-  it('projects a nested next-chain as one outermost memory', () => {
+  it('projects a nested next-chain as flattened per-node memory slots', () => {
     const ctx = testAgent();
     replaySession(ctx, [
       { kind: 'user', text: 'start' },
@@ -496,8 +581,11 @@ describe('Spine logical session conformance', () => {
     ]);
 
     expect(canonicalProjection(fold(ctx))).toEqual([
+      'user (spine_node): <spine_node id="1.1" summary="startup" status="live" />',
       'user: [U1] start',
-      'user (spine_memory): <spine_memory>\n## Child Memory\n\nmem A\n\nmem B\n\n## Node Memory\n\nmem parent\n</spine_memory>',
+      'user (spine_memory): <spine_memory node_id="1.1.1.1">\nmem A\n</spine_memory>',
+      'user (spine_memory): <spine_memory node_id="1.1.1.2">\nmem B\n</spine_memory>',
+      'user (spine_memory): <spine_memory node_id="1.1.1">\nmem parent\n</spine_memory>',
       'assistant: calling spine_close',
       `tool: ${ACCEPTED_OUTPUT}`,
       'user: [U2] final',
@@ -523,11 +611,12 @@ describe('Spine logical session conformance', () => {
 
     // Pre-epoch requests still consume their ordinals, but the epoch summary
     // is not a user request and consumes none — the surviving requests keep
-    // [U2]/[U3].
+    // [U2]/[U3]. The epoch's open startup node carries the landmark.
     expect(canonicalProjection(fold(ctx))).toEqual([
       `user: ${buildCompactionSummaryText('epoch summary')}`,
+      'user (spine_node): <spine_node id="2.1" summary="startup" status="live" />',
       'user: [U2] new epoch request',
-      'user (spine_memory): <spine_memory>\nepoch-2 mem\n</spine_memory>',
+      'user (spine_memory): <spine_memory node_id="2.1.1">\nepoch-2 mem\n</spine_memory>',
       'assistant: calling spine_close',
       `tool: ${ACCEPTED_OUTPUT}`,
       'user: [U3] tail',
@@ -978,7 +1067,7 @@ function replaySession(ctx: TestAgentContext, events: readonly LogicalEvent[]): 
           spineClose({
             id: event.id,
             closedAt: carrierAt - 1,
-            memory: assembleClosingMemory(ctx, event.id, carrierAt - 1, event.memory),
+            memory: event.memory,
           }),
         );
         break;
@@ -998,7 +1087,7 @@ function replaySession(ctx: TestAgentContext, events: readonly LogicalEvent[]): 
           spineNext({
             closedId: event.closedId,
             closedAt: carrierAt - 1,
-            memory: assembleClosingMemory(ctx, event.closedId, carrierAt - 1, event.memory),
+            memory: event.memory,
             openedId: event.openedId,
             summary: event.summary,
           }),
@@ -1021,24 +1110,6 @@ function replaySession(ctx: TestAgentContext, events: readonly LogicalEvent[]): 
       }
     }
   }
-}
-
-// Mirrors the service's commit-time assembly so the op-recorded reference
-// state carries the same memory body the derivation assembles from the stream.
-function assembleClosingMemory(
-  ctx: TestAgentContext,
-  nodeId: string,
-  closedAt: number,
-  nodeMemory: string,
-): string {
-  const state = ctx.get(IWireService).getModel(SpineModel);
-  const node = state.nodes[nodeId];
-  if (node === undefined) return nodeMemory;
-  return assembleMemoryBody({
-    userRequests: collectSpanUserRequests(ctx.context.get(), node.openedAt, closedAt),
-    childMemories: closedChildMemories(state.nodes, node),
-    nodeMemory,
-  });
 }
 
 // The message stream alone must derive the same tree the ops recorded:

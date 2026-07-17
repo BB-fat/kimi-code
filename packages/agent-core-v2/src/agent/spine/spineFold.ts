@@ -2,41 +2,43 @@
  * `spine` domain (L4) — the projection fold that turns the append-only
  * `contextMemory` history into the view sent to the model.
  *
- * `foldSpine` is a pure transform: it drops everything before the current root
- * epoch (keeping the epoch summary), replaces each outermost closed node's raw
- * message span with a single `<spine_memory>` user message (nested closed nodes
- * ride inside their nearest closed ancestor's span, so nothing is folded twice),
- * numbers real user requests with stable `[U#]` anchors — every user request in
- * the stored history consumes its ordinal even when the epoch boundary or a
- * closed span folds it away, so a surviving request keeps the same anchor
- * across projections and across the close that compiles it into a memory — and
- * appends a synthetic `<spine_status>` orientation line. The stored history is
- * never mutated; token numbers for the status line are precomputed by the
- * `spine` service and passed in. Consumed by `spineService.fold`.
+ * `foldSpine` is a pure, tree-driven transform. It drops everything before the
+ * current root epoch (keeping the epoch summary), then renders the epoch from
+ * the derived tree:
  *
- * Span-firing invariants: a span closed entirely before the current root
- * epoch is owned by the epoch summary and is skipped silently — left queued,
- * it would pin the span scan and keep every post-epoch span raw forever.
- * Closed spans never include the transition carrier: a span ends before the
- * assistant message carrying the close/next call, and a `spine.next` sibling
- * opens right after (at the carrier's index), so next-chain spans are
- * disjoint and contiguous. A span fires once the scan has reached or passed
- * its `openedAt`; a span fully behind the scan is late-drained: its memory
- * is emitted, but the current message still goes through normal handling
- * instead of being skipped.
+ * - An OPEN node keeps its span raw behind a `<spine_node id="..." summary="..."
+ *   status="..." />` boundary landmark (status: `live` for the cursor itself,
+ *   `opened` for an open ancestor), mirroring the upstream reducer's structural
+ *   breadcrumb.
+ * - A CLOSED node folds into a flattened slot list: the real user requests
+ *   inside its span survive in place with their original message identity
+ *   (text AND media parts preserved), each nested closed node contributes its
+ *   own `<spine_memory node_id="...">` slot, and the node's own memory lands
+ *   last — the same slot layout the upstream `assemble_memory` produces.
  *
- * `collectSpanUserRequests` is the commit-side mirror of that numbering: it
- * tags each real user request inside a closing node's inclusive span with its
- * fold ordinal and renders its content (text joined, media replaced by
- * omission markers), so `spineService` compiles the citation definitions into
- * the continuation memory body.
+ * Real user requests carry stable `[U#]` anchors: every request in the stored
+ * history consumes its ordinal even when an epoch boundary folds it away, so a
+ * surviving request keeps the same anchor across projections and across the
+ * close that folds its span. A synthetic `<spine_status>` orientation line
+ * closes the view. The stored history is never mutated; token numbers for the
+ * status line are precomputed by the `spine` service and passed in. Consumed
+ * by `spineService.fold`.
+ *
+ * Span invariants (mirroring the upstream reducer): a closed span ends BEFORE
+ * the assistant message carrying the close/next call, so the carrier, its
+ * receipt, and any slower batched tool results stay visible and paired in the
+ * parent context; a `spine.next` sibling opens at the carrier's index, so
+ * next-chain spans are disjoint and contiguous. A span closed entirely before
+ * the current epoch is owned by the epoch summary and skipped silently — left
+ * queued, it would pin the level walk and keep every post-epoch span raw
+ * forever. The synthetic root-epoch node and truncation-voided nodes
+ * (`openedAt < 0`) never produce landmarks or spans.
  */
 
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import type { ContentPart } from '#/app/llmProtocol/message';
 
 import type { SpineNode, SpineState } from './spineOps';
-import { parentNodeId, type SpineMemoryUserRequest } from './spineTree';
 
 export interface SpineFoldStatus {
   readonly cursorId: string;
@@ -62,103 +64,149 @@ export interface SpineFoldInput {
   readonly status?: SpineFoldStatus;
 }
 
-interface ClosedSpan {
-  readonly node: SpineNode;
-  readonly openedAt: number;
-  readonly closedAt: number;
-}
-
 export function foldSpine(
   messages: readonly ContextMessage[],
   input: SpineFoldInput,
 ): ContextMessage[] {
-  const spans = outermostClosedSpans(input.state);
-  let spanIndex = 0;
-  let userAnchor = 0;
+  const state = input.state;
+  const ctx: FoldContext = {
+    messages,
+    state,
+    anchors: userRequestAnchors(messages),
+    epochStartAt: state.epochStartAt,
+  };
   const out: ContextMessage[] = [];
 
-  for (let i = 0; i < messages.length; i++) {
-    const message = messages[i];
-    if (message === undefined) continue;
+  // Pre-epoch history folds behind the epoch summary; nothing else survives.
+  if (input.epochSummaryMessage !== undefined && state.epochMemoryAt !== undefined) {
+    out.push(input.epochSummaryMessage);
+  }
 
-    const request = isUserRequest(message);
-    if (request) userAnchor += 1;
-
-    if (i < input.state.epochStartAt) {
-      if (
-        input.epochSummaryMessage !== undefined &&
-        input.state.epochMemoryAt !== undefined &&
-        i === input.state.epochMemoryAt
-      ) {
-        out.push(input.epochSummaryMessage);
-      }
-      continue;
-    }
-
-    let span = spans[spanIndex];
-    while (span !== undefined && span.closedAt < input.state.epochStartAt) {
-      spanIndex += 1;
-      span = spans[spanIndex];
-    }
-    if (span !== undefined && span.openedAt <= i) {
-      const memoryMessage = spineMemoryMessage(span.node);
-      if (memoryMessage !== undefined) out.push(memoryMessage);
-      spanIndex += 1;
-      if (span.closedAt >= i) {
-        const skippedEnd = Math.min(span.closedAt, messages.length - 1);
-        for (let j = i + 1; j <= skippedEnd; j++) {
-          const skipped = messages[j];
-          if (skipped !== undefined && isUserRequest(skipped)) userAnchor += 1;
-        }
-        i = span.closedAt;
-        continue;
-      }
-    }
-
-    if (request) {
-      out.push(annotateUserRequest(message, userAnchor));
-    } else {
-      out.push(message);
-    }
+  // The current epoch renders from the root's children: the synthetic root
+  // epoch node carries no landmark and no span of its own.
+  const root = state.nodes[String(state.rootEpoch)];
+  if (root !== undefined) {
+    walkChildren(ctx, root.children, state.epochStartAt, messages.length - 1, out, pushRaw);
+  } else {
+    // Degraded state without the current root node: keep the epoch raw.
+    for (let i = state.epochStartAt; i < messages.length; i++) pushRaw(ctx, i, out);
   }
 
   if (input.status !== undefined) {
     out.push(statusMessage(input.status));
   }
-
   return out;
 }
 
-function outermostClosedSpans(state: SpineState): readonly ClosedSpan[] {
-  const closed = new Map<string, SpineNode>();
-  for (const node of Object.values(state.nodes)) {
-    if (node.closedAt !== undefined && node.openedAt >= 0 && node.memory !== undefined) {
-      closed.set(node.id, node);
-    }
-  }
-
-  const spans: ClosedSpan[] = [];
-  for (const node of closed.values()) {
-    if (!hasClosedAncestor(node, state, closed)) {
-      spans.push({ node, openedAt: node.openedAt, closedAt: node.closedAt ?? node.openedAt });
-    }
-  }
-  spans.sort((a, b) => a.openedAt - b.openedAt);
-  return spans;
+interface FoldContext {
+  readonly messages: readonly ContextMessage[];
+  readonly state: SpineState;
+  /** `[U#]` ordinal per message index (0 = not a real user request). */
+  readonly anchors: readonly number[];
+  readonly epochStartAt: number;
 }
 
-function hasClosedAncestor(
-  node: SpineNode,
-  state: SpineState,
-  closed: ReadonlyMap<string, SpineNode>,
-): boolean {
-  let ancestorId = parentNodeId(node.id);
-  while (ancestorId !== null) {
-    if (closed.has(ancestorId)) return true;
-    const ancestor = state.nodes[ancestorId];
-    ancestorId = ancestor === undefined ? null : parentNodeId(ancestor.id);
+type SpanSink = (ctx: FoldContext, index: number, out: ContextMessage[]) => void;
+
+/**
+ * Renders one structural level over [lo, hi]: messages outside child spans go
+ * to `sink`; each child node with span evidence claims its range and renders
+ * recursively. Children are stored in open order, so their spans arrive in
+ * ascending `openedAt` order.
+ */
+function walkChildren(
+  ctx: FoldContext,
+  childIds: readonly string[],
+  lo: number,
+  hi: number,
+  out: ContextMessage[],
+  sink: SpanSink,
+): void {
+  let i = lo;
+  for (const id of childIds) {
+    const child = ctx.state.nodes[id];
+    // A voided node holds no surviving span; a child closed entirely before
+    // the epoch is owned by the epoch summary.
+    if (child === undefined || child.openedAt < 0) continue;
+    if (child.closedAt !== undefined && child.closedAt < ctx.epochStartAt) continue;
+    const childLo = Math.max(child.openedAt, ctx.epochStartAt);
+    if (childLo > hi) break;
+    const childHi = Math.min(child.closedAt ?? hi, hi);
+    for (; i < childLo; i++) sink(ctx, i, out);
+    renderNode(ctx, child, childLo, childHi, out);
+    i = childHi + 1;
   }
-  return false;
+  for (; i <= hi; i++) sink(ctx, i, out);
+}
+
+function renderNode(
+  ctx: FoldContext,
+  node: SpineNode,
+  lo: number,
+  hi: number,
+  out: ContextMessage[],
+): void {
+  if (node.closedAt === undefined) {
+    // An open node keeps its span raw behind its boundary landmark.
+    out.push(spineNodeMessage(node, ctx.state));
+    walkChildren(ctx, node.children, lo, hi, out, pushRaw);
+    return;
+  }
+  // A closed node folds: real user requests inside the span survive in place
+  // (media included), nested closed nodes render their own slots, and the
+  // node's own memory lands last.
+  walkChildren(ctx, node.children, lo, hi, out, pushSurvivingUserRequest);
+  const memoryMessage = spineMemoryMessage(node);
+  if (memoryMessage !== undefined) out.push(memoryMessage);
+}
+
+/** Live-range sink: every message survives; real user requests get tagged. */
+function pushRaw(ctx: FoldContext, index: number, out: ContextMessage[]): void {
+  const message = ctx.messages[index];
+  if (message === undefined) return;
+  const anchor = ctx.anchors[index] ?? 0;
+  out.push(anchor > 0 ? annotateUserRequest(message, anchor) : message);
+}
+
+/** Folded-range sink: only real user requests survive, tagged and original. */
+function pushSurvivingUserRequest(ctx: FoldContext, index: number, out: ContextMessage[]): void {
+  const message = ctx.messages[index];
+  if (message === undefined) return;
+  const anchor = ctx.anchors[index] ?? 0;
+  if (anchor > 0) out.push(annotateUserRequest(message, anchor));
+}
+
+export function isUserRequest(message: ContextMessage): boolean {
+  return message.role === 'user' && message.origin?.kind === 'user';
+}
+
+function userRequestAnchors(messages: readonly ContextMessage[]): readonly number[] {
+  const anchors: number[] = new Array<number>(messages.length).fill(0);
+  let anchor = 0;
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+    if (message !== undefined && isUserRequest(message)) {
+      anchor += 1;
+      anchors[i] = anchor;
+    }
+  }
+  return anchors;
+}
+
+/**
+ * The structural landmark at an open node's boundary. Status mirrors the
+ * upstream status semantics: the cursor itself is `live`; an open ancestor
+ * carrying the descent is `opened`.
+ */
+function spineNodeMessage(node: SpineNode, state: SpineState): ContextMessage {
+  const status = state.openStack.at(-1) === node.id ? 'live' : 'opened';
+  const text = `<spine_node id="${node.id}" summary="${escapeAttr(node.summary)}" status="${status}" />`;
+  return {
+    role: 'user',
+    content: [{ type: 'text', text }],
+    toolCalls: [],
+    origin: { kind: 'injection', variant: 'spine_node' },
+  };
 }
 
 function spineMemoryMessage(node: SpineNode): ContextMessage | undefined {
@@ -166,54 +214,10 @@ function spineMemoryMessage(node: SpineNode): ContextMessage | undefined {
   if (memory === undefined) return undefined;
   return {
     role: 'user',
-    content: [{ type: 'text', text: `<spine_memory>\n${memory}\n</spine_memory>` }],
+    content: [{ type: 'text', text: `<spine_memory node_id="${node.id}">\n${memory}\n</spine_memory>` }],
     toolCalls: [],
     origin: { kind: 'injection', variant: 'spine_memory' },
   };
-}
-
-export function isUserRequest(message: ContextMessage): boolean {
-  return message.role === 'user' && message.origin?.kind === 'user';
-}
-
-export function collectSpanUserRequests(
-  messages: readonly ContextMessage[],
-  openedAt: number,
-  closedAt: number,
-): SpineMemoryUserRequest[] {
-  const start = Math.max(0, openedAt);
-  const requests: SpineMemoryUserRequest[] = [];
-  let anchor = 0;
-  for (let i = 0; i < messages.length && i <= closedAt; i++) {
-    const message = messages[i];
-    if (message === undefined || !isUserRequest(message)) continue;
-    anchor += 1;
-    if (i >= start) requests.push({ anchor, body: renderUserRequestBody(message) });
-  }
-  return requests;
-}
-
-function renderUserRequestBody(message: ContextMessage): string {
-  const parts: string[] = [];
-  for (const part of message.content) {
-    switch (part.type) {
-      case 'text': {
-        const text = part.text.replaceAll(/^\n+|\n+$/g, '');
-        if (text.length > 0) parts.push(text);
-        break;
-      }
-      case 'image_url':
-        parts.push('<image omitted>');
-        break;
-      case 'audio_url':
-        parts.push('<audio omitted>');
-        break;
-      case 'video_url':
-        parts.push('<video omitted>');
-        break;
-    }
-  }
-  return parts.length === 0 ? '<empty user message>' : parts.join('\n');
 }
 
 function annotateUserRequest(message: ContextMessage, anchorNumber: number): ContextMessage {
@@ -261,5 +265,9 @@ function formatTokens(tokens: number): string {
 }
 
 function escapeAttr(value: string): string {
-  return value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;');
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;');
 }

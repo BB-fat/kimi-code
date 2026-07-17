@@ -16,12 +16,13 @@
  * assistant message carrying the transition call, so the carrier, its receipt,
  * and any slower tool results batched in the same response stay visible and
  * paired in the parent context; `spine.next` hands the carrier to the new
- * sibling, whose span opens right after the closing one. At close the span's
- * real user requests are compiled into the memory body as `## User Message
- * [U#]` sections (with the fold's stable ordinals) by the derivation, so
- * `[U#]` citations stay resolvable after the span folds away — and an undo
- * that removes a request removes it from the memory too, since the body is
- * re-assembled from the surviving history on every read. Side effects ride
+ * sibling, whose span opens right after the closing one. The closing memory is
+ * the model-written body verbatim: the projection fold re-materializes the
+ * folded span's surviving user requests in place (with stable `[U#]` anchors
+ * and their original media parts) and gives every closed descendant its own
+ * `<spine_memory node_id="...">` slot, all derived from the surviving history
+ * on every read — so an undo that removes a request removes it from the
+ * folded view too. Side effects ride
  * the derivation delta: the `loop.afterStep` hook archives each newly closed
  * node's trajectory under the bootstrap-issued per-agent session homedir
  * (`<sessionDir>/agents/<id>/spine/`), and — for root compactions — the

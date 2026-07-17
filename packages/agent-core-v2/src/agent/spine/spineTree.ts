@@ -3,11 +3,10 @@
  * helpers shared by the reducers, the service and the projection fold.
  *
  * Owns the spine node-id grammar (`<epoch>` for a root epoch,
- * `<epoch>.<n>[.<n>…]` for work nodes), the continuation-memory body layout
- * (`## User Message [U#]` sections carrying the closing span's real user
- * requests verbatim so `[U#]` citations stay resolvable after the span folds,
- * then `## Child Memory` from already-closed children, then `## Node Memory`
- * from the closing model call), and the read-only `spine.tree` rendering.
+ * `<epoch>.<n>[.<n>…]` for work nodes) and the read-only `spine.tree`
+ * rendering. Node memory is the model-written body verbatim — the folded
+ * view's slot layout (surviving user requests in place, per-node
+ * `<spine_memory node_id="...">` slots) is `spineFold`'s render-time concern.
  * Also owns `SPINE_VOID_OPENED_AT`, the sentinel `openedAt` for nodes that
  * must never produce a fold span: the synthetic root-epoch node (never
  * closable) and work nodes whose closed span a truncation repair voided. The
@@ -45,53 +44,6 @@ export function nextChildIndex(childIds: readonly string[]): number {
 
 export function epochStartupNodeId(epoch: number): string {
   return `${String(epoch)}.1`;
-}
-
-export interface SpineMemoryUserRequest {
-  readonly anchor: number;
-  readonly body: string;
-}
-
-export interface SpineMemoryAssemblyInput {
-  readonly userRequests: readonly SpineMemoryUserRequest[];
-  readonly childMemories: readonly string[];
-  readonly nodeMemory: string;
-}
-
-export function assembleMemoryBody(input: SpineMemoryAssemblyInput): string {
-  const sections: string[] = [];
-  for (const request of input.userRequests) {
-    sections.push(`## User Message [U${String(request.anchor)}]\n\n${request.body}`);
-  }
-  const child = input.childMemories
-    .map((body) => body.trim())
-    .filter((body) => body.length > 0)
-    .join('\n\n');
-  if (child.length > 0) sections.push(`## Child Memory\n\n${child}`);
-  const node = input.nodeMemory.trim();
-  if (sections.length === 0) return node;
-  if (node.length > 0) sections.push(`## Node Memory\n\n${node}`);
-  return sections.join('\n\n');
-}
-
-/**
- * Assembled memory bodies of a node's already-closed children, in child
- * order — the `## Child Memory` section input for the parent's own assembly.
- * Children close before their parent by construction (a close pops the
- * cursor), so every child is closed when the parent's memory assembles.
- */
-export function closedChildMemories(
-  nodes: Readonly<Record<string, SpineNode>>,
-  node: SpineNode,
-): readonly string[] {
-  const bodies: string[] = [];
-  for (const childId of node.children) {
-    const child = nodes[childId];
-    if (child !== undefined && child.closedAt !== undefined && child.memory !== undefined) {
-      bodies.push(child.memory);
-    }
-  }
-  return bodies;
 }
 
 export interface SpineTreeNodeView {

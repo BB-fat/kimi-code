@@ -431,15 +431,16 @@ describe('Spine control tools', () => {
     await ctx.untilTurnEnd();
 
     const projected = historyText(ctx.project());
-    expect(projected).toContain('<spine_memory>');
+    expect(projected).toContain('<spine_memory node_id="1.1">');
     expect(projected).toContain('STARTUP-MEMORY-MARKER');
-    // The closing span's user request is compiled into the memory body.
-    expect(projected).toContain('## User Message [U1]');
-    expect(projected).toContain('STARTUP-PHASE-PROMPT');
+    // The closing span's user request survives in place, tagged — the memory
+    // body itself is the model-written text verbatim.
+    expect(projected).toContain('[U1] STARTUP-PHASE-PROMPT');
+    expect(projected).not.toContain('## User Message');
     expect(projected).toContain('AFTER-STARTUP-CLOSE');
   });
 
-  it('compiles the closing span user requests into the memory body', async () => {
+  it('stores the closing memory verbatim and keeps span requests in place', async () => {
     const ctx = loopContext();
     await configureLoop(ctx);
     ctx.mockNextResponse(toolCallPart('call_open', 'spine_open', { summary: 'task A' }));
@@ -455,11 +456,14 @@ describe('Spine control tools', () => {
     await ctx.untilTurnEnd();
 
     const memory = readSpine(ctx).nodes['1.1.1']?.memory ?? '';
-    expect(memory).toContain('## User Message [U2]');
-    expect(memory).toContain('MID-SPAN-REQUEST');
-    expect(memory).not.toContain('start the work');
-    expect(memory).toContain('## Node Memory');
-    expect(memory).toContain('did A per [U2]');
+    expect(memory).toBe('did A per [U2]');
+
+    const projected = historyText(ctx.project());
+    // The mid-span request survives in place with its stable anchor; nothing
+    // is compiled into the memory body.
+    expect(projected).toContain('[U2] MID-SPAN-REQUEST');
+    expect(projected).toContain('<spine_memory node_id="1.1.1">\ndid A per [U2]\n</spine_memory>');
+    expect(projected).not.toContain('## User Message');
   });
 
   it('keeps [U#] anchors stable when a span folds', async () => {
@@ -487,8 +491,9 @@ describe('Spine control tools', () => {
     expect(lastRequestText).toContain('[U4] seed-u3');
     expect(lastRequestText).toContain('[U6] NUMBER-CHECK-PROMPT');
     expect(lastRequestText).toContain('old memory');
-    // The folded span's request survives as a citation inside the memory body.
-    expect(lastRequestText).toContain('## User Message [U2]');
+    // The folded span's request survives in place with the same anchor.
+    expect(lastRequestText).toContain('[U2] seed-u1');
+    expect(lastRequestText).toContain('<spine_memory node_id="1.1.1">');
   });
 
   it('commits next atomically across a single step', async () => {
@@ -594,7 +599,7 @@ describe('Spine control tools', () => {
     const folded = ctx.get(IAgentSpineService).fold(history) as readonly ContextMessage[];
     expect(folded.some((m) => m.role === 'tool' && m.toolCallId === 'call_bash')).toBe(false);
     expect(toolPairingGaps(folded)).toEqual([]);
-    const memories = folded.filter((m) => textOf(m).includes('<spine_memory>'));
+    const memories = folded.filter((m) => textOf(m).startsWith('<spine_memory node_id="'));
     expect(memories).toHaveLength(2);
     expect(historyText(ctx.project())).not.toContain('ORDINARY-RESULT-MARKER');
   });

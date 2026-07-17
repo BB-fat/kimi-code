@@ -15,11 +15,12 @@
  * epochs never close). Root-epoch boundaries come from the compaction summary
  * message itself (`origin.kind === 'compaction_summary'`, with the summary
  * prefix text as the fallback carrier when the origin metadata is absent). A
- * closing node's memory body is assembled from the live span — user requests
- * keep their fold ordinals and already-closed children contribute their
- * assembled bodies — so an undo that rewrites the span rewrites the memory
- * with it. Consumed by `spineService`; the fold projection and archive
- * rendering are unchanged.
+ * closing node's memory is the model-written body verbatim: the projection
+ * fold re-materializes the span's surviving user requests and each closed
+ * child's own `<spine_memory node_id="...">` slot from the surviving stream,
+ * so an undo that rewrites the span rewrites the folded view with it — the
+ * memory itself never needs patching. Consumed by `spineService`; the fold
+ * projection and archive rendering read this state.
  *
  * Silence is the design, not an oversight: a call whose accepted receipt never
  * landed, a receipt whose call is missing, or a transition the guards reject
@@ -37,12 +38,9 @@ import {
 import type { ContextMessage } from '#/agent/contextMemory/types';
 
 import { SPINE_TOOL_CLOSE, SPINE_TOOL_NEXT, SPINE_TOOL_OPEN } from './spine';
-import { collectSpanUserRequests } from './spineFold';
 import type { SpineNode, SpineState } from './spineOps';
 import {
-  assembleMemoryBody,
   childNodeId,
-  closedChildMemories,
   epochStartupNodeId,
   isRootEpoch,
   nextChildIndex,
@@ -81,14 +79,6 @@ export function deriveSpineState(messages: readonly ContextMessage[]): SpineStat
     rootEpoch = epoch;
   }
 
-  function assembleNodeMemory(node: SpineNode, closedAt: number, nodeMemory: string): string {
-    return assembleMemoryBody({
-      userRequests: collectSpanUserRequests(messages, node.openedAt, closedAt),
-      childMemories: closedChildMemories(nodes, node),
-      nodeMemory,
-    });
-  }
-
   function openNode(summary: string, openedAt: number): void {
     const parentId = openStack.at(-1);
     if (parentId === undefined) return;
@@ -112,7 +102,7 @@ export function deriveSpineState(messages: readonly ContextMessage[]): SpineStat
     // The span ends BEFORE the assistant message carrying the transition call,
     // so the carrier and its receipt stay visible in the parent context.
     const closedAt = Math.max(carrierAt - 1, node.openedAt);
-    nodes[id] = { ...node, closedAt, memory: assembleNodeMemory(node, closedAt, trimmed) };
+    nodes[id] = { ...node, closedAt, memory: trimmed };
     openStack = openStack.slice(0, -1);
   }
 
@@ -133,7 +123,7 @@ export function deriveSpineState(messages: readonly ContextMessage[]): SpineStat
     nodes[closedId] = {
       ...closing,
       closedAt,
-      memory: assembleNodeMemory(closing, closedAt, trimmedMemory),
+      memory: trimmedMemory,
     };
     // The sibling opens right after the closing span — at the carrier's index —
     // so the carrier and its receipt ride inside the new sibling's span.
