@@ -17,6 +17,7 @@ export {
   effectiveModelAlias,
   fetchCatalog,
   inferWireType,
+  resolveCatalogImport,
   type Catalog,
   type CatalogModel,
 } from '@moonshot-ai/kimi-code-sdk';

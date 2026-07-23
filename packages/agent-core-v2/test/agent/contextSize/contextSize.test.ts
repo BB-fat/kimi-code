@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { estimateTokensForMessages } from '#/_base/utils/tokens';
+import { estimateTokensForMessages } from '#/kosong/contract/tokens';
 import { IAgentContextSizeService } from '#/agent/contextSize/contextSize';
 import { ContextSizeModel, contextSizeMeasured } from '#/agent/contextSize/contextSizeOps';
 import { IEventBus } from '#/app/event/eventBus';
-import type { Message } from '#/app/llmProtocol/message';
-import type { TokenUsage } from '#/app/llmProtocol/usage';
+import type { Message } from '#/kosong/contract/message';
+import type { TokenUsage } from '#/kosong/contract/usage';
 import { IAgentUsageService } from '#/agent/usage/usage';
 import { IWireService } from '#/wire/wire';
 import {

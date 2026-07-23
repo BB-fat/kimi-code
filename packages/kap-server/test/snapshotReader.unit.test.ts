@@ -17,7 +17,7 @@ import {
   ACCEPTED_OUTPUT,
   ISessionIndex,
   ISessionLifecycleService,
-  IWorkspaceRegistry,
+  IWorkspaceService,
   SPINE_TOOL_CLOSE,
   SPINE_TOOL_OPEN,
   type ContextMessage,
@@ -69,7 +69,7 @@ async function makeFixtureAsync(opts?: { cacheLimit?: number }): Promise<Fixture
   const core = {
     accessor: fakeAccessor([
       [ISessionIndex, { get: async (sid: string) => index.get(sid) }],
-      [IWorkspaceRegistry, { get: async (ws: string) => workspaces.get(ws) }],
+      [IWorkspaceService, { get: async (ws: string) => workspaces.get(ws) }],
       // Cold by default — no live handle.
       [ISessionLifecycleService, { get: () => undefined }],
     ]),

@@ -36,7 +36,7 @@
  */
 
 import type { ContextMessage } from '#/agent/contextMemory/types';
-import type { ContentPart } from '#/app/llmProtocol/message';
+import type { ContentPart } from '#/kosong/contract/message';
 
 import type { SpineNode, SpineState } from './spineOps';
 

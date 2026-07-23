@@ -40,7 +40,7 @@ import { IConfigService } from '#/app/config/config';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionProcessRunner, type IProcess } from '#/session/process/processRunner';
-import { IAgentProfileService } from '#/agent/profile/profile';
+import { IAgentToolPolicyService } from '#/agent/toolPolicy/toolPolicy';
 import type { BuiltinTool, ExecutableToolResult, ToolExecution, ToolUpdate } from '#/tool/toolContract';
 import {
   type ExecutableToolResultBuilderResult,
@@ -185,7 +185,7 @@ export class BashTool implements BuiltinTool<BashInput> {
     @IHostEnvironment private readonly env: IHostEnvironment,
     @ISessionContext private readonly ctx: ISessionContext,
     @IAgentTaskService private readonly tasks: IAgentTaskService,
-    @IAgentProfileService private readonly profile: IAgentProfileService,
+    @IAgentToolPolicyService private readonly toolPolicy: IAgentToolPolicyService,
     @IConfigService private readonly config: IConfigService,
   ) {
     this.isWindowsBash = this.env.osKind === 'Windows';
@@ -194,14 +194,20 @@ export class BashTool implements BuiltinTool<BashInput> {
 
   private allowBackground(): boolean {
     return (
-      this.profile.isToolActive('TaskList') &&
-      this.profile.isToolActive('TaskOutput') &&
-      this.profile.isToolActive('TaskStop')
+      this.toolPolicy.isToolActive('TaskList') &&
+      this.toolPolicy.isToolActive('TaskOutput') &&
+      this.toolPolicy.isToolActive('TaskStop')
     );
   }
 
   private autoBackgroundOnTimeout(): boolean {
     return resolveAgentTaskConfig(this.config)?.bashAutoBackgroundOnTimeout ?? true;
+  }
+
+  private detachTimeoutMs(): number {
+    const configuredS = resolveAgentTaskConfig(this.config)?.bashTaskTimeoutS;
+    if (configuredS === undefined) return DEFAULT_BACKGROUND_TIMEOUT_S * MS_PER_SECOND;
+    return configuredS * MS_PER_SECOND;
   }
 
   get description(): string {
@@ -304,7 +310,7 @@ export class BashTool implements BuiltinTool<BashInput> {
         {
           detached: startsInBackground,
           timeoutMs,
-          detachTimeoutMs: DEFAULT_BACKGROUND_TIMEOUT_S * MS_PER_SECOND,
+          detachTimeoutMs: this.detachTimeoutMs(),
           autoBackgroundOnTimeout: this.allowBackground() && this.autoBackgroundOnTimeout(),
           signal: startsInBackground ? undefined : signal,
         },

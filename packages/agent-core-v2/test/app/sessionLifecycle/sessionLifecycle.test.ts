@@ -35,13 +35,15 @@ import { IAgentActivityView } from '#/agent/activityView/activityView';
 import { ISessionExternalHooksService } from '#/session/externalHooks/externalHooks';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
+import { ISessionToolPolicy } from '#/session/sessionToolPolicy/sessionToolPolicy';
+import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
 import { ISessionIndex, type SessionSummary } from '#/app/sessionIndex/sessionIndex';
 import { IAppendLogStore } from '#/persistence/interface/appendLogStore';
 import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
-import { IWorkspaceLocalConfigService } from '#/app/workspaceLocalConfig/workspaceLocalConfig';
+import { IProjectLocalConfigService } from '#/app/projectLocalConfig/projectLocalConfig';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 import { SessionWorkspaceContextService } from '#/session/workspaceContext/workspaceContextService';
-import { IWorkspaceRegistry, type Workspace } from '#/app/workspaceRegistry/workspaceRegistry';
+import { IWorkspaceService, type Workspace } from '#/app/workspace/workspace';
 import { encodeWorkDirKey } from '#/_base/utils/workdir-slug';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
@@ -150,7 +152,22 @@ function skillCatalogStub(): ISessionSkillCatalog {
   };
 }
 
-function workspaceRegistryStub(): IWorkspaceRegistry {
+function agentProfileCatalogStub(): ISessionAgentProfileCatalog {
+  return {
+    _serviceBrand: undefined,
+    ready: Promise.resolve(),
+    onDidChange: () => ({ dispose: () => {} }),
+    get: () => undefined,
+    getDefault: () => {
+      throw new Error('not implemented');
+    },
+    list: () => [],
+    load: () => Promise.resolve(),
+    reload: () => Promise.resolve(),
+  };
+}
+
+function workspaceStub(): IWorkspaceService {
   return {
     _serviceBrand: undefined,
     list: () => Promise.resolve([]),
@@ -168,9 +185,9 @@ function workspaceRegistryStub(): IWorkspaceRegistry {
   };
 }
 
-function workspaceLocalConfigStub(
+function projectLocalConfigStub(
   localDirs: readonly string[] = [],
-): IWorkspaceLocalConfigService {
+): IProjectLocalConfigService {
   return {
     _serviceBrand: undefined,
     readAdditionalDirs: (workDir: string) =>
@@ -185,7 +202,7 @@ function workspaceLocalConfigStub(
   };
 }
 
-function persistentWorkspaceRegistryStub(): IWorkspaceRegistry {
+function persistentWorkspaceStub(): IWorkspaceService {
   const workspaces = new Map<string, Workspace>();
   return {
     _serviceBrand: undefined,
@@ -267,6 +284,16 @@ function atomicDocumentStoreStub(): IAtomicDocumentStore {
   };
 }
 
+function sessionToolPolicyStub(): ISessionToolPolicy {
+  return {
+    _serviceBrand: undefined,
+    ready: Promise.resolve(),
+    onDidChange: () => ({ dispose: () => {} }),
+    disabledTools: () => [],
+    setDisabledTools: () => Promise.resolve(),
+  };
+}
+
 function agentLifecycleStub(): IAgentLifecycleService {
   return {
     _serviceBrand: undefined,
@@ -277,6 +304,7 @@ function agentLifecycleStub(): IAgentLifecycleService {
     get: () => undefined,
     list: () => [],
     remove: () => Promise.resolve(),
+    broadcastPermissionMode: () => {},
   };
 }
 
@@ -433,7 +461,9 @@ describe('SessionLifecycleService', () => {
       stubPair(ISessionMetadata, metadataStub()),
       stubPair(IHostEnvironment, hostEnvironmentStub()),
       stubPair(ISessionSkillCatalog, skillCatalogStub()),
-      stubPair(IWorkspaceRegistry, workspaceRegistryStub()),
+      stubPair(ISessionToolPolicy, sessionToolPolicyStub()),
+      stubPair(ISessionAgentProfileCatalog, agentProfileCatalogStub()),
+      stubPair(IWorkspaceService, workspaceStub()),
       stubPair(ISessionIndex, sessionIndexStub()),
       stubPair(IAppendLogStore, appendLogStoreStub()),
       stubPair(IAtomicDocumentStore, atomicDocumentStoreStub()),
@@ -442,7 +472,7 @@ describe('SessionLifecycleService', () => {
       stubPair(ISessionMcpService, sessionMcpServiceStub()),
       stubPair(IConfigService, configStub()),
       stubPair(ISessionCronService, { _serviceBrand: undefined } as unknown as ISessionCronService),
-      stubPair(IWorkspaceLocalConfigService, workspaceLocalConfigStub()),
+      stubPair(IProjectLocalConfigService, projectLocalConfigStub()),
       stubPair(ITelemetryService, recordingTelemetry(telemetryRecords)),
       stubPair(ICronTaskPersistence, cronStoreStub()),
       ...extra,
@@ -494,9 +524,13 @@ describe('SessionLifecycleService', () => {
       }),
     ]);
 
-    await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
+    const handle = await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
 
-    const workspaceId = encodeWorkDirKey('/tmp/proj');
+    // The index entry addresses the session under the registry-resolved
+    // workspace id — the same id seeding the session's storage scope — not a
+    // recomputed encodeWorkDirKey, so the v1 reader finds it in the bucket it
+    // was materialized into.
+    const workspaceId = handle.accessor.get(ISessionContext).workspaceId;
     expect(appended).toEqual([
       {
         scope: '',
@@ -510,24 +544,93 @@ describe('SessionLifecycleService', () => {
     ]);
   });
 
+  it('does not index and removes a fresh session when initial agent binding fails', async () => {
+    const appended: unknown[] = [];
+    const remove = vi.fn(() => Promise.resolve());
+    const create = vi.fn(() => Promise.reject(new Error('Unknown agent profile')));
+    const svc = build([
+      stubPair(IAppendLogStore, {
+        ...appendLogStoreStub(),
+        append: (_scope: string, _key: string, record: unknown) => appended.push(record),
+      }),
+      stubPair(IHostFileSystem, { remove } as unknown as IHostFileSystem),
+      stubPair(IAgentLifecycleService, {
+        ...agentLifecycleStub(),
+        create,
+      }),
+    ]);
+
+    await expect(
+      svc.create({
+        sessionId: 's1',
+        workDir: '/tmp/proj',
+        mainAgentBinding: { profile: 'missing', model: 'mock' },
+      }),
+    ).rejects.toThrow('Unknown agent profile');
+
+    expect(appended).toEqual([]);
+    expect(svc.get('s1')).toBeUndefined();
+    expect(remove).toHaveBeenCalledOnce();
+  });
+
+  it('indexes the session under the registry-resolved id when the workDir is an alias spelling', async () => {
+    const appended: unknown[] = [];
+    const svc = build([
+      stubPair(IAppendLogStore, {
+        ...appendLogStoreStub(),
+        append: (scope: string, key: string, record: unknown) => {
+          appended.push({ scope, key, record });
+        },
+      }),
+      stubPair(IWorkspaceService, {
+        ...workspaceStub(),
+        // As the real registry does after folding: the id minted for the
+        // first-seen spelling is reused for the alias.
+        createOrTouch: (root: string, name?: string) =>
+          Promise.resolve({
+            id: 'wd_first_spelling',
+            root,
+            name: name ?? 'proj',
+            createdAt: 0,
+            lastOpenedAt: 0,
+          }),
+      }),
+    ]);
+
+    const handle = await svc.create({ sessionId: 's1', workDir: 'c:\\users\\foo\\proj' });
+
+    expect(handle.accessor.get(ISessionContext).workspaceId).toBe('wd_first_spelling');
+    expect(appended).toEqual([
+      {
+        scope: '',
+        key: 'session_index.jsonl',
+        record: {
+          sessionId: 's1',
+          sessionDir: '/tmp/sessions/wd_first_spelling/s1',
+          workDir: 'c:\\users\\foo\\proj',
+        },
+      },
+    ]);
+  });
+
   it('registers the workspace during create so a cold resume can resolve the workdir', async () => {
     const workDir = '/tmp/proj';
-    const workspaceRegistry = persistentWorkspaceRegistryStub();
+    const workspaces = persistentWorkspaceStub();
     const sessionIndex = sessionIndexWithSummary('s1', workDir);
     const first = build([
-      stubPair(IWorkspaceRegistry, workspaceRegistry),
+      stubPair(IWorkspaceService, workspaces),
       stubPair(ISessionIndex, sessionIndex),
     ]);
 
     await first.create({ sessionId: 's1', workDir });
-    await expect(workspaceRegistry.get(encodeWorkDirKey(workDir))).resolves.toMatchObject({
+    await expect(workspaces.get(encodeWorkDirKey(workDir))).resolves.toMatchObject({
       root: workDir,
     });
     host?.dispose();
     host = undefined;
 
     const second = build([
-      stubPair(IWorkspaceRegistry, workspaceRegistry),
+      stubPair(IWorkspaceService, workspaces),
       stubPair(ISessionIndex, sessionIndex),
       stubPair(IAgentLifecycleService, agentLifecycleWithMainStub()),
     ]);
@@ -540,7 +643,7 @@ describe('SessionLifecycleService', () => {
   it('resumes from the persisted cwd when the workspace registry entry is missing', async () => {
     const workDir = '/tmp/proj';
     const svc = build([
-      stubPair(IWorkspaceRegistry, persistentWorkspaceRegistryStub()),
+      stubPair(IWorkspaceService, persistentWorkspaceStub()),
       stubPair(ISessionIndex, sessionIndexWithSummary('s1', workDir)),
       stubPair(IAgentLifecycleService, agentLifecycleWithMainStub()),
     ]);
@@ -551,11 +654,25 @@ describe('SessionLifecycleService', () => {
     expect(resumed?.accessor.get(ISessionContext).workspaceId).toBe(encodeWorkDirKey(workDir));
   });
 
+  it('does not cache a session whose tool policy fails to initialize', async () => {
+    const svc = build([
+      stubPair(ISessionIndex, sessionIndexWithSummary('s1', '/tmp/proj')),
+      stubPair(ISessionToolPolicy, {
+        ...sessionToolPolicyStub(),
+        ready: Promise.reject(new Error('invalid tool policy')),
+      }),
+    ]);
+
+    await expect(svc.resume('s1')).rejects.toThrow('invalid tool policy');
+    expect(svc.get('s1')).toBeUndefined();
+    await expect(svc.resume('s1')).rejects.toThrow('invalid tool policy');
+  });
+
   it('resumes with the persisted cwd and indexed workspace id when the registry root is stale', async () => {
     const workDir = '/tmp/proj';
     const staleRoot = '/tmp/stale';
     const indexedWorkspaceId = 'wd_indexed';
-    const workspaceRegistry: IWorkspaceRegistry = {
+    const workspaces: IWorkspaceService = {
       _serviceBrand: undefined,
       list: () => Promise.resolve([]),
       get: (id) =>
@@ -570,7 +687,7 @@ describe('SessionLifecycleService', () => {
               }
             : undefined,
         ),
-      createOrTouch: (root, name) =>
+        createOrTouch: (root, name) =>
         Promise.resolve({
           id: encodeWorkDirKey(root),
           root,
@@ -582,7 +699,7 @@ describe('SessionLifecycleService', () => {
       delete: () => Promise.resolve(),
     };
     const svc = build([
-      stubPair(IWorkspaceRegistry, workspaceRegistry),
+      stubPair(IWorkspaceService, workspaces),
       stubPair(ISessionIndex, sessionIndexWithSummary('s1', workDir, indexedWorkspaceId)),
       stubPair(IAgentLifecycleService, agentLifecycleWithMainStub()),
     ]);
@@ -680,8 +797,8 @@ describe('SessionLifecycleService', () => {
       dispose: () => {},
     } as unknown as IAgentScopeHandle;
     const svc = build([
-      stubPair(IWorkspaceRegistry, {
-        ...workspaceRegistryStub(),
+      stubPair(IWorkspaceService, {
+        ...workspaceStub(),
         get: () =>
           Promise.resolve({
             id: 'wd_stub',
@@ -727,7 +844,7 @@ describe('SessionLifecycleService', () => {
   it('emits session_started with resumed: true and the bound session id on resume', async () => {
     const workDir = '/tmp/proj';
     const svc = build([
-      stubPair(IWorkspaceRegistry, persistentWorkspaceRegistryStub()),
+      stubPair(IWorkspaceService, persistentWorkspaceStub()),
       stubPair(ISessionIndex, sessionIndexWithSummary('s1', workDir)),
       stubPair(IAgentLifecycleService, agentLifecycleWithMainStub()),
     ]);
@@ -876,7 +993,7 @@ describe('SessionLifecycleService', () => {
 
     it('loads project-local additional dirs into the session workspace on create', async () => {
       const svc = build([
-        stubPair(IWorkspaceLocalConfigService, workspaceLocalConfigStub(['/tmp/extra'])),
+        stubPair(IProjectLocalConfigService, projectLocalConfigStub(['/tmp/extra'])),
       ]);
       const h = await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
       expect(dirsOf(h)).toEqual(['/tmp/extra']);
@@ -894,7 +1011,7 @@ describe('SessionLifecycleService', () => {
 
     it('deduplicates project-local and caller dirs after resolving', async () => {
       const svc = build([
-        stubPair(IWorkspaceLocalConfigService, workspaceLocalConfigStub(['/tmp/shared'])),
+        stubPair(IProjectLocalConfigService, projectLocalConfigStub(['/tmp/shared'])),
       ]);
       const h = await svc.create({
         sessionId: 's1',
@@ -906,7 +1023,7 @@ describe('SessionLifecycleService', () => {
 
     it('supports multiple project-local and caller additionalDirs', async () => {
       const svc = build([
-        stubPair(IWorkspaceLocalConfigService, workspaceLocalConfigStub(['/tmp/a', '/tmp/b'])),
+        stubPair(IProjectLocalConfigService, projectLocalConfigStub(['/tmp/a', '/tmp/b'])),
       ]);
       const h = await svc.create({
         sessionId: 's1',
@@ -925,13 +1042,13 @@ describe('SessionLifecycleService', () => {
       } as unknown as IAgentScopeHandle;
       const summary = { id: 's1', workspaceId: 'wd_stub' } as SessionSummary;
       const svc = build([
-        stubPair(IWorkspaceLocalConfigService, workspaceLocalConfigStub(['/tmp/extra'])),
+        stubPair(IProjectLocalConfigService, projectLocalConfigStub(['/tmp/extra'])),
         stubPair(ISessionIndex, {
           ...sessionIndexStub(),
           get: () => Promise.resolve(summary),
         }),
-        stubPair(IWorkspaceRegistry, {
-          ...workspaceRegistryStub(),
+        stubPair(IWorkspaceService, {
+          ...workspaceStub(),
           get: () =>
             Promise.resolve({
               id: 'wd_stub',
@@ -955,9 +1072,9 @@ describe('SessionLifecycleService', () => {
 
     it('fork inherits project-local dirs', async () => {
       const svc = build([
-        stubPair(IWorkspaceLocalConfigService, workspaceLocalConfigStub(['/tmp/extra'])),
-        stubPair(IWorkspaceRegistry, {
-          ...workspaceRegistryStub(),
+        stubPair(IProjectLocalConfigService, projectLocalConfigStub(['/tmp/extra'])),
+        stubPair(IWorkspaceService, {
+          ...workspaceStub(),
           get: () =>
             Promise.resolve({
               id: 'wd_stub',
@@ -986,8 +1103,8 @@ describe('SessionLifecycleService', () => {
 
     it('fork mints a session_-prefixed lowercase id when newSessionId is omitted', async () => {
       const svc = build([
-        stubPair(IWorkspaceRegistry, {
-          ...workspaceRegistryStub(),
+        stubPair(IWorkspaceService, {
+          ...workspaceStub(),
           get: () =>
             Promise.resolve({
               id: 'wd_stub',
@@ -1010,8 +1127,8 @@ describe('SessionLifecycleService', () => {
 
   describe('fork session state', () => {
     function workspaceGetStub(): ReturnType<typeof stubPair> {
-      return stubPair(IWorkspaceRegistry, {
-        ...workspaceRegistryStub(),
+      return stubPair(IWorkspaceService, {
+        ...workspaceStub(),
         get: () =>
           Promise.resolve({
             id: 'wd_stub',
@@ -1067,6 +1184,38 @@ describe('SessionLifecycleService', () => {
       await expect(stat(join(dstDir, 'state.json'))).rejects.toThrow();
       await expect(stat(join(dstDir, 'agents', 'main', 'wire.jsonl'))).rejects.toThrow();
       await expect(stat(join(dstDir, 'logs'))).rejects.toThrow();
+    });
+
+    it('loads the copied session tool policy before returning the fork', async () => {
+      const root = await makeTmpRoot();
+      const bootstrap = tmpBootstrapStub(root);
+      const srcDir = join(root, 'sessions', 'wd_stub', 'src');
+      const dstPolicy = join(root, 'sessions', 'wd_stub', 'dst', 'tool-policy', 'state.json');
+      let readyCount = 0;
+      let disabledTools: readonly string[] = [];
+      const policy = {
+        ...sessionToolPolicyStub(),
+        get ready(): Promise<void> {
+          readyCount += 1;
+          if (readyCount === 1) return Promise.resolve();
+          return readFile(dstPolicy, 'utf8').then((raw) => {
+            disabledTools = (JSON.parse(raw) as { disabledTools: readonly string[] }).disabledTools;
+          });
+        },
+        disabledTools: () => disabledTools,
+      } satisfies ISessionToolPolicy;
+      const svc = build([
+        stubPair(IBootstrapService, bootstrap),
+        workspaceGetStub(),
+        stubPair(ISessionToolPolicy, policy),
+      ]);
+      await svc.create({ sessionId: 'src', workDir: '/tmp/proj' });
+      await mkdir(join(srcDir, 'tool-policy'), { recursive: true });
+      await writeFile(join(srcDir, 'tool-policy', 'state.json'), '{"disabledTools":["Skill"]}');
+
+      const target = await svc.fork({ sourceSessionId: 'src', newSessionId: 'dst' });
+
+      expect(target.accessor.get(ISessionToolPolicy).disabledTools()).toEqual(['Skill']);
     });
 
     it('rolls back the target session when fork fails after materializing', async () => {
@@ -1176,7 +1325,7 @@ describe('SessionLifecycleService', () => {
           ...sessionIndexStub(),
           get: () => Promise.resolve(summary),
         }),
-        stubPair(IWorkspaceRegistry, persistentWorkspaceRegistryStub()),
+        stubPair(IWorkspaceService, persistentWorkspaceStub()),
       ]);
 
       await svc.resume('s1');

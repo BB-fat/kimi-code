@@ -86,7 +86,10 @@ import {
 import { StepSummaryComponent } from './components/messages/step-summary';
 import { ThinkingComponent } from './components/messages/thinking';
 import { ToolCallComponent } from './components/messages/tool-call';
-import { UserMessageComponent } from './components/messages/user-message';
+import {
+  ReplayTurnBoundaryComponent,
+  UserMessageComponent,
+} from './components/messages/user-message';
 import { ActivityPaneComponent, type ActivityPaneMode } from './components/panes/activity-pane';
 import { QueuePaneComponent } from './components/panes/queue-pane';
 import type { TuiConfig } from './config';
@@ -133,6 +136,7 @@ import { formatErrorMessage } from './utils/event-payload';
 import { pickForegroundTasks } from './utils/foreground-task';
 import { ImageAttachmentStore, type ImageAttachment } from './utils/image-attachment-store';
 import { extractMediaAttachments, rewriteMediaPlaceholders } from './utils/image-placeholder';
+import { REPLAY_TURN_LIMIT } from './utils/message-replay';
 import { hasPatchChanges } from './utils/object-patch';
 import { sessionRowsForPicker } from './utils/session-picker-rows';
 import { formatBashOutputForDisplay } from './utils/shell-output';
@@ -149,6 +153,8 @@ import { nextTranscriptId } from './utils/transcript-id';
 import {
   TRANSCRIPT_EXPAND_TURNS,
   TRANSCRIPT_HYSTERESIS,
+  TRANSCRIPT_KEEP_RECENT_ASSISTANT,
+  TRANSCRIPT_KEEP_RECENT_ASSISTANT_COMPLETED,
   TRANSCRIPT_KEEP_RECENT_STEPS,
   TRANSCRIPT_MAX_TURNS,
   TRANSCRIPT_WINDOW_ENABLED,
@@ -367,6 +373,13 @@ export class KimiTUI {
 
   /** URL opened in the browser just before exit (e.g. by `/web`); printed by onExit. */
   public exitOpenUrl: string | undefined;
+
+  /**
+   * Task that takes over the process after the TUI shuts down, instead of
+   * exiting (`/web` starting a new server: the server keeps this terminal
+   * attached until Ctrl+C). Set via {@link setExitForegroundTask}.
+   */
+  public exitForegroundTask: ((exitCode: number) => Promise<void>) | undefined;
 
   track(event: string, properties?: TelemetryProperties): void {
     this.harness.track(event, properties);
@@ -780,6 +793,7 @@ export class KimiTUI {
           session = await this.harness.resumeSession({
             id: startup.sessionFlag,
             additionalDirs: createSessionOptions.additionalDirs,
+            replayTurnLimit: REPLAY_TURN_LIMIT,
           });
           shouldReplayHistory = true;
         } else {
@@ -789,6 +803,7 @@ export class KimiTUI {
             session = await this.harness.resumeSession({
               id: target.id,
               additionalDirs: createSessionOptions.additionalDirs,
+              replayTurnLimit: REPLAY_TURN_LIMIT,
             });
             shouldReplayHistory = true;
           } else {
@@ -1139,7 +1154,18 @@ export class KimiTUI {
       this.showError(LLM_NOT_SET_MESSAGE);
       return;
     }
-    const extraction = extractMediaAttachments(text, this.imageStore);
+    let extraction: ReturnType<typeof extractMediaAttachments>;
+    try {
+      // Pasted videos are copied into the cache and expand to a `file://`
+      // `video_url` part; the engine resolves (uploads or degrades) them
+      // inside the turn, so submission stays fully synchronous.
+      extraction = extractMediaAttachments(text, this.imageStore);
+    } catch (error) {
+      // A video cache copy failed (unwritable cache dir, vanished source…);
+      // nothing was dispatched.
+      this.showError(`Failed to prepare media attachment: ${formatErrorMessage(error)}`);
+      return;
+    }
     if (!this.validateMediaCapabilities(extraction)) return;
     const session = this.session;
     if (session === undefined) {
@@ -1582,6 +1608,10 @@ export class KimiTUI {
     this.exitOpenUrl = url;
   }
 
+  setExitForegroundTask(task: (exitCode: number) => Promise<void>): void {
+    this.exitForegroundTask = task;
+  }
+
   async getStartupMcpMs(): Promise<number> {
     const session = this.session;
     if (session === undefined) return 0;
@@ -1867,7 +1897,10 @@ export class KimiTUI {
 
     let session: CoreSession;
     try {
-      session = await this.harness.resumeSession({ id: targetSessionId });
+      session = await this.harness.resumeSession({
+        id: targetSessionId,
+        replayTurnLimit: REPLAY_TURN_LIMIT,
+      });
     } catch (error) {
       const msg = formatErrorMessage(error);
       this.showError(`Failed to resume session ${targetSessionId}: ${msg}`);
@@ -2210,7 +2243,8 @@ export class KimiTUI {
     if (
       !(child instanceof UserMessageComponent) &&
       !(child instanceof SkillActivationComponent) &&
-      !(child instanceof PluginCommandComponent)
+      !(child instanceof PluginCommandComponent) &&
+      !(child instanceof ReplayTurnBoundaryComponent)
     ) {
       return false;
     }
@@ -2298,7 +2332,28 @@ export class KimiTUI {
   }
 
   mergeCurrentTurnSteps(): boolean {
-    if (TRANSCRIPT_KEEP_RECENT_STEPS <= 0) return false;
+    return this.foldCurrentTurnContent(
+      TRANSCRIPT_KEEP_RECENT_STEPS,
+      TRANSCRIPT_KEEP_RECENT_ASSISTANT,
+    );
+  }
+
+  /**
+   * Fold the just-finished turn's assistant messages down to the completed-turn
+   * cap: while a turn is live it may keep TRANSCRIPT_KEEP_RECENT_ASSISTANT
+   * messages mounted, but once it ends only the conclusion-bearing tail stays.
+   * Called when a turn finishes; the finished turn is still the current one at
+   * that point (no newer boundary exists yet).
+   */
+  mergeCompletedTurnAssistants(): boolean {
+    return this.foldCurrentTurnContent(
+      TRANSCRIPT_KEEP_RECENT_STEPS,
+      TRANSCRIPT_KEEP_RECENT_ASSISTANT_COMPLETED,
+    );
+  }
+
+  private foldCurrentTurnContent(keepSteps: number, keepAssistants: number): boolean {
+    if (keepSteps <= 0 && keepAssistants <= 0) return false;
     const children = this.state.transcriptContainer.children;
 
     // Find the start of the current turn (last turn-starting user message).
@@ -2311,22 +2366,34 @@ export class KimiTUI {
     }
     if (turnStart < 0) return false;
 
-    // Locate an existing summary, the assistant message, and the mergeable steps.
+    // Locate an existing summary, the assistant messages, and the mergeable steps.
     let summaryIndex = -1;
     const stepIndices: number[] = [];
+    const assistantIndices: number[] = [];
     for (let i = turnStart + 1; i < children.length; i++) {
       const child = children[i]!;
       if (child instanceof StepSummaryComponent) {
         summaryIndex = i;
         continue;
       }
-      if (child instanceof AssistantMessageComponent) continue;
+      if (child instanceof AssistantMessageComponent) {
+        assistantIndices.push(i);
+        continue;
+      }
       stepIndices.push(i);
     }
 
-    if (stepIndices.length <= TRANSCRIPT_KEEP_RECENT_STEPS) return false;
-    const mergeCount = stepIndices.length - TRANSCRIPT_KEEP_RECENT_STEPS;
-    const toMergeIndices = stepIndices.slice(0, mergeCount);
+    // Fold the oldest steps / assistant messages beyond their respective caps;
+    // the most recent ones stay mounted. Children are chronological, so the
+    // oldest of each kind sit at the front of their index lists.
+    const stepMergeCount = keepSteps > 0 ? Math.max(0, stepIndices.length - keepSteps) : 0;
+    const assistantMergeCount =
+      keepAssistants > 0 ? Math.max(0, assistantIndices.length - keepAssistants) : 0;
+    if (stepMergeCount === 0 && assistantMergeCount === 0) return false;
+    const toMergeIndices = [
+      ...stepIndices.slice(0, stepMergeCount),
+      ...assistantIndices.slice(0, assistantMergeCount),
+    ];
 
     let thinkingCount = 0;
     let toolCount = 0;
@@ -2335,15 +2402,15 @@ export class KimiTUI {
       if (child instanceof ThinkingComponent) thinkingCount++;
       else if (child instanceof ToolCallComponent) toolCount++;
     }
-    if (thinkingCount === 0 && toolCount === 0) return false;
+    if (thinkingCount === 0 && toolCount === 0 && assistantMergeCount === 0) return false;
 
     let summary: StepSummaryComponent;
     if (summaryIndex >= 0) {
       summary = children[summaryIndex] as StepSummaryComponent;
-      summary.addCounts(thinkingCount, toolCount);
+      summary.addCounts(thinkingCount, toolCount, assistantMergeCount);
     } else {
       summary = new StepSummaryComponent();
-      summary.addCounts(thinkingCount, toolCount);
+      summary.addCounts(thinkingCount, toolCount, assistantMergeCount);
     }
 
     // Rebuild children: keep everything except the merged steps, with the summary
@@ -2368,7 +2435,8 @@ export class KimiTUI {
   }
 
   mergeAllTurnSteps(): void {
-    if (TRANSCRIPT_KEEP_RECENT_STEPS <= 0) return;
+    if (TRANSCRIPT_KEEP_RECENT_STEPS <= 0 && TRANSCRIPT_KEEP_RECENT_ASSISTANT_COMPLETED <= 0)
+      return;
     const children = this.state.transcriptContainer.children;
 
     const boundaries: number[] = [];
@@ -2388,16 +2456,29 @@ export class KimiTUI {
 
       let summaryIndex = -1;
       const stepIndices: number[] = [];
+      const assistantIndices: number[] = [];
       for (let i = turnStart + 1; i < turnEnd; i++) {
         const child = children[i]!;
         if (child instanceof StepSummaryComponent) summaryIndex = i;
-        else if (child instanceof AssistantMessageComponent) continue;
+        else if (child instanceof AssistantMessageComponent) assistantIndices.push(i);
         else stepIndices.push(i);
       }
 
-      if (stepIndices.length > TRANSCRIPT_KEEP_RECENT_STEPS) {
-        const mergeCount = stepIndices.length - TRANSCRIPT_KEEP_RECENT_STEPS;
-        const toMergeIndices = stepIndices.slice(0, mergeCount);
+      const stepMergeCount =
+        TRANSCRIPT_KEEP_RECENT_STEPS > 0
+          ? Math.max(0, stepIndices.length - TRANSCRIPT_KEEP_RECENT_STEPS)
+          : 0;
+      // Replayed turns are all completed turns, so the stricter completed-turn
+      // assistant cap applies (matching what live turns fold to on turn end).
+      const assistantMergeCount =
+        TRANSCRIPT_KEEP_RECENT_ASSISTANT_COMPLETED > 0
+          ? Math.max(0, assistantIndices.length - TRANSCRIPT_KEEP_RECENT_ASSISTANT_COMPLETED)
+          : 0;
+      if (stepMergeCount > 0 || assistantMergeCount > 0) {
+        const toMergeIndices = [
+          ...stepIndices.slice(0, stepMergeCount),
+          ...assistantIndices.slice(0, assistantMergeCount),
+        ];
         let thinkingCount = 0;
         let toolCount = 0;
         for (const idx of toMergeIndices) {
@@ -2408,10 +2489,10 @@ export class KimiTUI {
         let summary: StepSummaryComponent;
         if (summaryIndex >= 0) {
           summary = children[summaryIndex] as StepSummaryComponent;
-          summary.addCounts(thinkingCount, toolCount);
+          summary.addCounts(thinkingCount, toolCount, assistantMergeCount);
         } else {
           summary = new StepSummaryComponent();
-          summary.addCounts(thinkingCount, toolCount);
+          summary.addCounts(thinkingCount, toolCount, assistantMergeCount);
         }
         newChildren.push(summary);
         for (const idx of toMergeIndices) toDispose.push(children[idx]!);

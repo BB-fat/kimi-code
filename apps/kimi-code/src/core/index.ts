@@ -16,6 +16,7 @@ export * from './event-types';
 export * from './events';
 export * from './harness';
 export * from './replay';
+export * from './replay-turns';
 export * from './session';
 export * from './types';
 export {

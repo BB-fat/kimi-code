@@ -7,7 +7,7 @@ import { type IAgentScopeHandle, LifecycleScope } from '#/_base/di/scope';
 import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import type { ContextMessage } from '#/agent/contextMemory/types';
-import { IAgentProfileService } from '#/agent/profile/profile';
+import { IAgentToolPolicyService } from '#/agent/toolPolicy/toolPolicy';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { createHooks } from '#/hooks';
 import { ISessionTodoService } from '#/session/todo/sessionTodo';
@@ -36,7 +36,7 @@ interface RecordedTodoSet {
 }
 
 interface FakeAgentOptions {
-  /** What the profile stub answers for `isToolActive`. */
+  /** What the tool policy stub answers for `isToolActive`. */
   readonly toolActive?: boolean;
   /** History returned by the context memory stub. */
   readonly history?: readonly ContextMessage[];
@@ -89,7 +89,7 @@ function makeFakeAgent(agentId: string, options: FakeAgentOptions = {}): FakeAge
     get: () => history,
   };
 
-  const profileStub = {
+  const toolPolicyStub = {
     _serviceBrand: undefined,
     isToolActive: () => toolActive,
   };
@@ -130,7 +130,7 @@ function makeFakeAgent(agentId: string, options: FakeAgentOptions = {}): FakeAge
       if (id === IAgentContextInjectorService) return injectorStub as unknown as T;
       if (id === IInstantiationService) return instantiationStub as unknown as T;
       if (id === IAgentContextMemoryService) return memoryStub as unknown as T;
-      if (id === IAgentProfileService) return profileStub as unknown as T;
+      if (id === IAgentToolPolicyService) return toolPolicyStub as unknown as T;
       if (id === IWireService) return wireStub as unknown as T;
       throw new Error(`unexpected service request in fake agent: ${String(id)}`);
     },
@@ -152,7 +152,6 @@ function makeFakeAgent(agentId: string, options: FakeAgentOptions = {}): FakeAge
     restore,
   };
 }
-
 
 
 describe('SessionTodoService', () => {

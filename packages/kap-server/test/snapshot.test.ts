@@ -20,7 +20,7 @@ import {
   ISessionContext,
   ISessionLifecycleService,
   ISessionMetadata,
-  IWorkspaceRegistry,
+  IWorkspaceService,
   SPINE_TOOL_OPEN,
 } from '@moonshot-ai/agent-core-v2';
 import { sessionSnapshotResponseSchema } from '../src/protocol/rest-snapshot';
@@ -83,7 +83,7 @@ describe('server-v2 snapshot route enrichment', () => {
           ISessionLifecycleService,
           { resume: async () => session, get: () => undefined },
         ],
-        [IWorkspaceRegistry, { get: async () => ({ root: '/workspace' }) }],
+        [IWorkspaceService, { get: async () => ({ root: '/workspace' }) }],
       ]),
     };
     const broadcaster = {
@@ -228,7 +228,7 @@ describe('server-v2 snapshot route enrichment', () => {
           ISessionLifecycleService,
           { resume: async () => session, get: () => undefined },
         ],
-        [IWorkspaceRegistry, { get: async () => ({ root: '/workspace' }) }],
+        [IWorkspaceService, { get: async () => ({ root: '/workspace' }) }],
       ]),
     };
     const broadcaster = {

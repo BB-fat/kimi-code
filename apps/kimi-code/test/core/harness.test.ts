@@ -23,6 +23,7 @@ import {
   IAgentScopeContext,
   IAgentSwarmService,
   IAgentTaskService,
+  IAgentToolPolicyService,
   IAgentToolRegistryService,
   IAgentUsageService,
   IAppendLogStore,
@@ -31,7 +32,7 @@ import {
   IEventBus,
   IEventService,
   IFlagService,
-  IModelResolver,
+  IModelCatalog,
   IPluginService,
   IProviderService,
   ISessionApprovalService,
@@ -46,7 +47,7 @@ import {
   ISessionTodoService,
   ISessionWorkspaceContext,
   IWireService,
-  IWorkspaceRegistry,
+  IWorkspaceService,
 } from '@moonshot-ai/agent-core-v2';
 import { CoreErrorCodes, isCoreError } from '../../src/core/errors';
 import { CoreHarness } from '../../src/core/harness';
@@ -151,9 +152,9 @@ function makeFixture(options?: {
               thinkingLevel: 'high',
               systemPrompt: 'sp',
             }),
-            isToolActive: () => true,
           },
         ],
+        [IAgentToolPolicyService, { isToolActive: () => true }],
         [IAgentPermissionModeService, { mode: 'auto', setMode: record(`${sid}.setMode`) }],
         [
           IAgentPlanService,
@@ -323,7 +324,7 @@ function makeFixture(options?: {
   const app = {
     accessor: makeAccessor([
       [IEventService, appEventBus],
-      [IWorkspaceRegistry, {
+      [IWorkspaceService, {
         createOrTouch: recordReturning(
           'registry.createOrTouch',
           Promise.resolve({ id: 'ws-1', root: '/work', name: 'work', createdAt: 1, lastOpenedAt: 2 }),
@@ -344,9 +345,9 @@ function makeFixture(options?: {
         },
       ],
       [
-        IModelResolver,
+        IModelCatalog,
         {
-          resolve: (...args: unknown[]) => {
+          get: (...args: unknown[]) => {
             (calls['resolver.resolve'] ??= []).push(args);
             if (options?.resolverError !== undefined) throw options.resolverError;
             return resolverModel;

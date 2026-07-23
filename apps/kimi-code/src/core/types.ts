@@ -27,7 +27,7 @@ import type {
   GoalSnapshot,
   GoalStatus,
   GoalToolResult,
-  IAgentRPCService,
+  IAgentShellCommandService,
   ModelCapability,
   PermissionData,
   PermissionMode,
@@ -283,6 +283,7 @@ export type PromptPart =
   | { type: 'tool_result'; tool_call_id: string; output: unknown; is_error?: boolean }
   | { type: 'image'; source: PromptPartMediaSource }
   | { type: 'video'; source: PromptPartMediaSource }
+  | { type: 'video_url'; videoUrl: { url: string } }
   | { type: 'file'; file_id: string; name: string; media_type: string; size: number }
   | { type: 'thinking'; thinking: string; signature?: string };
 
@@ -291,8 +292,8 @@ type PromptPartMediaSource =
   | { kind: 'base64'; media_type: string; data: string }
   | { kind: 'file'; file_id: string };
 
-/** Result of `CoreSession.runShellCommand` (the v2 RPC facade's shape). */
-export type ShellCommandResult = Awaited<ReturnType<IAgentRPCService['runShellCommand']>>;
+/** Result of `CoreSession.runShellCommand` (the v2 shell-command service's shape). */
+export type ShellCommandResult = Awaited<ReturnType<IAgentShellCommandService['run']>>;
 
 /**
  * Session warning surfaced by `getSessionWarnings`. Mirrors the v1 wire

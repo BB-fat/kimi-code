@@ -28,12 +28,13 @@ import { AgentContextProjectorService } from '#/agent/contextProjector/contextPr
 import { IFaultInjectionService } from '#/agent/faultInjection/faultInjection';
 import { FaultInjectionService } from '#/agent/faultInjection/faultInjectionService';
 import { AgentLLMRequesterService } from '#/agent/llmRequester/llmRequesterService';
-import { IAgentLLMRequesterService, type LLMRequestSource } from '#/agent/llmRequester/llmRequester';
+import { IAgentLLMRequesterService, type AgentLLMRequestSource } from '#/agent/llmRequester/llmRequester';
 import { IAgentContextSizeService } from '#/agent/contextSize/contextSize';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import type { ToolInfo } from '#/tool/toolContract';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { IAgentToolSelectService } from '#/agent/toolSelect/toolSelect';
+import { IAgentVideoResolverService } from '#/agent/media/videoResolver';
 import { IAgentUsageService } from '#/agent/usage/usage';
 import { IConfigService } from '#/app/config/config';
 import { type DomainEvent, IEventBus } from '#/app/event/eventBus';
@@ -43,14 +44,20 @@ import {
   APIEmptyResponseError,
   APIRequestTooLargeError,
   APIStatusError,
-} from '#/app/llmProtocol/errors';
-import type { MaxCompletionTokensOptions } from '#/app/llmProtocol/provider';
-import type { Tool } from '#/app/llmProtocol/tool';
-import { emptyUsage } from '#/app/llmProtocol/usage';
-import type { Message } from '#/app/llmProtocol/message';
-import type { ThinkingEffort } from '#/app/llmProtocol/thinkingEffort';
-import type { ModelCapability } from '#/app/llmProtocol/capability';
-import type { LLMEvent, LLMRequestInput, Model } from '#/app/model/modelInstance';
+} from '#/kosong/contract/errors';
+import { emptyUsage } from '#/kosong/contract/usage';
+import type { Message } from '#/kosong/contract/message';
+import type { ThinkingEffort } from '#/kosong/contract/provider';
+import type { Tool } from '#/kosong/contract/tool';
+import type { ModelCapability } from '#/kosong/contract/capability';
+import { IModelCatalog, type Model } from '#/kosong/model/catalog';
+import { IModelService } from '#/kosong/model/model';
+import {
+  type ModelRequestEvent,
+  type ModelRequestInput,
+  type ModelRequestParams,
+  type ModelRequester,
+} from '#/kosong/model/modelRequester';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { ILogService } from '#/_base/log/log';
 import { Error2, ErrorCodes } from '#/errors';
@@ -73,14 +80,14 @@ const history: Message[] = [
   { role: 'user', content: [{ type: 'text', text: 'hello' }], toolCalls: [] },
 ];
 
-function createModel(
+function createRequester(
   calls: { value: number },
   firstCallError?: Error | null,
   subsequentCallErrors: readonly Error[] = [],
-  capturedInputs?: LLMRequestInput[],
-  capturedBudgetOptions: { value?: MaxCompletionTokensOptions } = {},
-): Model {
-  const build = (): Model => ({
+  capturedInputs?: ModelRequestInput[],
+  capturedParams?: (ModelRequestParams | undefined)[],
+): ModelRequester {
+  const model: Model = {
     id: 'm',
     name: 'wire-model',
     aliases: [],
@@ -89,21 +96,16 @@ function createModel(
     headers: {},
     capabilities,
     maxContextSize: 1000,
-    thinkingEffort: null,
     alwaysThinking: false,
     providerName: 'p',
     authProvider: { getAuth: async () => undefined },
-    withThinking: () => build(),
-    withMaxCompletionTokens: (_maxTokens: number, options?: MaxCompletionTokensOptions) => {
-      capturedBudgetOptions.value = options;
-      return build();
-    },
-    withGenerationKwargs: () => build(),
-    withProviderOptions: () => build(),
-    withThinkingKeep: () => build(),
-    request: async function* (input) {
+  };
+  return {
+    model,
+    request: async function* (input, _signal, params) {
       calls.value += 1;
       capturedInputs?.push(input);
+      capturedParams?.push(params);
       const error =
         calls.value === 1
           ? firstCallError === null
@@ -120,8 +122,7 @@ function createModel(
         id: 'resp-1',
       };
     },
-  });
-  return build();
+  };
 }
 
 let disposables: DisposableStore;
@@ -133,7 +134,7 @@ beforeEach(() => {
 afterEach(() => disposables.dispose());
 
 function createService(
-  model: Model,
+  requester: ModelRequester,
   projector:
     | (Pick<IAgentContextProjectorService, 'project' | 'projectStrict'> &
         Partial<
@@ -167,7 +168,7 @@ function createService(
       reservedContextSize: undefined,
       compactionTriggerRatio: undefined,
     }),
-    getProvider: () => model,
+    resolveRequestParams: () => ({}),
     getSystemPrompt: () => 'system',
     data: () => ({
       cwd: '',
@@ -176,7 +177,6 @@ function createService(
       thinkingLevel,
       systemPrompt: 'system',
     }),
-    isToolActive: () => true,
   };
   const usage = { record: () => undefined, status: () => ({}) };
   const context = { get: () => history };
@@ -203,6 +203,7 @@ function createService(
 
   ix.stub(IAgentContextMemoryService, context);
   ix.stub(IAgentToolSelectService, toolSelect);
+  ix.stub(IAgentVideoResolverService, { resolve: async (messages) => messages });
   if (projector === undefined) {
     ix.set(
       IAgentContextProjectorService,
@@ -224,6 +225,15 @@ function createService(
   ix.stub(IConfigService, config);
   ix.stub(ILogService, log);
   ix.stub(ITelemetryService, telemetry);
+  ix.stub(IModelCatalog, {
+    _serviceBrand: undefined,
+    get: () => requester.model,
+    getRequester: () => requester,
+    findByName: () => [],
+  });
+  ix.stub(IModelService, {
+    get: () => undefined,
+  });
   const records: WireRecord[] = [];
   registerTestAgentWire(ix, 'wire/llm-requester', {
     log: recordingWireLog(records),
@@ -245,10 +255,9 @@ function createService(
 describe('AgentLLMRequesterService Anthropic effort diagnostics', () => {
   it('warns and sends when the effort is not listed by the model', async () => {
     const calls = { value: 0 };
-    const model = createModel(calls, null);
-    Object.defineProperty(model, 'supportEfforts', { value: ['max'] });
-    Object.defineProperty(model, 'withMaxCompletionTokens', { value: () => model });
-    const { service, events } = createService(model, undefined, undefined, undefined, {
+    const requester = createRequester(calls, null);
+    Object.defineProperty(requester.model, 'supportEfforts', { value: ['max'] });
+    const { service, events } = createService(requester, undefined, undefined, undefined, {
       thinkingLevel: 'high',
     });
 
@@ -272,7 +281,7 @@ describe('AgentLLMRequesterService strict resend', () => {
     const calls = { value: 0 };
     let projectCalls = 0;
     let strictCalls = 0;
-    const { service } = createService(createModel(calls), {
+    const { service } = createService(createRequester(calls), {
       project: (messages: readonly ContextMessage[]) => {
         projectCalls += 1;
         return messages;
@@ -293,19 +302,16 @@ describe('AgentLLMRequesterService strict resend', () => {
   });
 
   it('does not resend for non-recoverable errors', async () => {
-    const model = createModel({ value: 0 });
-    Object.defineProperty(model, 'request', {
+    const requester = createRequester({ value: 0 });
+    Object.defineProperty(requester, 'request', {
       value: async function* () {
-        const events: LLMEvent[] = [];
+        const events: ModelRequestEvent[] = [];
         for (const event of events) yield event;
         throw new APIStatusError(401, 'unauthorized');
       },
     });
-    Object.defineProperty(model, 'withMaxCompletionTokens', {
-      value: () => model,
-    });
     let strictCalls = 0;
-    const { service } = createService(model, {
+    const { service } = createService(requester, {
       project: (messages: readonly ContextMessage[]) => messages,
       projectStrict: (messages: readonly ContextMessage[]) => {
         strictCalls += 1;
@@ -331,9 +337,9 @@ describe('AgentLLMRequesterService completion budget sizing', () => {
   };
 
   it('feeds the full context size (measured prefix + estimated tail) to the budget clamp', async () => {
-    const budget: { value?: MaxCompletionTokensOptions } = {};
+    const capturedParams: (ModelRequestParams | undefined)[] = [];
     const { service } = createService(
-      createModel({ value: 0 }, null, [], undefined, budget),
+      createRequester({ value: 0 }, null, [], undefined, capturedParams),
       identityProjector,
       contextSizeWithTail,
     );
@@ -342,21 +348,21 @@ describe('AgentLLMRequesterService completion budget sizing', () => {
 
     // The tail accumulated since the last usage event must count toward the
     // remaining-window clamp; `.measured` alone would drift optimistic.
-    expect(budget.value?.usedContextTokens).toBe(600);
+    expect(capturedParams.at(-1)?.usedContextTokens).toBe(600);
   });
 
   it('skips the remaining-window clamp for overridden messages', async () => {
-    const budget: { value?: MaxCompletionTokensOptions } = {};
+    const capturedParams: (ModelRequestParams | undefined)[] = [];
     const { service } = createService(
-      createModel({ value: 0 }, null, [], undefined, budget),
+      createRequester({ value: 0 }, null, [], undefined, capturedParams),
       identityProjector,
       contextSizeWithTail,
     );
 
     await service.request({ messages: [...history] });
 
-    expect(budget.value).toBeDefined();
-    expect(budget.value?.usedContextTokens).toBeUndefined();
+    expect(capturedParams.at(-1)).toBeDefined();
+    expect(capturedParams.at(-1)?.usedContextTokens).toBeUndefined();
   });
 });
 
@@ -376,7 +382,7 @@ describe('AgentLLMRequesterService fold application', () => {
 
   it('applies folds for requests over the live history', async () => {
     const seen: { value?: ProjectOptions } = {};
-    const { service } = createService(createModel({ value: 0 }, null), recordingProjector(seen));
+    const { service } = createService(createRequester({ value: 0 }, null), recordingProjector(seen));
 
     await service.request({ retry: { maxAttempts: 1 } });
 
@@ -385,7 +391,7 @@ describe('AgentLLMRequesterService fold application', () => {
 
   it('skips folds for requests over an explicit message list', async () => {
     const seen: { value?: ProjectOptions } = {};
-    const { service } = createService(createModel({ value: 0 }, null), recordingProjector(seen));
+    const { service } = createService(createRequester({ value: 0 }, null), recordingProjector(seen));
 
     await service.request({ messages: [...history], retry: { maxAttempts: 1 } });
 
@@ -398,42 +404,35 @@ describe('AgentLLMRequesterService system prompt contributions', () => {
     project: (messages: readonly ContextMessage[]) => messages,
     projectStrict: (messages: readonly ContextMessage[]) => messages,
   };
-  const turnSource: LLMRequestSource = { type: 'turn', turnId: 1 };
+  const turnSource: AgentLLMRequestSource = { type: 'turn', turnId: 1 };
   const readTool: Tool = { name: 'Read', description: 'read files', parameters: {} };
   const readToolInfo: ToolInfo = { ...readTool, source: 'builtin' };
 
-  function capturingModel(captured: { systemPrompt?: string; toolNames?: string[] }): Model {
-    const model = createModel({ value: 0 }, null);
-    // The `withXxx` builders of `createModel` return fresh instances, so patch
-    // them to return the same instance — otherwise the capture patch below is
-    // lost the moment the requester applies the completion budget.
-    Object.defineProperties(model, {
-      request: {
-        value: async function* (input: { systemPrompt: string; tools: readonly Tool[] }) {
-          captured.systemPrompt = input.systemPrompt;
-          captured.toolNames = input.tools.map((tool) => tool.name);
-          yield {
-            type: 'finish',
-            message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }], toolCalls: [] },
-            providerFinishReason: 'completed',
-            rawFinishReason: 'stop',
-            id: 'resp-1',
-          };
-        },
+  function capturingRequester(captured: {
+    systemPrompt?: string;
+    toolNames?: string[];
+  }): ModelRequester {
+    const requester = createRequester({ value: 0 }, null);
+    Object.defineProperty(requester, 'request', {
+      value: async function* (input: ModelRequestInput) {
+        captured.systemPrompt = input.systemPrompt;
+        captured.toolNames = input.tools.map((tool) => tool.name);
+        yield {
+          type: 'finish',
+          message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }], toolCalls: [] },
+          providerFinishReason: 'completed',
+          rawFinishReason: 'stop',
+          id: 'resp-1',
+        };
       },
-      withMaxCompletionTokens: { value: () => model },
-      withThinking: { value: () => model },
-      withGenerationKwargs: { value: () => model },
-      withProviderOptions: { value: () => model },
-      withThinkingKeep: { value: () => model },
     });
-    return model;
+    return requester;
   }
 
   it('applies contributions with the request source and final tool list', async () => {
     const captured: { systemPrompt?: string } = {};
-    const seen: { source?: LLMRequestSource; toolNames?: string[] } = {};
-    const { service } = createService(capturingModel(captured), identityProjector);
+    const seen: { source?: AgentLLMRequestSource; toolNames?: string[] } = {};
+    const { service } = createService(capturingRequester(captured), identityProjector);
     service.registerSystemPromptContribution('test', (prompt, context) => {
       seen.source = context.source;
       seen.toolNames = context.tools.map((tool) => tool.name);
@@ -450,7 +449,7 @@ describe('AgentLLMRequesterService system prompt contributions', () => {
   it('hands the default shaped tool list to contributions when no tool override is given', async () => {
     const seen: { toolNames?: string[] } = {};
     const { service } = createService(
-      capturingModel({}),
+      capturingRequester({}),
       identityProjector,
       { get: () => ({ size: 0, measured: 0, estimated: 0 }), measured: () => undefined },
       [readToolInfo],
@@ -467,7 +466,7 @@ describe('AgentLLMRequesterService system prompt contributions', () => {
 
   it('chains contributions in registration order', async () => {
     const captured: { systemPrompt?: string } = {};
-    const { service } = createService(capturingModel(captured), identityProjector);
+    const { service } = createService(capturingRequester(captured), identityProjector);
     service.registerSystemPromptContribution('a', (prompt) => `${prompt}|a`);
     service.registerSystemPromptContribution('b', (prompt) => `${prompt}|b`);
 
@@ -478,7 +477,7 @@ describe('AgentLLMRequesterService system prompt contributions', () => {
 
   it('stops applying a contribution once its registration is disposed', async () => {
     const captured: { systemPrompt?: string } = {};
-    const { service } = createService(capturingModel(captured), identityProjector);
+    const { service } = createService(capturingRequester(captured), identityProjector);
     const registration = service.registerSystemPromptContribution(
       'gone',
       (prompt) => `${prompt}|gone`,
@@ -502,7 +501,7 @@ describe('AgentLLMRequesterService media-stripped resend', () => {
     let projectCalls = 0;
     let strictCalls = 0;
     let strippedCalls = 0;
-    const { service } = createService(createModel(calls, IMAGE_FORMAT_400), {
+    const { service } = createService(createRequester(calls, IMAGE_FORMAT_400), {
       project: (messages: readonly ContextMessage[]) => {
         projectCalls += 1;
         return messages;
@@ -530,7 +529,7 @@ describe('AgentLLMRequesterService media-stripped resend', () => {
     const calls = { value: 0 };
     let projectCalls = 0;
     let strippedCalls = 0;
-    const { service } = createService(createModel(calls, IMAGE_FORMAT_400), {
+    const { service } = createService(createRequester(calls, IMAGE_FORMAT_400), {
       project: (messages: readonly ContextMessage[]) => {
         projectCalls += 1;
         return messages;
@@ -557,7 +556,7 @@ describe('AgentLLMRequesterService media-stripped resend', () => {
     const calls = { value: 0 };
     let strippedCalls = 0;
     const { service } = createService(
-      createModel(calls, new APIStatusError(400, 'some other validation problem')),
+      createRequester(calls, new APIStatusError(400, 'some other validation problem')),
       {
         project: (messages: readonly ContextMessage[]) => messages,
         projectStrict: (messages: readonly ContextMessage[]) => messages,
@@ -583,7 +582,7 @@ describe('AgentLLMRequesterService media-degraded resend', () => {
     let degradedCalls = 0;
     let strippedCalls = 0;
     const { service } = createService(
-      createModel(
+      createRequester(
         calls,
         new Error2(ErrorCodes.PROVIDER_API_ERROR, 'Provider request failed', {
           cause: BODY_TOO_LARGE_413,
@@ -621,7 +620,7 @@ describe('AgentLLMRequesterService media-degraded resend', () => {
     let degradedCalls = 0;
     let strippedCalls = 0;
     const { service } = createService(
-      createModel(calls, BODY_TOO_LARGE_413, [BODY_TOO_LARGE_413]),
+      createRequester(calls, BODY_TOO_LARGE_413, [BODY_TOO_LARGE_413]),
       {
         project: (messages: readonly ContextMessage[]) => {
           projectCalls += 1;
@@ -651,7 +650,7 @@ describe('AgentLLMRequesterService media-degraded resend', () => {
   it('records repeated-413 recovery projections on the sticky later request', async () => {
     const calls = { value: 0 };
     const { service, wire, records } = createService(
-      createModel(calls, BODY_TOO_LARGE_413, [BODY_TOO_LARGE_413]),
+      createRequester(calls, BODY_TOO_LARGE_413, [BODY_TOO_LARGE_413]),
       {
         project: (messages: readonly ContextMessage[]) => messages,
         projectStrict: (messages: readonly ContextMessage[]) => messages,
@@ -673,7 +672,7 @@ describe('AgentLLMRequesterService media-degraded resend', () => {
 
   it('keeps new recovery media visible on later snapshot-stripped steps', async () => {
     const calls = { value: 0 };
-    const capturedInputs: LLMRequestInput[] = [];
+    const capturedInputs: ModelRequestInput[] = [];
     const oldUrl = 'data:image/png;base64,REJECTED';
     const newUrl = 'data:image/png;base64,SMALL';
     const imageMessage = (url: string, id: string): Message => ({
@@ -682,7 +681,7 @@ describe('AgentLLMRequesterService media-degraded resend', () => {
       toolCalls: [],
     });
     const { service } = createService(
-      createModel(
+      createRequester(
         calls,
         BODY_TOO_LARGE_413,
         [BODY_TOO_LARGE_413],
@@ -717,7 +716,7 @@ describe('AgentLLMRequesterService media-degraded resend', () => {
     let degradedCalls = 0;
     let strippedCalls = 0;
     const { service } = createService(
-      createModel(calls, BODY_TOO_LARGE_413, [BODY_TOO_LARGE_413, BODY_TOO_LARGE_413]),
+      createRequester(calls, BODY_TOO_LARGE_413, [BODY_TOO_LARGE_413, BODY_TOO_LARGE_413]),
       {
         project: (messages: readonly ContextMessage[]) => {
           projectCalls += 1;
@@ -748,7 +747,7 @@ describe('AgentLLMRequesterService media-degraded resend', () => {
     const calls = { value: 0 };
     let projectCalls = 0;
     let degradedCalls = 0;
-    const { service } = createService(createModel(calls, BODY_TOO_LARGE_413), {
+    const { service } = createService(createRequester(calls, BODY_TOO_LARGE_413), {
       project: (messages: readonly ContextMessage[]) => {
         projectCalls += 1;
         return messages;
@@ -778,7 +777,7 @@ describe('AgentLLMRequesterService media-degraded resend', () => {
     ]) {
       const calls = { value: 0 };
       let degradedCalls = 0;
-      const { service } = createService(createModel(calls, error), {
+      const { service } = createService(createRequester(calls, error), {
         project: (messages: readonly ContextMessage[]) => messages,
         projectStrict: (messages: readonly ContextMessage[]) => messages,
         projectMediaDegraded: (messages: readonly ContextMessage[]) => {
@@ -799,7 +798,7 @@ describe('AgentLLMRequesterService fault injection (experimental)', () => {
     const calls = { value: 0 };
     let projectCalls = 0;
     let degradedCalls = 0;
-    const { service, faultInjection } = createService(createModel(calls, null), {
+    const { service, faultInjection } = createService(createRequester(calls, null), {
       project: (messages: readonly ContextMessage[]) => {
         projectCalls += 1;
         return messages;
@@ -829,7 +828,7 @@ describe('AgentLLMRequesterService fault injection (experimental)', () => {
   it('raises an armed image-format fault and recovers via the stripped resend, one-shot only', async () => {
     const calls = { value: 0 };
     let strippedCalls = 0;
-    const { service, faultInjection } = createService(createModel(calls, null), {
+    const { service, faultInjection } = createService(createRequester(calls, null), {
       project: (messages: readonly ContextMessage[]) => messages,
       projectStrict: (messages: readonly ContextMessage[]) => messages,
       projectMediaStripped: (messages: readonly ContextMessage[]) => {
@@ -850,7 +849,7 @@ describe('AgentLLMRequesterService fault injection (experimental)', () => {
 
   it('refuses to arm when the fault-injection flag is disabled', () => {
     const { faultInjection } = createService(
-      createModel({ value: 0 }, null),
+      createRequester({ value: 0 }, null),
       {
         project: (messages: readonly ContextMessage[]) => messages,
         projectStrict: (messages: readonly ContextMessage[]) => messages,
@@ -871,25 +870,22 @@ describe('AgentLLMRequesterService trace id', () => {
     projectStrict: (messages: readonly ContextMessage[]) => messages,
   };
 
-  function createTracedModel(traceId: string | null): Model {
-    const build = (): Model => ({
+  function createTracedRequester(traceId: string | null): ModelRequester {
+    const model: Model = {
       id: 'm',
       name: 'wire-model',
       aliases: [],
-      protocol: 'kimi',
+      protocol: 'openai',
       baseUrl: 'https://example.test',
       headers: {},
       capabilities,
       maxContextSize: 1000,
-      thinkingEffort: null,
       alwaysThinking: false,
       providerName: 'p',
       authProvider: { getAuth: async () => undefined },
-      withThinking: () => build(),
-      withMaxCompletionTokens: () => build(),
-      withGenerationKwargs: () => build(),
-      withProviderOptions: () => build(),
-      withThinkingKeep: () => build(),
+    };
+    return {
+      model,
       request: async function* (_input, _signal, requestOptions) {
         requestOptions?.onTraceId?.(traceId);
         yield {
@@ -901,15 +897,14 @@ describe('AgentLLMRequesterService trace id', () => {
           traceId: traceId ?? undefined,
         };
       },
-    });
-    return build();
+    };
   }
 
   it('exposes the request trace and returns it on finish', async () => {
-    const model = createTracedModel('trace-req-1');
+    const requester = createTracedRequester('trace-req-1');
     const headersArrived = createControlledPromise<void>();
     const releaseStream = createControlledPromise<void>();
-    Object.defineProperty(model, 'request', {
+    Object.defineProperty(requester, 'request', {
       value: async function* (_input: unknown, _signal: unknown, requestOptions: {
         onTraceId?: (traceId: string | null) => void;
       }) {
@@ -923,13 +918,10 @@ describe('AgentLLMRequesterService trace id', () => {
           rawFinishReason: 'stop',
           id: 'resp-1',
           traceId: 'trace-req-1',
-        } satisfies LLMEvent;
+        } satisfies ModelRequestEvent;
       },
     });
-    Object.defineProperty(model, 'withMaxCompletionTokens', {
-      value: () => model,
-    });
-    const { service } = createService(model, passthroughProjector);
+    const { service } = createService(requester, passthroughProjector);
     const request = service.start({ source: { type: 'turn', turnId: 1, step: 1 } });
     await headersArrived;
     expect(request.trace.traceId).toBe('trace-req-1');
@@ -941,7 +933,7 @@ describe('AgentLLMRequesterService trace id', () => {
   });
 
   it('reports an absent trace before a request that returns none', async () => {
-    const { service } = createService(createTracedModel(null), passthroughProjector);
+    const { service } = createService(createTracedRequester(null), passthroughProjector);
     const request = service.start();
     const finish = await request.result;
 
@@ -950,18 +942,15 @@ describe('AgentLLMRequesterService trace id', () => {
   });
 
   it('attaches trace_id, turn_id and step_no to api_error from the failed request', async () => {
-    const model = createTracedModel(null);
-    Object.defineProperty(model, 'request', {
+    const requester = createTracedRequester(null);
+    Object.defineProperty(requester, 'request', {
       value: async function* () {
-        const events: LLMEvent[] = [];
+        const events: ModelRequestEvent[] = [];
         for (const event of events) yield event;
         throw new APIStatusError(500, 'boom', 'req-1', null, 'trace-fail-1');
       },
     });
-    Object.defineProperty(model, 'withMaxCompletionTokens', {
-      value: () => model,
-    });
-    const { service, telemetryRecords } = createService(model, passthroughProjector);
+    const { service, telemetryRecords } = createService(requester, passthroughProjector);
     const request = service.start({ source: { type: 'turn', turnId: 3, step: 2 } });
     await expect(request.result).rejects.toMatchObject({ statusCode: 500 });
 
@@ -981,22 +970,19 @@ describe('AgentLLMRequesterService trace id', () => {
     // A failure after the response headers arrived (empty response, mid-stream
     // decode error) carries no trace on the error itself; the trace captured
     // through the provider callback must remain on the request trace.
-    const model = createTracedModel(null);
-    Object.defineProperty(model, 'request', {
+    const requester = createTracedRequester(null);
+    Object.defineProperty(requester, 'request', {
       value: async function* (...args: unknown[]) {
         const requestOptions = args[2] as
           | { onTraceId?: (traceId: string | null) => void }
           | undefined;
         requestOptions?.onTraceId?.('trace-mid-stream');
-        const events: LLMEvent[] = [];
+        const events: ModelRequestEvent[] = [];
         for (const event of events) yield event;
         throw new APIEmptyResponseError('no content, no tool calls');
       },
     });
-    Object.defineProperty(model, 'withMaxCompletionTokens', {
-      value: () => model,
-    });
-    const { service, telemetryRecords } = createService(model, passthroughProjector);
+    const { service, telemetryRecords } = createService(requester, passthroughProjector);
     const request = service.start({ source: { type: 'turn', turnId: 4, step: 1 } });
     await expect(request.result).rejects.toThrow();
 
@@ -1006,11 +992,11 @@ describe('AgentLLMRequesterService trace id', () => {
   });
 
   it('clears the previous physical request trace before a projection retry', async () => {
-    const model = createTracedModel(null);
+    const requester = createTracedRequester(null);
     let attempts = 0;
-    Object.defineProperty(model, 'request', {
+    Object.defineProperty(requester, 'request', {
       value: async function* (...args: unknown[]) {
-        const events: LLMEvent[] = [];
+        const events: ModelRequestEvent[] = [];
         for (const event of events) yield event;
         attempts += 1;
         const requestOptions = args[2] as
@@ -1023,10 +1009,7 @@ describe('AgentLLMRequesterService trace id', () => {
         throw new APIConnectionError('socket hang up');
       },
     });
-    Object.defineProperty(model, 'withMaxCompletionTokens', {
-      value: () => model,
-    });
-    const { service, telemetryRecords } = createService(model, passthroughProjector);
+    const { service, telemetryRecords } = createService(requester, passthroughProjector);
     // Bound the error retry to a single loop attempt so the count pins the
     // projection retry: physical request 1 (413) -> degraded resend 2 (socket
     // hang up) -> terminal failure, no further error retries.

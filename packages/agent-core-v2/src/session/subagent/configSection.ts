@@ -4,7 +4,9 @@
  *
  * Owns the `[subagent]` configuration section (`timeout_ms` on disk) together
  * with the `KIMI_SUBAGENT_TIMEOUT_MS` env override, mirroring v1's
- * `resolveSubagentTimeoutMs` precedence (env > config.toml > 2h default). Both
+ * `resolveSubagentTimeoutMs` precedence (env > config.toml > 2h default). While
+ * the env var is set, `stripEnvBoundFields` restores the env-free raw value
+ * before persistence, so the override never leaks into `config.toml`. Both
  * collaboration tools — `Agent` in this domain and `AgentSwarm` in the `swarm`
  * domain — resolve their per-run timeout through `resolveSubagentTimeoutMs`,
  * and render the timeout message with `formatSubagentTimeoutDescription`.
@@ -14,14 +16,18 @@
 
 import { z } from 'zod';
 
-import { type EnvBindings, envBindings, type IConfigService } from '#/app/config/config';
+import {
+  type EnvBindings,
+  envBindings,
+  stripEnvBoundFields,
+  type IConfigService,
+} from '#/app/config/config';
 import { registerConfigSection } from '#/app/config/configSectionContributions';
 
 export const SUBAGENT_SECTION = 'subagent';
 
 export const SubagentConfigSchema = z.object({
-  /** Per-run subagent timeout in milliseconds; set a large value to effectively disable the cap. */
-  timeoutMs: z.number().int().min(1).optional(),
+  timeoutMs: z.number().int().min(0).optional(),
 });
 
 export type SubagentConfig = z.infer<typeof SubagentConfigSchema>;
@@ -44,9 +50,12 @@ export const subagentEnvBindings: EnvBindings<SubagentConfig> = envBindings(
   },
 );
 
+export const stripSubagentEnv = stripEnvBoundFields(subagentEnvBindings);
+
 registerConfigSection(SUBAGENT_SECTION, SubagentConfigSchema, {
   defaultValue: { timeoutMs: DEFAULT_SUBAGENT_TIMEOUT_MS },
   env: subagentEnvBindings,
+  stripEnv: stripSubagentEnv,
 });
 
 /**

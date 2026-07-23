@@ -24,7 +24,7 @@ import {
   IBootstrapService,
   IConfigService,
   IFlagService,
-  IModelResolver,
+  IModelCatalog,
   IPluginService,
   IProviderService,
   ISessionContext,
@@ -33,7 +33,7 @@ import {
   ISessionLifecycleService,
   ISessionMetadata,
   ISessionWorkspaceContext,
-  IWorkspaceRegistry,
+  IWorkspaceService,
   logSeed,
   MAIN_AGENT_ID,
   resolveConfigPath,
@@ -127,6 +127,13 @@ export interface CreateSessionOptions {
 export interface ResumeSessionInput {
   readonly id: string;
   readonly additionalDirs?: readonly string[];
+  /**
+   * Limit each returned agent replay to the most recent N user turns. Omit to
+   * return the full replay. Lets UI callers that only render the tail skip
+   * folding and rehydrating the entire history (v1 `ResumeSessionPayload`
+   * parity, #1976).
+   */
+  readonly replayTurnLimit?: number;
   readonly sessionStartedProperties?: TelemetryProperties;
 }
 
@@ -218,7 +225,7 @@ export class CoreHarness {
     let resolved: Model | undefined;
     if (model.length > 0) {
       try {
-        resolved = app.get(IModelResolver).resolve(model);
+        resolved = app.get(IModelCatalog).get(model);
       } catch {
         // Provider/auth not ready (e.g. logged out): degrade like getStatus.
         resolved = undefined;
@@ -246,7 +253,7 @@ export class CoreHarness {
     // `ISessionLifecycleService.resume` refuses sessions whose workspace is
     // unknown to the registry, so skipping this would make the session
     // impossible to resume later.
-    await app.get(IWorkspaceRegistry).createOrTouch(options.workDir);
+    await app.get(IWorkspaceService).createOrTouch(options.workDir);
     const handle = await app.get(ISessionLifecycleService).create({ sessionId: id, workDir: options.workDir });
     try {
       const main = await ensureMainAgent(handle);
@@ -299,7 +306,10 @@ export class CoreHarness {
     // session_started / session_resume.
     const active = this.activeSessions.get(id);
     if (active !== undefined) return active.session;
-    const session = await this.resumeInternal(id, { additionalDirs: input.additionalDirs });
+    const session = await this.resumeInternal(id, {
+      additionalDirs: input.additionalDirs,
+      replayTurnLimit: input.replayTurnLimit,
+    });
     this.trackSessionStarted(id, true, input.sessionStartedProperties);
     this.trackSessionEvent(id, 'session_resume');
     return session;
@@ -537,7 +547,7 @@ export class CoreHarness {
   /** Cold-load a session and register it; shared by resume and reload. */
   private async resumeInternal(
     id: string,
-    input: { additionalDirs?: readonly string[] },
+    input: { additionalDirs?: readonly string[]; replayTurnLimit?: number },
   ): Promise<CoreSession> {
     const handle = await this.deps.app.accessor.get(ISessionLifecycleService).resume(id);
     if (handle === undefined) {
@@ -548,15 +558,18 @@ export class CoreHarness {
     for (const dir of input.additionalDirs ?? []) {
       handle.accessor.get(ISessionWorkspaceContext).addAdditionalDir(dir);
     }
-    return this.hydrateSession(handle);
+    return this.hydrateSession(handle, input.replayTurnLimit);
   }
 
   /** Ensure main, rebuild the resume snapshot, and register a `CoreSession`. */
-  private async hydrateSession(handle: ISessionScopeHandle): Promise<CoreSession> {
+  private async hydrateSession(
+    handle: ISessionScopeHandle,
+    replayTurnLimit?: number,
+  ): Promise<CoreSession> {
     const main = await ensureMainAgent(handle);
     // TODO(v2-gap): G-30 — v2 resume has no warning channel;
     // `resumeState.warning` stays undefined.
-    const resumeState = await buildResumedSessionState(handle, main);
+    const resumeState = await buildResumedSessionState(handle, main, replayTurnLimit);
     const summary = await this.projectLiveSummary(handle);
     return this.registerSession(handle, summary, resumeState);
   }

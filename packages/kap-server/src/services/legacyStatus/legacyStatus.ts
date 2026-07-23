@@ -138,7 +138,8 @@ export function readLegacyStatus(agent: IAgentScopeHandle): LegacyStatusSnapshot
   // invariant raw >= projected also holds in the transient window where the
   // measured total outruns the live estimate (see above).
   const rawContextTokens = Math.max(contextSize.rawSize(), contextTokens);
-  const maxContextTokens = profile.getModelCapabilities().max_context_tokens;
+  const capabilities = profile.getModelCapabilities();
+  const maxContextTokens = capabilities.max_input_tokens ?? capabilities.max_context_tokens;
   const model = profile.getModel();
   return { usage, contextTokens, rawContextTokens, maxContextTokens, model };
 }

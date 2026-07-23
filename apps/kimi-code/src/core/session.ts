@@ -23,11 +23,12 @@ import {
   IAgentProfileService,
   IAgentPromptService,
   IAgentRPCService,
+  IAgentShellCommandService,
   IAgentSwarmService,
   IAgentTaskService,
   IAgentUsageService,
   IConfigService,
-  IModelResolver,
+  IModelCatalog,
   ISessionApprovalService,
   ISessionBtwService,
   ISessionContext,
@@ -184,13 +185,13 @@ export class CoreSession {
   ): Promise<ShellCommandResult> {
     const agent = await this.agent(options.agentId);
     return await agent.accessor
-      .get(IAgentRPCService)
-      .runShellCommand({ command, commandId: options.commandId });
+      .get(IAgentShellCommandService)
+      .run({ command, commandId: options.commandId });
   }
 
   async cancelShellCommand(commandId: string, options?: { agentId?: string }): Promise<void> {
     const agent = await this.agent(options?.agentId);
-    await agent.accessor.get(IAgentRPCService).cancelShellCommand({ commandId });
+    agent.accessor.get(IAgentShellCommandService).cancel(commandId);
   }
 
   /** Returns the number of history entries actually undone. */
@@ -296,7 +297,7 @@ export class CoreSession {
         maxContextTokens = 0;
       } else {
         try {
-          maxContextTokens = accessor.get(IModelResolver).resolve(defaultModel).capabilities.max_context_tokens;
+          maxContextTokens = accessor.get(IModelCatalog).get(defaultModel).capabilities.max_context_tokens;
         } catch {
           maxContextTokens = 0;
         }

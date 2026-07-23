@@ -24,6 +24,7 @@ import {
   IAgentScopeContext,
   IAgentSwarmService,
   IAgentTaskService,
+  IAgentToolPolicyService,
   IAgentToolRegistryService,
   IAgentUsageService,
   IAppendLogStore,
@@ -39,6 +40,7 @@ import {
   type WireRecord,
 } from '@moonshot-ai/agent-core-v2';
 
+import { limitAgentReplayByTurns } from './replay-turns';
 import {
   reduceTranscript,
   rehydrateTranscript,
@@ -56,21 +58,28 @@ import type {
 /**
  * Assemble the per-agent resume snapshots. v2 resume restores only the main
  * agent (subagents are lazily re-created on their next prompt), so the map
- * carries a single `main` entry.
+ * carries a single `main` entry. `replayTurnLimit` trims each replay to the
+ * most recent N user turns (see `#/core/replay-turns`); omit for the full
+ * replay.
  */
 export async function buildResumedAgents(
   session: ISessionScopeHandle,
   mainAgent: IAgentScopeHandle,
+  replayTurnLimit?: number,
 ): Promise<Record<string, ResumedAgentState>> {
   const { accessor } = mainAgent;
   const profile = accessor.get(IAgentProfileService);
   const data = profile.data();
   const history = accessor.get(IAgentContextMemoryService).get();
-  const replay = await buildReplayFromWireRecords(accessor);
+  const replay = limitAgentReplayByTurns(
+    await buildReplayFromWireRecords(accessor),
+    replayTurnLimit,
+  );
+  const toolPolicy = accessor.get(IAgentToolPolicyService);
   const tools: Array<ToolInfo & { active: boolean }> = accessor
     .get(IAgentToolRegistryService)
     .list()
-    .map((tool) => ({ ...tool, active: profile.isToolActive(tool.name, tool.source) }));
+    .map((tool) => ({ ...tool, active: toolPolicy.isToolActive(tool.name, tool.source) }));
   const state: ResumedAgentState = {
     type: 'main',
     config: {
@@ -172,8 +181,9 @@ function toReplayMessage(message: TranscriptMessage) {
 export async function buildResumedSessionState(
   session: ISessionScopeHandle,
   mainAgent: IAgentScopeHandle,
+  replayTurnLimit?: number,
 ): Promise<ResumedSessionState> {
-  const agents = await buildResumedAgents(session, mainAgent);
+  const agents = await buildResumedAgents(session, mainAgent, replayTurnLimit);
   const meta = await session.accessor.get(ISessionMetadata).read();
   return { sessionMetadata: projectSessionMetadata(meta), agents };
 }

@@ -61,7 +61,7 @@ function currentTuiConfig(host: SlashCommandHost): TuiConfig {
   };
 }
 
-function effectiveModelForHost(host: SlashCommandHost, model: ModelAlias): ModelAlias {
+export function effectiveModelForHost(host: SlashCommandHost, model: ModelAlias): ModelAlias {
   const providerType = host.state.appState.availableProviders[model.provider]?.type;
   // Flat models (no named provider, e.g. inline base_url served by a v2
   // backend) have no provider entry to look up; their own protocol declaration
@@ -148,7 +148,7 @@ export async function handleYoloCommand(host: SlashCommandHost, args: string): P
     }
     await session.setPermission('yolo');
     host.setAppState({ permissionMode: 'yolo' });
-    host.showNotice('YOLO mode: ON', 'AI auto-approves safe actions, asks for approval on risky ones.');
+    host.showNotice('YOLO mode: ON', 'Tool actions auto-approved; the agent may still ask you questions.');
     return;
   }
 
@@ -171,7 +171,7 @@ export async function handleYoloCommand(host: SlashCommandHost, args: string): P
   } else {
     await session.setPermission('yolo');
     host.setAppState({ permissionMode: 'yolo' });
-    host.showNotice('YOLO mode: ON', 'AI auto-approves safe actions, asks for approval on risky ones.');
+    host.showNotice('YOLO mode: ON', 'Tool actions auto-approved; the agent may still ask you questions.');
   }
 }
 
@@ -192,7 +192,7 @@ export async function handleAutoCommand(host: SlashCommandHost, args: string): P
     }
     await session.setPermission('auto');
     host.setAppState({ permissionMode: 'auto' });
-    host.showNotice('Auto mode: ON', 'Run all actions automatically, including risky ones.');
+    host.showNotice('Auto mode: ON', 'All actions auto-approved; the agent will not ask you questions.');
     return;
   }
 
@@ -215,7 +215,7 @@ export async function handleAutoCommand(host: SlashCommandHost, args: string): P
   } else {
     await session.setPermission('auto');
     host.setAppState({ permissionMode: 'auto' });
-    host.showNotice('Auto mode: ON', 'Run all actions automatically, including risky ones.');
+    host.showNotice('Auto mode: ON', 'All actions auto-approved; the agent will not ask you questions.');
   }
 }
 
@@ -512,7 +512,12 @@ async function performModelSwitch(
   let persisted = false;
   if (persist) {
     try {
-      persisted = await persistModelSelection(host, effectiveAlias, effectiveEffort);
+      persisted = await persistModelSelection(
+        host,
+        effectiveAlias,
+        effectiveEffort,
+        effectiveEffortChanged,
+      );
     } catch (error) {
       const msg = formatErrorMessage(error);
       host.showError(`Switched to ${displayName}, but failed to save default: ${msg}`);
@@ -541,14 +546,22 @@ async function persistModelSelection(
   host: SlashCommandHost,
   alias: string,
   effort: ThinkingEffort,
+  effortChanged: boolean,
 ): Promise<boolean> {
   const config = await host.harness.getConfig({ reload: true });
-  const patch = thinkingEffortToConfig(effort);
+  const model = host.state.appState.availableModels[alias];
+  const full = thinkingEffortToConfig(
+    effort,
+    model === undefined ? undefined : effectiveModelForHost(host, model).supportEfforts,
+  );
+  // Re-confirming the effort shown when the picker opened is not an explicit
+  // choice — persist the model but leave the stored effort preference alone.
+  const patch = effortChanged ? full : { enabled: full.enabled };
   const thinking = thinkingView(config);
   if (
     defaultModelView(config) === alias &&
     thinking?.enabled === patch.enabled &&
-    thinking?.effort === patch.effort
+    (!effortChanged || thinking?.effort === patch.effort)
   ) {
     return false;
   }

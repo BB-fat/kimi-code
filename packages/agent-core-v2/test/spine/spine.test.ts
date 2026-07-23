@@ -28,7 +28,7 @@ import {
   spineRootCompact,
   spineTruncateRepair,
 } from '#/index';
-import type { Message } from '#/app/llmProtocol/message';
+import type { Message } from '#/kosong/contract/message';
 
 import {
   createCommandRunner,

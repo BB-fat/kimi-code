@@ -14,12 +14,15 @@ import type { ExecutableToolOutput } from '#/tool/toolContract';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { ISessionCronService } from '#/session/cron/sessionCronService';
 import { IAgentPromptService } from '#/agent/prompt/prompt';
+import { makeAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { createTestAgent, cronServices, type TestAgentContext } from '../../harness';
 
 // Local-time anchor (cron-expr matches on local fields, so a UTC anchor
 // would shift the result by the host's offset). At noon + 15 min the
 // `*\/5 * * * *` ideal fires are 12:05/12:10/12:15 → coalescedCount=3.
 const LOCAL_ANCHOR_MS = new Date(2024, 5, 1, 12, 0, 0, 0).getTime();
+
+const scopeContext = makeAgentScopeContext({ agentId: 'main', agentScope: '' });
 
 function createClocks(initial = LOCAL_ANCHOR_MS) {
   let wall = initial;
@@ -92,7 +95,7 @@ describe('Cron — session E2E (P1.9)', () => {
     // bypass `emitScheduled` telemetry and skip the byte-length /
     // expression checks; that would not be the production code path
     // this commit is meant to smoke.
-    const createTool = new CronCreateTool(cron);
+    const createTool = new CronCreateTool(cron, scopeContext);
     const execution = createTool.resolveExecution({
       cron: '*/5 * * * *',
       prompt: 'cron-fired prompt',
@@ -145,9 +148,9 @@ describe('Cron — session E2E (P1.9)', () => {
     // Optional second case from the P1.9 plan: prove the three-tool
     // surface composes correctly end-to-end on the real manager. No
     // clock manipulation needed — list/delete are time-invariant.
-    const createTool = new CronCreateTool(cron);
+    const createTool = new CronCreateTool(cron, scopeContext);
     const listTool = new CronListTool(cron);
-    const deleteTool = new CronDeleteTool(cron);
+    const deleteTool = new CronDeleteTool(cron, scopeContext);
     const ctxArgs = {
       turnId: 19,
       toolCallId: 'p19-tools-call',

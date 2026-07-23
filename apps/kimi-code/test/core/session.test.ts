@@ -16,6 +16,7 @@ import {
   IAgentProfileService,
   IAgentPromptService,
   IAgentRPCService,
+  IAgentShellCommandService,
   IAgentSwarmService,
   IAgentSystemReminderService,
   IAgentTaskService,
@@ -131,14 +132,19 @@ function makeFixture(options?: {
           {
             steer: record(`${id}.steer`),
             cancel: record(`${id}.cancel`),
-            runShellCommand: recordReturning(`${id}.runShellCommand`, shellResult),
-            cancelShellCommand: record(`${id}.cancelShellCommand`),
             undoHistory: recordReturning(`${id}.undoHistory`, 2),
             activateSkill: record(`${id}.activateSkill`),
             activatePluginCommand: record(`${id}.activatePluginCommand`),
             setPermission: record(`${id}.setPermission`),
             cancelCompaction: record(`${id}.cancelCompaction`),
             getContext: recordReturning(`${id}.getContext`, { history: [{ role: 'user', content: 'hi' }], tokenCount: 42 }),
+          },
+        ],
+        [
+          IAgentShellCommandService,
+          {
+            run: recordReturning(`${id}.runShellCommand`, shellResult),
+            cancel: record(`${id}.cancelShellCommand`),
           },
         ],
         [
@@ -348,7 +354,7 @@ describe('CoreSession conversation flow and agent routing', () => {
     expect((error as { code: string }).code).toBe(CoreErrorCodes.AGENT_NOT_FOUND);
   });
 
-  it('steer/cancel/shell/undo/skill/plugin-command/permission/compaction-cancel forward to the RPC facade', async () => {
+  it('steer/cancel/undo/skill/plugin-command/permission/compaction-cancel forward to the RPC facade, shell to its own service', async () => {
     const fx = makeFixture();
     await fx.core.steer(parts);
     await fx.core.cancel();
@@ -364,7 +370,8 @@ describe('CoreSession conversation flow and agent routing', () => {
     expect(fx.calls['main.cancel']).toEqual([[{}]]);
     expect(fx.calls['main.runShellCommand']).toEqual([[{ command: 'ls', commandId: 'c1' }]]);
     expect(shell).toEqual(fx.shellResult);
-    expect(fx.calls['main.cancelShellCommand']).toEqual([[{ commandId: 'c1' }]]);
+    // IAgentShellCommandService.cancel takes the bare commandId string.
+    expect(fx.calls['main.cancelShellCommand']).toEqual([['c1']]);
     expect(fx.calls['main.undoHistory']).toEqual([[{ count: 2 }]]);
     expect(undone).toBe(2);
     expect(fx.calls['main.activateSkill']).toEqual([[{ name: 'write-tui', args: 'now' }]]);

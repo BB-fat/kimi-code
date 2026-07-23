@@ -11,7 +11,7 @@ import { CoreErrors } from '#/_base/errors/codes';
 import { AgentLifecycleErrors } from '#/session/agentLifecycle/errors';
 import { AuthErrors } from '#/app/auth/errors';
 import { TaskErrors } from '#/agent/task/errors';
-import { ChatProviderErrors } from '#/app/protocol/errors';
+import { ProtocolErrors } from '#/kosong/protocol/errors';
 import { ConfigErrors } from '#/app/config/errors';
 import { FileErrors } from '#/app/file/fileService';
 import { FsErrors } from '#/session/sessionFs/errors';
@@ -20,7 +20,7 @@ import { GoalErrors } from '#/agent/goal/errors';
 import { LoopErrors } from '#/agent/loop/errors';
 import { McpErrors } from '#/agent/mcp/errors';
 import { MessageLegacyErrors } from '#/app/messageLegacy/errors';
-import { ModelCatalogErrors } from '#/app/modelCatalog/errors';
+import { ModelCatalogErrors } from '#/kosong/model/errors';
 import { OsFsErrors } from '#/os/interface/hostFsErrors';
 import { OsProcessErrors } from '#/os/interface/hostProcess';
 import { PluginErrors } from '#/app/plugin/errors';
@@ -33,7 +33,7 @@ import { StorageErrors } from '#/persistence/interface/storage';
 import { TerminalErrors } from '#/os/interface/terminalErrors';
 import { UsageErrors } from '#/agent/usage/errors';
 import { WireErrors } from '#/wire/errors';
-import { WorkspaceErrors } from '#/app/workspaceRegistry/errors';
+import { WorkspaceErrors } from '#/app/workspace/errors';
 
 export * from '#/_base/errors/codes';
 export * from '#/_base/errors/errorMessage';
@@ -43,7 +43,7 @@ export * from '#/_base/errors/unexpectedError';
 export { AgentLifecycleErrors } from '#/session/agentLifecycle/errors';
 export { AuthErrors } from '#/app/auth/errors';
 export { TaskErrors } from '#/agent/task/errors';
-export { ChatProviderErrors } from '#/app/protocol/errors';
+export { ProtocolErrors } from '#/kosong/protocol/errors';
 export { ConfigErrors } from '#/app/config/errors';
 export { FileErrors } from '#/app/file/fileService';
 export { FsErrors } from '#/session/sessionFs/errors';
@@ -52,7 +52,7 @@ export { GoalErrors } from '#/agent/goal/errors';
 export { LoopErrors } from '#/agent/loop/errors';
 export { McpErrors } from '#/agent/mcp/errors';
 export { MessageLegacyErrors } from '#/app/messageLegacy/errors';
-export { ModelCatalogErrors } from '#/app/modelCatalog/errors';
+export { ModelCatalogErrors } from '#/kosong/model/errors';
 export { OsFsErrors } from '#/os/interface/hostFsErrors';
 export { OsProcessErrors } from '#/os/interface/hostProcess';
 export { PluginErrors } from '#/app/plugin/errors';
@@ -65,14 +65,14 @@ export { StorageErrors } from '#/persistence/interface/storage';
 export { TerminalErrors } from '#/os/interface/terminalErrors';
 export { UsageErrors } from '#/agent/usage/errors';
 export { WireErrors } from '#/wire/errors';
-export { WorkspaceErrors } from '#/app/workspaceRegistry/errors';
+export { WorkspaceErrors } from '#/app/workspace/errors';
 
 export const ErrorCodes = {
   ...CoreErrors.codes,
   ...AgentLifecycleErrors.codes,
   ...AuthErrors.codes,
   ...TaskErrors.codes,
-  ...ChatProviderErrors.codes,
+  ...ProtocolErrors.codes,
   ...ConfigErrors.codes,
   ...FileErrors.codes,
   ...FsErrors.codes,

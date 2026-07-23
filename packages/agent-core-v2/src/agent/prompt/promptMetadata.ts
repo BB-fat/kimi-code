@@ -8,7 +8,7 @@
  * entry surface keeps the same easy-title behavior.
  */
 
-import type { ContentPart } from '#/app/llmProtocol/message';
+import type { ContentPart } from '#/kosong/contract/message';
 import type { IEventService } from '#/app/event/event';
 import type { ISessionMetadata, SessionMeta } from '#/session/sessionMetadata/sessionMetadata';
 

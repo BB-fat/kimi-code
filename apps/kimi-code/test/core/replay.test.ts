@@ -14,6 +14,7 @@ import {
   IAgentScopeContext,
   IAgentSwarmService,
   IAgentTaskService,
+  IAgentToolPolicyService,
   IAgentToolRegistryService,
   IAgentUsageService,
   IAppendLogStore,
@@ -127,10 +128,10 @@ function makeFixture(metaOverrides?: Record<string, unknown>) {
     accessor: makeAccessor([
       [IAgentContextMemoryService, { get: () => history }],
       [IAgentContextSizeService, { get: () => ({ size: 1234, measured: 1000, estimated: 234 }) }],
+      [IAgentProfileService, { data: () => profileData }],
       [
-        IAgentProfileService,
+        IAgentToolPolicyService,
         {
-          data: () => profileData,
           isToolActive: (name: string, source?: unknown) => {
             isToolActiveCalls.push([name, source]);
             return name === 'Bash';
@@ -288,7 +289,7 @@ describe('buildResumedAgents', () => {
     expect(fx.taskListCalls).toEqual([false]);
   });
 
-  it('marks each registry tool active via profile.isToolActive(name, source)', async () => {
+  it('marks each registry tool active via toolPolicy.isToolActive(name, source)', async () => {
     const fx = makeFixture();
     const agents = await buildResumedAgents(fx.session as never, fx.mainAgent as never);
 

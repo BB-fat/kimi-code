@@ -25,6 +25,7 @@ export function makeLifecycleStub(handles: readonly IAgentScopeHandle[] = []): L
     },
     get: (id: string) => byId.get(id),
     list: () => [...byId.values()],
+    broadcastPermissionMode: () => {},
     remove: async () => {},
   };
 

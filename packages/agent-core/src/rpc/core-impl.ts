@@ -12,11 +12,13 @@ import type { PromisableMethods } from '#/utils/types';
 import { getCoreVersion } from '#/version';
 import { resolveThinkingEffort } from '../agent/config/thinking';
 import { Agent } from '../agent';
+import { limitAgentReplayByTurns } from '../agent/replay/turns';
 import {
   applyPrintModeConfigDefaults,
   ensureKimiHome,
   loadRuntimeConfigSafe,
   mergeConfigPatch,
+  migrateThinkingEffortMaxToHigh,
   readConfigFileForUpdate,
   normalizeAdditionalDirs,
   readWorkspaceAdditionalDirs,
@@ -40,6 +42,8 @@ import {
   GlobalMcpConfigStore,
   McpConnectionManager,
   McpOAuthService,
+  resolveMcpStartupTimeoutMs,
+  resolveMcpToolTimeoutMs,
   resolveSessionMcpConfig,
   mergeCallerMcpServers,
   type BeginAuthorizationResult,
@@ -153,6 +157,10 @@ const KIMI_CODE_PROVIDER_NAME = 'managed:kimi-code';
 const KIMI_CODE_BASE_URL_ENV = 'KIMI_CODE_BASE_URL';
 const KIMI_CODE_OAUTH_HOST_ENV = 'KIMI_CODE_OAUTH_HOST';
 const KIMI_OAUTH_HOST_ENV = 'KIMI_OAUTH_HOST';
+const WEB_SEARCH_BASE_URL_ENV = 'KIMI_WEB_SEARCH_BASE_URL';
+const WEB_SEARCH_API_KEY_ENV = 'KIMI_WEB_SEARCH_API_KEY';
+const WEB_FETCH_BASE_URL_ENV = 'KIMI_WEB_FETCH_BASE_URL';
+const WEB_FETCH_API_KEY_ENV = 'KIMI_WEB_FETCH_API_KEY';
 const DEFAULT_GLOBAL_MCP_AUTH_TIMEOUT_MS = 15 * 60 * 1000;
 type AgentScopedPayload<T> = T & { readonly agentId: string };
 type SessionScopedPayload<T> = T & { readonly sessionId: string };
@@ -169,6 +177,15 @@ export interface KimiCoreOptions {
   readonly runtime?: ToolServices | undefined;
   readonly kimiRequestHeaders?: Record<string, string> | undefined;
   readonly resolveOAuthTokenProvider?: OAuthTokenProviderResolver | undefined;
+  /**
+   * Workspace-id resolver handed to the session store: the registered
+   * workspace id for the same physical root as a session's workDir (identity
+   * comparison folds case/slashes for Windows-shaped paths), so bucket
+   * derivation reuses the registered id instead of minting a split bucket.
+   * Wired by the services layer from the workspace registry; when omitted the
+   * store always mints (legacy behavior).
+   */
+  readonly resolveWorkspaceId?: (workDir: string) => Promise<string | undefined>;
   readonly skillDirs?: readonly string[];
   readonly telemetry?: TelemetryClient | undefined;
   readonly appVersion?: string;
@@ -229,6 +246,9 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
     this.appVersion = options.appVersion;
     this.printMode = options.uiMode === 'print';
     ensureKimiHome(this.homeDir);
+    // One-shot config migrations, before the first load (best-effort, never
+    // throws): rewrites a persisted thinking.effort "max" to "high" once.
+    migrateThinkingEffortMaxToHigh(this.configPath, this.homeDir);
     // Schema errors degrade (invalid sections are dropped with warnings) so a
     // typo cannot prevent startup, but a file that cannot be used at all —
     // TOML syntax error, unreadable — fails fast: defaults-only would start
@@ -248,7 +268,9 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
       this.config.experimental,
     );
     this.imageLimits = new ImageLimits(process.env, this.config.image);
-    this.sessionStore = new SessionStore(this.homeDir);
+    this.sessionStore = new SessionStore(this.homeDir, {
+      resolveWorkspaceId: options.resolveWorkspaceId,
+    });
     this.globalMcpConfig = new GlobalMcpConfigStore(this.homeDir);
     this.globalMcpOAuth = new McpOAuthService({ kimiHomeDir: this.homeDir });
     this.plugins = new PluginManager({ kimiHomeDir: this.homeDir });
@@ -468,7 +490,13 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
       }
       await active.setBaseAdditionalDirs(additionalDirs);
       return withAdditionalDirs(
-        await resumeSessionResult(summary, active, undefined, input.includeSubagents),
+        await resumeSessionResult(
+          summary,
+          active,
+          undefined,
+          input.includeSubagents,
+          input.replayTurnLimit,
+        ),
         active,
       );
     }
@@ -529,7 +557,13 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
       // (and any SDK caller's resumeState) reflects the refreshed plugin context.
       await session.appendPluginSessionStartReminder();
     }
-    return resumeSessionResult(summary, session, warning, input.includeSubagents);
+    return resumeSessionResult(
+      summary,
+      session,
+      warning,
+      input.includeSubagents,
+      input.replayTurnLimit,
+    );
   }
 
   async reloadSession(input: ReloadSessionPayload): Promise<ResumeSessionResult> {
@@ -760,6 +794,8 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
     const manager = new McpConnectionManager({
       stdioCwd: cwd,
       oauthService: this.globalMcpOAuth,
+      defaultStartupTimeoutMs: resolveMcpStartupTimeoutMs(this.config.mcp?.startupTimeoutMs),
+      defaultToolTimeoutMs: resolveMcpToolTimeoutMs(this.config.mcp?.toolTimeoutMs),
     });
     try {
       await manager.connectAll({ [server.name]: config });
@@ -1373,8 +1409,16 @@ async function createRuntimeConfig(input: {
   readonly resolveOAuthTokenProvider?: OAuthTokenProviderResolver | undefined;
 }): Promise<ToolServices> {
   const localFetcher = new LocalFetchURLProvider();
-  const searchService = input.config.services?.moonshotSearch;
-  const fetchService = input.config.services?.moonshotFetch;
+  const searchService = withServiceEnv(
+    input.config.services?.moonshotSearch,
+    WEB_SEARCH_BASE_URL_ENV,
+    WEB_SEARCH_API_KEY_ENV,
+  );
+  const fetchService = withServiceEnv(
+    input.config.services?.moonshotFetch,
+    WEB_FETCH_BASE_URL_ENV,
+    WEB_FETCH_API_KEY_ENV,
+  );
 
   return {
     urlFetcher:
@@ -1395,6 +1439,30 @@ async function createRuntimeConfig(input: {
             ...serviceCredentials(searchService, input.resolveOAuthTokenProvider),
           }),
   };
+}
+
+/**
+ * Resolve `KIMI_WEB_SEARCH_*` / `KIMI_WEB_FETCH_*` without mixing credentials
+ * across service origins. An env base URL starts a fresh service entry so a
+ * persisted API key, OAuth token, or custom header cannot reach the env
+ * endpoint. An env API key without an env base URL keeps the configured
+ * endpoint and headers, but replaces both configured credential forms.
+ * Blank env values are treated as unset.
+ */
+function withServiceEnv(
+  service: MoonshotServiceConfig | undefined,
+  baseUrlEnv: string,
+  apiKeyEnv: string,
+): MoonshotServiceConfig | undefined {
+  const envBaseUrl = nonEmptyString(process.env[baseUrlEnv]);
+  const envApiKey = nonEmptyString(process.env[apiKeyEnv]);
+  if (envBaseUrl !== undefined) {
+    return { baseUrl: envBaseUrl, apiKey: envApiKey };
+  }
+  if (envApiKey === undefined) return service;
+  if (service === undefined) return { apiKey: envApiKey };
+  const { apiKey: _apiKey, oauth: _oauth, ...rest } = service;
+  return { ...rest, apiKey: envApiKey };
 }
 
 function serviceCredentials(
@@ -1467,6 +1535,7 @@ async function resumeSessionResult(
   session: Session,
   warning?: string,
   includeSubagents = false,
+  replayTurnLimit?: number,
 ): Promise<ResumeSessionResult> {
   if (includeSubagents) {
     const persistedAgentIds = Object.keys(session.metadata.agents).filter(
@@ -1498,7 +1567,7 @@ async function resumeSessionResult(
       type: agent.type,
       config,
       context,
-      replay: agent.replayBuilder.buildResult(),
+      replay: limitAgentReplayByTurns(agent.replayBuilder.buildResult(), replayTurnLimit),
       permission,
       plan,
       swarmMode,

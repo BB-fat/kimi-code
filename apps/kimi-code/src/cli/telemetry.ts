@@ -82,7 +82,7 @@ export interface InitializeServerTelemetryOptions {
 }
 
 /**
- * Bootstrap telemetry for the `kimi web` / `kimi server run` host.
+ * Bootstrap telemetry for the `kimi web` host.
  *
  * Mirrors {@link initializeCliTelemetry}: mints the device id, reads config to
  * honor the `telemetry` toggle and pick up the default model, attaches the
