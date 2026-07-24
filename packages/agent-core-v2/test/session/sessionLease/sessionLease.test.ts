@@ -1,8 +1,9 @@
 /**
  * `sessionLease` domain — unit tests for the per-session write lease.
  *
- * Runs against the real node-local kernel-lock service rooted at a mkdtemp
- * home, asserting loss notification, write admission/draining, and release.
+ * Runs against the real node-local lock service (the `LOCK_IMPL`-selected
+ * implementation) rooted at a mkdtemp home, asserting loss notification,
+ * write admission/draining, and release.
  */
 
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -12,15 +13,17 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Error2, ErrorCodes } from '#/errors';
-import { CrossProcessLockService } from '#/os/backends/node-local/crossProcessLockService';
+import type { ICrossProcessLockService } from '#/os/interface/crossProcessLock';
 import { SessionLease, sessionLeasePath } from '#/session/sessionLease/sessionLease';
 
+import { realCrossProcessLock } from '../../os/stubs';
+
 let tmpDir: string;
-let locks: CrossProcessLockService;
+let locks: ICrossProcessLockService;
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'kimi-session-lease-'));
-  locks = new CrossProcessLockService();
+  locks = realCrossProcessLock();
 });
 
 afterEach(() => {

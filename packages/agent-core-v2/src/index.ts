@@ -41,6 +41,7 @@ export * from '#/os/interface/hostProcess';
 export * from '#/os/interface/terminal';
 export * from '#/os/interface/terminalErrors';
 export * from '#/os/backends/node-local/crossProcessLockService';
+export * from '#/os/backends/node-local/pureJsLockService';
 // Host integration point for the kernel file lock: the host app (kimi-code)
 // installs a native binding loader through this hook because its SEA
 // packaging knows where the prebuilt `.node` lives; libraries fall back to

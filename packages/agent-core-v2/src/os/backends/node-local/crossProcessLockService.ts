@@ -4,7 +4,11 @@
  * Uses `kernel-file-lock` to hold an operating-system advisory lock on a
  * permanent sentinel file. Owner metadata is stored in a sibling JSON document
  * for diagnostics and routing only; it is not part of the exclusion protocol.
- * Bound at App scope.
+ * Bound at App scope. The App-scope binding below is the A/B experiment
+ * (branch `lock-control-purejs`) switch: `KIMI_LOCK_IMPL=purejs` binds
+ * `PureJsLockService` (the ported historical pure-JS protocol) instead of
+ * this class, any other value binds this class; remove the switch together
+ * with `pureJsLockService.ts` when the experiment ends.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -18,6 +22,7 @@ import { ulid } from 'ulid';
 
 import { InstantiationType } from '#/_base/di/extensions';
 import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
+import { PureJsLockService } from '#/os/backends/node-local/pureJsLockService';
 import {
   CrossProcessLockError,
   CrossProcessLockErrorCode,
@@ -294,10 +299,13 @@ export class CrossProcessLockService implements ICrossProcessLockService {
   }
 }
 
+const crossProcessLockCtor =
+  process.env['KIMI_LOCK_IMPL'] === 'purejs' ? PureJsLockService : CrossProcessLockService;
+
 registerScopedService(
   LifecycleScope.App,
   ICrossProcessLockService,
-  CrossProcessLockService,
+  crossProcessLockCtor,
   InstantiationType.Eager,
   'crossProcessLock',
 );

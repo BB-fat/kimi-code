@@ -14,7 +14,6 @@ import { createScopedTestHost, stubPair } from '#/_base/di/test';
 import { encodeWorkDirKey, workspaceRootKey } from '#/_base/utils/workdir-slug';
 import { ErrorCodes, Error2 } from '#/errors';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
-import { CrossProcessLockService } from '#/os/backends/node-local/crossProcessLockService';
 import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
 import { ICrossProcessLockService } from '#/os/interface/crossProcessLock';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
@@ -27,6 +26,7 @@ import { WorkspaceService } from '#/app/workspace/workspaceService';
 import { FileWorkspacePersistence } from '#/app/workspace/fileWorkspacePersistence';
 import { IWorkspacePersistence, type PersistedWorkspaceEntry } from '#/app/workspace/workspacePersistence';
 import { stubBootstrap } from '../bootstrap/stubs';
+import { realCrossProcessLock } from '../../os/stubs';
 
 interface SessionIndexLine {
   readonly sessionId: string;
@@ -63,7 +63,7 @@ describe('WorkspaceService (file-backed)', () => {
   });
 
   function build(hostFs: IHostFileSystem = new HostFileSystem()): IWorkspaceService {
-    const locks = new CrossProcessLockService();
+    const locks = realCrossProcessLock();
     const fileStorage = new FileStorageService(homeDir, undefined, undefined, locks);
     const host = createScopedTestHost([
       stubPair(IFileSystemStorageService, fileStorage),

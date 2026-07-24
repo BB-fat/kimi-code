@@ -22,7 +22,6 @@ import { ILogService } from '#/_base/log/log';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigRegistry, IConfigService } from '#/app/config/config';
 import { ConfigRegistry, ConfigService } from '#/app/config/configService';
-import { CrossProcessLockService } from '#/os/backends/node-local/crossProcessLockService';
 import {
   CrossProcessLockErrorCode,
   type ICrossProcessLockService,
@@ -37,6 +36,7 @@ import {
 } from '#/persistence/interface/storage';
 
 import { stubLog } from '../../_base/log/stubs';
+import { LOCK_IMPL, realCrossProcessLock } from '../../os/stubs';
 import { stubBootstrap } from '../bootstrap/stubs';
 
 const realSleep = (ms: number): Promise<void> =>
@@ -66,7 +66,7 @@ describe('ConfigService config.toml lock-in-RMW', () => {
   });
 
   function createContainer(
-    lock: ICrossProcessLockService = new CrossProcessLockService(),
+    lock: ICrossProcessLockService = realCrossProcessLock(),
     configPath = join(homeDir, 'config.toml'),
   ): IConfigService {
     const ix = disposables.add(new TestInstantiationService());
@@ -113,18 +113,20 @@ describe('ConfigService config.toml lock-in-RMW', () => {
 
   it('writes and locks a custom config path at its actual location', async () => {
     const configPath = join(homeDir, 'nested', 'custom.toml');
-    const config = createContainer(new CrossProcessLockService(), configPath);
+    const config = createContainer(realCrossProcessLock(), configPath);
     await config.set('alphaSection', { one: 1 });
 
     expect(readFileSync(configPath, 'utf8')).toContain('[alpha_section]');
     expect(existsSync(join(homeDir, 'custom.toml'))).toBe(false);
-    expect(existsSync(`${configPath}.lock`)).toBe(true);
+    // Kernel: the sentinel stays permanently. Pure-JS: the lock file only
+    // exists while held and was deleted when set() released it.
+    expect(existsSync(`${configPath}.lock`)).toBe(LOCK_IMPL === 'kernel');
   });
 
   it('fails set() with storage.locked while another holder is stuck, leaving config.toml intact', async () => {
     let nowValue = 1_000_000;
     let lockSeq = 0;
-    const victim = new CrossProcessLockService({
+    const victim = realCrossProcessLock({
       selfPid: 1001,
       instanceId: 'victim',
       now: () => nowValue,
@@ -138,7 +140,7 @@ describe('ConfigService config.toml lock-in-RMW', () => {
     await config.set('seedSection', { ok: true });
     const before = readFileSync(join(homeDir, 'config.toml'), 'utf8');
 
-    const attacker = new CrossProcessLockService({
+    const attacker = realCrossProcessLock({
       selfPid: 2002,
       instanceId: 'attacker',
       newLockId: () => 'attacker-lock',
@@ -154,6 +156,7 @@ describe('ConfigService config.toml lock-in-RMW', () => {
     } finally {
       handle.release();
     }
-    expect(existsSync(lockPath)).toBe(true);
+    // Kernel: the sentinel is permanent. Pure-JS: release deletes the lock file.
+    expect(existsSync(lockPath)).toBe(LOCK_IMPL === 'kernel');
   });
 });

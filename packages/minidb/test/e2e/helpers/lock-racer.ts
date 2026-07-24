@@ -5,7 +5,12 @@
 // then races to acquire the lock and prints "R<round> <pid> <0|1>".
 
 import fs from 'node:fs';
-import { LockFile } from '../../../src/lockfile.js';
+import { tryAcquireKernelFileLock } from '@moonshot-ai/kernel-file-lock';
+import { LockFile, setDefaultTryAcquireFileLock } from '../../../src/lockfile.js';
+
+// Spawned outside vitest: install the shared lock default in this process
+// (see test/setup-lock.ts).
+setDefaultTryAcquireFileLock(tryAcquireKernelFileLock);
 
 const lockPath = process.argv[2]!;
 const gateDir = process.argv[3]!;

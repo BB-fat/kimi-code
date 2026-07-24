@@ -68,8 +68,7 @@ import {
   CrossProcessLockErrorCode,
   ICrossProcessLockService,
 } from '#/os/interface/crossProcessLock';
-import { CrossProcessLockService } from '#/os/backends/node-local/crossProcessLockService';
-import { stubCrossProcessLock } from '../../os/stubs';
+import { stubCrossProcessLock, LOCK_IMPL, realCrossProcessLock } from '../../os/stubs';
 import { stubFlag } from '../flag/stubs';
 import { stubLog } from '../../_base/log/stubs';
 import { recordingTelemetry, type TelemetryRecord } from '../../app/telemetry/stubs';
@@ -1375,7 +1374,7 @@ describe('SessionLifecycleService', () => {
     ): ReturnType<typeof stubPair>[] {
       return [
         stubPair(IBootstrapService, tmpBootstrapStub(root)),
-        stubPair(ICrossProcessLockService, new CrossProcessLockService()),
+        stubPair(ICrossProcessLockService, realCrossProcessLock()),
         stubPair(IStorageWriteAdmission, new StorageWriteAdmissionService()),
         ...over,
       ];
@@ -1389,7 +1388,7 @@ describe('SessionLifecycleService', () => {
       docs: JsonAtomicDocumentStore;
     } {
       const registry = new StorageWriteAdmissionService();
-      const locks = new CrossProcessLockService();
+      const locks = realCrossProcessLock();
       const storage = new FileStorageService(root, undefined, undefined, locks, registry);
       const appendLog = new AppendLogStore(storage);
       const docs = new JsonAtomicDocumentStore(storage);
@@ -1449,12 +1448,18 @@ describe('SessionLifecycleService', () => {
     }
 
     async function expectLeaseFree(root: string, sessionId: string): Promise<void> {
-      const successor = await new CrossProcessLockService().acquire(leaseFile(root, sessionId));
+      const successor = await realCrossProcessLock().acquire(leaseFile(root, sessionId));
       successor.release();
     }
 
     async function expectLeaseReleased(root: string, sessionId: string): Promise<void> {
-      await expect(stat(leaseFile(root, sessionId))).resolves.toBeDefined();
+      // Kernel: the sentinel is permanent. Pure-JS: release deletes the lock
+      // file. Both drop the owner metadata.
+      if (LOCK_IMPL === 'kernel') {
+        await expect(stat(leaseFile(root, sessionId))).resolves.toBeDefined();
+      } else {
+        await expect(stat(leaseFile(root, sessionId))).rejects.toThrow();
+      }
       await expect(stat(leaseOwnerFile(root, sessionId))).rejects.toThrow();
     }
 
@@ -1506,22 +1511,48 @@ describe('SessionLifecycleService', () => {
       }
     });
 
-    it('reports the creating phase while the kernel holder publishes owner metadata', async () => {
-      const root = await makeTmpRoot();
-      const handle = tryAcquireKernelFileLock(leaseFile(root, 's1'))!;
-      try {
-        const svc = build(realInstanceSeeds(root));
-        const error = await createError(svc, 's1');
-        expect(error.code).toBe(ErrorCodes.SESSION_HELD_BY_PEER);
-        expect(error.details).toEqual({
-          kind: 'held-by-peer',
-          phase: 'creating',
-          retry_after_ms: 1000,
-        });
-      } finally {
-        handle.release();
-      }
-    });
+    it.skipIf(LOCK_IMPL !== 'kernel')(
+      'reports the creating phase while the kernel holder publishes owner metadata',
+      async () => {
+        const root = await makeTmpRoot();
+        const handle = tryAcquireKernelFileLock(leaseFile(root, 's1'))!;
+        try {
+          const svc = build(realInstanceSeeds(root));
+          const error = await createError(svc, 's1');
+          expect(error.code).toBe(ErrorCodes.SESSION_HELD_BY_PEER);
+          expect(error.details).toEqual({
+            kind: 'held-by-peer',
+            phase: 'creating',
+            retry_after_ms: 1000,
+          });
+        } finally {
+          handle.release();
+        }
+      },
+    );
+
+    it.skipIf(LOCK_IMPL !== 'purejs')(
+      'reports the creating phase while the pure-JS holder publishes owner metadata',
+      async () => {
+        const root = await makeTmpRoot();
+        // A live-pid lock file with no owner metadata yet: the pure-JS
+        // equivalent of the kernel probe window above.
+        await mkdir(join(root, 'session-leases'), { recursive: true });
+        await writeFile(leaseFile(root, 's1'), JSON.stringify({ pid: process.pid }));
+        try {
+          const svc = build(realInstanceSeeds(root));
+          const error = await createError(svc, 's1');
+          expect(error.code).toBe(ErrorCodes.SESSION_HELD_BY_PEER);
+          expect(error.details).toEqual({
+            kind: 'held-by-peer',
+            phase: 'creating',
+            retry_after_ms: 1000,
+          });
+        } finally {
+          await rm(leaseFile(root, 's1'), { force: true });
+        }
+      },
+    );
 
     it('close returns with the just-appended journal tail durable and the lease released', async () => {
       const root = await makeTmpRoot();
@@ -1567,7 +1598,7 @@ describe('SessionLifecycleService', () => {
 
       try {
         await expect(
-          new CrossProcessLockService().acquire(leaseFile(root, 's1')),
+          realCrossProcessLock().acquire(leaseFile(root, 's1')),
         ).rejects.toMatchObject({ code: CrossProcessLockErrorCode.Held });
       } finally {
         releaseHook();

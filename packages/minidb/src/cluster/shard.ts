@@ -1,7 +1,7 @@
 // src/cluster/shard.ts
 //
 // A single shard: one MiniDb instance in either writer mode (holding the
-// shard's kernel-backed db.lock) or
+// shard's db.lock through the injected lock primitive) or
 // reader mode (read-only, no lock, coexisting with another process's writer).
 
 import { MiniDb } from '../index.js';

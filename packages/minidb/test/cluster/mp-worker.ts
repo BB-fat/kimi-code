@@ -4,9 +4,14 @@
 // file itself; spawned via `node --import tsx mp-worker.ts <mode> ...`.
 // Always prints a final JSON report line and exits non-zero on failure.
 
+import { tryAcquireKernelFileLock } from '@moonshot-ai/kernel-file-lock';
 import { ClusterDb } from '../../src/cluster/index.js';
 import { shardFor } from '../../src/cluster/utils.js';
-import { LockError } from '../../src/lockfile.js';
+import { LockError, setDefaultTryAcquireFileLock } from '../../src/lockfile.js';
+
+// Spawned outside vitest: install the shared lock default in this process
+// (see test/setup-lock.ts).
+setDefaultTryAcquireFileLock(tryAcquireKernelFileLock);
 
 const [, , mode, ...rest] = process.argv;
 

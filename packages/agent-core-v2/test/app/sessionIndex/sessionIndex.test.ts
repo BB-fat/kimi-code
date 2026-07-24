@@ -17,6 +17,7 @@ import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IFlagService } from '#/app/flag/flag';
 import { ISessionIndex, type SessionSummary } from '#/app/sessionIndex/sessionIndex';
 import { FileSessionIndex } from '#/app/sessionIndex/sessionIndexService';
+import { ICrossProcessLockService } from '#/os/interface/crossProcessLock';
 import { MiniDbQueryStore } from '#/persistence/backends/minidb/miniDbQueryStore';
 import { JsonAtomicDocumentStore } from '#/persistence/backends/node-fs/atomicDocumentStore';
 import { FileStorageService } from '#/persistence/backends/node-fs/fileStorageService';
@@ -27,6 +28,7 @@ import { IFileSystemStorageService, StorageError, StorageErrors } from '#/persis
 import { stubBootstrap } from '../bootstrap/stubs';
 import { stubFlag } from '../flag/stubs';
 import { stubLog } from '../../_base/log/stubs';
+import { realCrossProcessLock } from '../../os/stubs';
 import { stubQueryStore } from '../../persistence/interface/stubs';
 
 const WORK_DIR = '/home/user/repo';
@@ -277,6 +279,10 @@ describe('FileSessionIndex (read model)', () => {
       stubPair(IBootstrapService, stubBootstrap(homeDir)),
       stubPair(ILogService, stubLog()),
       stubPair(IFlagService, stubFlag(true)),
+      // The real MiniDbQueryStore below injects this service's tryAcquire
+      // adapter into its cluster — the lock primitive under test guards the
+      // read model's shard writers.
+      stubPair(ICrossProcessLockService, realCrossProcessLock()),
     ]);
     disposeHost = () => {
       host.dispose();

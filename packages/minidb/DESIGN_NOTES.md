@@ -285,7 +285,7 @@ src/
   query.ts            value path / Mongo-like filter / projection / sort
   text-index.ts       full-text index (CJK n-gram + TF-IDF): in-RAM dictionary + delta + tombstones
   text-postings.ts    on-disk postings file (delta+varint + CRC) for the text index
-  lockfile.ts         exclusive file lock + stale-lock recovery + read-only
+  lockfile.ts         writer-exclusion hook (host-injected lock primitive) + read-only
   server.ts           optional RESP TCP server (redis-cli compatible)
 ```
 

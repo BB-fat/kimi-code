@@ -21,6 +21,7 @@ import { TextIndex } from './text-index.js';
 import { CompoundIndexManager } from './compound-index.js';
 import { getPath, match, project } from './query.js';
 import { LockFile, LockError } from './lockfile.js';
+import type { TryAcquireFileLock } from './lockfile.js';
 import { encodeFrame, encodeBatchOps, scanBatchOpRefs, HEADER_SIZE, TYPE_SET, TYPE_DEL, TYPE_BATCH } from './codec.js';
 import type { BatchOp as EncodedBatchOp, FrameRef } from './codec.js';
 import type { FsyncPolicy } from './wal.js';
@@ -32,6 +33,8 @@ import type { RangeOptions } from './skiplist.js';
 
 export { UniqueViolationError } from './index-manager.js';
 export { LockError } from './lockfile.js';
+export type { FileLockHandle, TryAcquireFileLock } from './lockfile.js';
+export { setDefaultTryAcquireFileLock } from './lockfile.js';
 export type { RecoveryInfo } from './recovery.js';
 export type { IndexDef, IndexInfo, IndexType } from './index-manager.js';
 export type { CompoundIndexDef, CompoundIndexInfo } from './compound-index.js';
@@ -146,6 +149,12 @@ export interface OpenOptions {
   recovery?: RecoveryMode;
   readOnly?: boolean;
   onLockFail?: 'readonly';
+  /** Exclusive write-lock primitive for `db.lock`, injected by the host (see
+   *  lockfile.ts). A function installs it for this open; undefined falls back
+   *  to the process-wide default; null explicitly disables locking. With no
+   *  acquirer at all the database assumes a single writer and nothing is
+   *  protected — a documented assumption, not a degraded mode. */
+  tryAcquireLock?: TryAcquireFileLock | null;
   /** Where to keep value bulk. 'memory' keeps values in RAM; 'disk' keeps only
    *  value pointers in RAM and reads values from the snapshot/WAL on demand. */
   valueMode?: ValueModeSetting;
@@ -286,7 +295,7 @@ export class MiniDb<V = unknown> {
 
     db.readOnly = !!opts.readOnly;
     if (!db.readOnly) {
-      db.lock = new LockFile(path.join(db.dir, 'db.lock'));
+      db.lock = new LockFile(path.join(db.dir, 'db.lock'), opts.tryAcquireLock);
       const got = await db.lock.acquire();
       if (!got) {
         if (opts.onLockFail === 'readonly') {

@@ -10,10 +10,33 @@ import { createScopedTestHost, stubPair } from '#/_base/di/test';
 import { ILogService } from '#/_base/log/log';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { ClusterDb } from '@moonshot-ai/minidb/cluster';
+import type { TryAcquireFileLock } from '@moonshot-ai/minidb';
+import {
+  CrossProcessLockError,
+  CrossProcessLockErrorCode,
+  ICrossProcessLockService,
+} from '#/os/interface/crossProcessLock';
 import { MiniDbQueryStore } from '#/persistence/backends/minidb/miniDbQueryStore';
 import { IQueryStore } from '#/persistence/interface/queryStore';
 import { stubBootstrap } from '../../../app/bootstrap/stubs';
 import { stubLog } from '../../../_base/log/stubs';
+import { realCrossProcessLock } from '../../../os/stubs';
+
+/** The same `ICrossProcessLockService` → minidb `tryAcquire` adaptation the
+ *  production store performs, applied to the peer cluster in the coexistence
+ *  test so write-lock contention between the two instances is genuine. */
+function tryAcquireVia(locks: ICrossProcessLockService): TryAcquireFileLock {
+  return async (lockPath) => {
+    try {
+      return await locks.acquire(lockPath);
+    } catch (error) {
+      if (error instanceof CrossProcessLockError && error.code === CrossProcessLockErrorCode.Held) {
+        return undefined;
+      }
+      throw error;
+    }
+  };
+}
 
 const COLLECTION = 'session';
 const SEP = String.fromCodePoint(0);
@@ -44,6 +67,7 @@ describe('MiniDbQueryStore', () => {
     const host = createScopedTestHost([
       stubPair(IBootstrapService, stubBootstrap(homeDir)),
       stubPair(ILogService, stubLog()),
+      stubPair(ICrossProcessLockService, realCrossProcessLock()),
     ]);
     disposeHost = () => { host.dispose(); };
     return host.app.accessor.get(IQueryStore);
@@ -137,7 +161,12 @@ describe('MiniDbQueryStore', () => {
     const storeDir = join(homeDir, 'cache', 'query-store');
     // A peer instance stands in for another kimi process: it has its own
     // lock pool, so write locks are genuinely contended between the two.
-    const peer = await ClusterDb.open({ dir: storeDir, shardCount: 16, valueCodec: 'json' });
+    const peer = await ClusterDb.open({
+      dir: storeDir,
+      shardCount: 16,
+      valueCodec: 'json',
+      tryAcquireLock: tryAcquireVia(realCrossProcessLock()),
+    });
     try {
       const store = build();
       // Writes from the peer are visible here, and vice versa — the

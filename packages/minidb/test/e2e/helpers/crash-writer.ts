@@ -5,7 +5,13 @@
 //
 //   node crash-writer.js <dir> [compactEvery]
 
+import { tryAcquireKernelFileLock } from '@moonshot-ai/kernel-file-lock';
 import { MiniDb } from '../../../src/index.js';
+import { setDefaultTryAcquireFileLock } from '../../../src/lockfile.js';
+
+// Spawned outside vitest: install the shared lock default in this process
+// (see test/setup-lock.ts).
+setDefaultTryAcquireFileLock(tryAcquireKernelFileLock);
 
 const dir = process.argv[2];
 const compactEvery = Number(process.argv[3] || 0);

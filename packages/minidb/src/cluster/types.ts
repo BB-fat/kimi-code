@@ -6,6 +6,7 @@
 import type { ValueCodecName } from '../index.js';
 import type { IndexDef } from '../index-manager.js';
 import type { CompoundIndexDef } from '../compound-index.js';
+import type { TryAcquireFileLock } from '../lockfile.js';
 import type { FsyncPolicy } from '../wal.js';
 
 /** Cross-shard write semantics.
@@ -51,6 +52,11 @@ export interface ClusterOpenOptions {
   /** Maximum time to wait for a contended shard write lock before throwing
    *  LockError (default 30000). */
   lockAcquireTimeoutMs?: number;
+  /** Exclusive write-lock primitive for each shard's `db.lock`, injected by
+   *  the host and passed through to shard writers (see OpenOptions in
+   *  index.ts). With no acquirer the cluster assumes a single writer per
+   *  shard and nothing is protected. */
+  tryAcquireLock?: TryAcquireFileLock | null;
   /** Cross-shard write semantics (default 'best-effort'). */
   crossShard?: CrossShardMode;
 }

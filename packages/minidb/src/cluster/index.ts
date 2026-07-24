@@ -8,8 +8,8 @@
 //  - Each shard keeps minidb's single-writer model (its own db.lock), so
 //    concurrency scales with the number of distinct shards being written.
 //  - Writes route through a per-process writer pool (lock-pool.ts): cached
-//    shard writers hold their kernel lock; acquisition retries contenders up
-//    to lockAcquireTimeoutMs.
+//    shard writers hold their write lock (via the injected primitive);
+//    acquisition retries contenders up to lockAcquireTimeoutMs.
 //  - Reads never take write locks: they use the cached writer when this
 //    process holds the shard, else a read-only MiniDb revalidated against
 //    the shard files' fingerprint on every use.
@@ -100,6 +100,7 @@ export class ClusterDb<V = unknown> {
         recovery: opts.recovery,
         maxMemoryBytes: opts.maxMemoryBytes,
         maxMemoryPolicy: opts.maxMemoryPolicy,
+        tryAcquireLock: opts.tryAcquireLock,
       },
       readerOpts: {
         valueCodec: topology.meta.valueCodec,

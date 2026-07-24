@@ -950,7 +950,7 @@ importers:
         version: link:../kaos
 
   packages/minidb:
-    dependencies:
+    devDependencies:
       '@moonshot-ai/kernel-file-lock':
         specifier: workspace:^
         version: link:../kernel-file-lock

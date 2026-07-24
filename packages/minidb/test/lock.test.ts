@@ -7,6 +7,7 @@ import { test } from 'vitest';
 
 import { MiniDb } from '../src/index.js';
 import { LockError, LockFile } from '../src/lockfile.js';
+import type { FileLockHandle } from '../src/lockfile.js';
 
 async function tmpDir(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), 'minidb-lock-'));
@@ -90,5 +91,38 @@ test('releaseSync is idempotent', async () => {
   assert.equal(await lock.acquire(), true);
   lock.releaseSync();
   assert.doesNotThrow(() => lock.releaseSync());
+  await cleanup(dir);
+});
+
+test('an injected acquirer returning undefined rejects the second writer', async () => {
+  const dir = await tmpDir();
+  // A fake primitive that holds every path forever: the second open must be
+  // rejected without minidb knowing anything about the real lock mechanism.
+  const heldHandle: FileLockHandle = { checkHeld: () => true, release: () => {} };
+  let taken = false;
+  const tryAcquire = (): FileLockHandle | undefined => {
+    if (taken) return undefined;
+    taken = true;
+    return heldHandle;
+  };
+  const db1 = await MiniDb.open({ dir, valueCodec: 'string', tryAcquireLock: tryAcquire });
+  try {
+    await assert.rejects(() => MiniDb.open({ dir, valueCodec: 'string', tryAcquireLock: tryAcquire }), LockError);
+  } finally {
+    await db1.close();
+    await cleanup(dir);
+  }
+});
+
+test("an explicit null acquirer opts out: single-writer assumption, nothing protected", async () => {
+  const dir = await tmpDir();
+  // Documented behavior, NOT protection: with locking explicitly disabled,
+  // two writers open the same directory concurrently.
+  const db1 = await MiniDb.open({ dir, valueCodec: 'string', tryAcquireLock: null });
+  const db2 = await MiniDb.open({ dir, valueCodec: 'string', tryAcquireLock: null });
+  assert.equal(db1.readOnly, false);
+  assert.equal(db2.readOnly, false);
+  await db1.close();
+  await db2.close();
   await cleanup(dir);
 });
