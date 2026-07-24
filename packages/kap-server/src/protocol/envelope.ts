@@ -52,7 +52,7 @@ export function errEnvelope(
 }
 
 /**
- * Build the `40921 session.held_by_peer` ownership-redirect envelope. The
+ * Build the `40922 session.held_by_peer` ownership-redirect envelope. The
  * structured `details` payload (`held-by-peer` phase / redirect address) is
  * the actionable part, so it rides the envelope while the stack stays
  * server-side. Accepts the `Error2` shape structurally so this module stays

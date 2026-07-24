@@ -47,7 +47,7 @@ export interface DaemonEventSocketHandlers {
   onConnectionState(connected: boolean): void;
   /** Called on error frames or JSON parse failures. `details` carries the
    *  structured payload of connection-level error frames when the server
-   *  sends one (e.g. SessionOwnershipDetails under 40921). */
+   *  sends one (e.g. SessionOwnershipDetails under 40922). */
   onError(code: number, msg: string, fatal: boolean, details?: unknown): void;
   /** Volatile hint (no payload): the shared session list changed on some
    *  instance (multi-instance home). The listener re-pulls the list. */

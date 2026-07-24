@@ -1,5 +1,5 @@
 // apps/kimi-web/src/lib/sessionOwnershipDecision.ts
-// Pure decision logic for session-ownership (40921) outcomes: given the
+// Pure decision logic for session-ownership (40922) outcomes: given the
 // ownership details and the page context, decide whether to redirect to the
 // owning instance, retry shortly, or just notify. No window / Vue / i18n
 // dependencies — every branch is unit-testable. The composable layer owns the

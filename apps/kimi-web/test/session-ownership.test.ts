@@ -1,5 +1,5 @@
 // apps/kimi-web/test/session-ownership.test.ts
-// Session-ownership (40921) client handling: wire-details narrowing and the
+// Session-ownership (40922) client handling: wire-details narrowing and the
 // pure redirect / retry / notify decision. See
 // src/api/daemon/sessionOwnership.ts and src/lib/sessionOwnershipDecision.ts.
 
@@ -58,7 +58,7 @@ describe('getSessionOwnershipDetails', () => {
     return new DaemonApiError({ code, msg: 'held', requestId: 'req_1', details });
   }
 
-  it('extracts details from a 40921 DaemonApiError', () => {
+  it('extracts details from a 40922 DaemonApiError', () => {
     expect(
       getSessionOwnershipDetails(
         apiError(SESSION_HELD_BY_PEER_CODE, {

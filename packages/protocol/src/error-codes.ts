@@ -57,6 +57,8 @@ export const ErrorCode = {
   TERMINAL_NOT_FOUND: 40414,
   /** skill_name 不存在 */
   SKILL_NOT_FOUND: 40415,
+  /** tool_call_id 不存在，或该调用没有对应的 plan（非 ExitPlanMode） */
+  TOOL_CALL_NOT_FOUND: 40416,
 
   /** session 有正在进行的 prompt，拒绝新请求 */
   SESSION_BUSY: 40901,
@@ -100,7 +102,7 @@ export const ErrorCode = {
   /** goal 只允许主 agent 使用 */
   GOAL_UNSUPPORTED_AGENT: 40920,
   /** session 的 lease 被其他实例持有；`details` 为 SessionOwnershipDetails */
-  SESSION_HELD_BY_PEER: 40921,
+  SESSION_HELD_BY_PEER: 40922,
 
   /** approval 60s 超时 */
   APPROVAL_EXPIRED: 41001,
@@ -174,6 +176,7 @@ export const ErrorCodeReason: Readonly<Record<ErrorCode, string>> = {
   [ErrorCode.MODEL_NOT_FOUND]: 'model.not_found',
   [ErrorCode.TERMINAL_NOT_FOUND]: 'terminal.not_found',
   [ErrorCode.SKILL_NOT_FOUND]: 'skill.not_found',
+  [ErrorCode.TOOL_CALL_NOT_FOUND]: 'tool_call.not_found',
 
   [ErrorCode.SESSION_BUSY]: 'session.busy',
   [ErrorCode.APPROVAL_ALREADY_RESOLVED]: 'approval.already_resolved',

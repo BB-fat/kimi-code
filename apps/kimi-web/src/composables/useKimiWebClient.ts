@@ -1090,7 +1090,7 @@ function connectEventsIfNeeded(): void {
         errorCode: code,
         fatal,
       });
-      // A connection-level 40921 frame (multi-instance surfaces) carries the
+      // A connection-level 40922 frame (multi-instance surfaces) carries the
       // same ownership details as the REST envelope — same decision path.
       if (code === SESSION_HELD_BY_PEER_CODE) {
         const ownership = narrowSessionOwnershipDetails(details);
@@ -1345,7 +1345,7 @@ function pushOperationFailure(
     phase: network ? err.phase : undefined,
     httpStatus: network ? err.status : undefined,
   });
-  // Session-ownership contention (40921) is an expected multi-instance outcome
+  // Session-ownership contention (40922) is an expected multi-instance outcome
   // with its own UX — redirect / auto-retry / targeted message — so it never
   // reaches the generic failure toast.
   if (handleSessionOwnershipError(err, { operation })) return;
@@ -1370,7 +1370,7 @@ function goalErrorMessage(err: unknown): string | undefined {
 }
 
 // ---------------------------------------------------------------------------
-// Session ownership (multi-instance, envelope code 40921)
+// Session ownership (multi-instance, envelope code 40922)
 // ---------------------------------------------------------------------------
 //
 // Several kap-server instances can share one home. Opening (or writing to) a
@@ -1478,7 +1478,7 @@ function handleSessionOwnership(details: SessionOwnershipDetails, ctx: { operati
   }
 }
 
-/** Intercept an operation failure: when it carries ownership details (40921)
+/** Intercept an operation failure: when it carries ownership details (40922)
  *  run the ownership UX and report the error as handled — the caller must NOT
  *  additionally surface its generic failure toast. */
 function handleSessionOwnershipError(err: unknown, ctx: { operation: string }): boolean {

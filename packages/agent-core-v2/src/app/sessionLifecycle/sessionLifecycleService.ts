@@ -31,7 +31,8 @@
  * instead of poisoning the session cache (the skill catalog, by contrast, is
  * kicked fire-and-forget). The session-level eager services whose
  * subscriptions must exist before the first agent / turn (external hooks,
- * cron) are force-instantiated at the same point.
+ * cron, the secondary-model startup warning) are force-instantiated at the
+ * same point.
  *
  * Every materialization (create/resume/fork-target) first takes the session's
  * cross-process write lease under `session-leases/` and registers that lease
@@ -104,6 +105,7 @@ import {
   sessionLeaseSeed,
 } from '#/session/sessionLease/sessionLease';
 import { ISessionLeaseContactProvider } from '#/session/sessionLease/sessionLeaseContactProvider';
+import { ISessionSecondaryModelWarningService } from '#/session/subagent/secondaryModelWarning';
 import { ISessionMetadata, type SessionMeta } from '#/session/sessionMetadata/sessionMetadata';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
 import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
@@ -311,6 +313,7 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
       await beforeReady?.(handle);
       handle.accessor.get(ISessionExternalHooksService);
       handle.accessor.get(ISessionCronService);
+      handle.accessor.get(ISessionSecondaryModelWarningService);
       await handle.accessor.get(ISessionMetadata).ready;
       await handle.accessor.get(ISessionToolPolicy).ready;
       void handle.accessor.get(ISessionSkillCatalog).ready;

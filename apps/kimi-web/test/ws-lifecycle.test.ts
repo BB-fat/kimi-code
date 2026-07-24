@@ -237,9 +237,9 @@ describe('DaemonEventSocket frame dispatch (multi-instance surface)', () => {
     ws.emitMessage(SERVER_HELLO);
 
     const ownership = { kind: 'held-by-peer', phase: 'routable', address: 'http://127.0.0.1:58628' };
-    ws.emitMessage({ type: 'error', payload: { code: 40921, msg: 'session held by peer', fatal: false, details: ownership } });
+    ws.emitMessage({ type: 'error', payload: { code: 40922, msg: 'session held by peer', fatal: false, details: ownership } });
 
-    expect(errors).toEqual([{ code: 40921, msg: 'session held by peer', fatal: false, details: ownership }]);
+    expect(errors).toEqual([{ code: 40922, msg: 'session held by peer', fatal: false, details: ownership }]);
   });
 
   it('keeps session-scoped error frames on the agent-event path (no details leak to onError)', () => {

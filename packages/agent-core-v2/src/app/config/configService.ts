@@ -426,10 +426,20 @@ export class ConfigService extends Disposable implements IConfigService {
     this.applyEnvOverlay(next);
     this.effective = next;
 
-    const changedDomains = domains ?? [
-      ...new Set([...Object.keys(previous), ...Object.keys(next)]),
-    ];
-    this.commit(source, changedDomains);
+    // Commit candidates: the explicitly touched domains PLUS anything the
+    // recompute actually changed. Section env bindings and effective overlays
+    // rewrite sibling domains the caller's list never names (e.g. setting
+    // `[secondary_model]` synthesizes a derived entry into `models`; removing
+    // the recipe retracts it). `commit` re-checks every candidate with
+    // deepEqual before firing, so widening the set is free — missing a real
+    // change is what costs (a stale registry downstream).
+    const candidates = new Set(
+      domains ?? [...Object.keys(previous), ...Object.keys(next)],
+    );
+    for (const domain of new Set([...Object.keys(previous), ...Object.keys(next)])) {
+      if (!deepEqual(previous[domain], next[domain])) candidates.add(domain);
+    }
+    this.commit(source, [...candidates]);
   }
 
   private deliveredValue(domain: string): unknown {
@@ -563,17 +573,26 @@ export class ConfigService extends Disposable implements IConfigService {
   }
 
   private async persist(domain: string): Promise<void> {
+    const value = this.raw[domain];
     const freshBase = await this.documentStore.update<ResolvedConfig>(
       CONFIG_SCOPE,
       this.configKey,
       (data) => {
         const next = data !== undefined && isPlainObject(data) ? cloneRecord(data) : {};
-        applySectionToToml(next, domain, this.raw[domain], this.registry);
+        applySectionToToml(next, domain, value, this.registry);
         return next;
       },
     );
     this.rawSnake = freshBase;
-    this.raw = transformTomlData(freshBase, this.registry);
+    const freshRaw = transformTomlData(freshBase, this.registry);
+    // The touched domain's on-disk subsection was merged onto the previous raw
+    // (`plainObjectToToml` keeps unknown keys for forward-compat), so the disk
+    // re-read can resurrect fields the caller just dropped. The in-memory raw
+    // keeps the validated value for the touched domain; only sibling sections
+    // absorb disk state (`commitAbsorbed` diffs them afterwards).
+    if (value === undefined) delete freshRaw[domain];
+    else freshRaw[domain] = value;
+    this.raw = freshRaw;
   }
 
   private commitAbsorbed(previousRaw: ResolvedConfig): void {

@@ -6,11 +6,11 @@
  * The permanent sentinel is protected by a kernel lock; the sibling
  * `<id>.lock.owner.json` document only advertises holder metadata.
  * Materializing routes on a peer-held session answer HTTP 200 with envelope
- * `code 40921 session.held_by_peer` + ownership details. kap-server's own e2e
+ * `code 40922 session.held_by_peer` + ownership details. kap-server's own e2e
  * already pins the dual-open envelope schema and graceful-close takeover; the
  * unique value here is cross-instance behavior and byte-level file integrity:
  * A creates the session, then `GET .../warnings` fires on A and B
- * concurrently — A always serves (code 0), B always loses with 40921 phase
+ * concurrently — A always serves (code 0), B always loses with 40922 phase
  * `routable` + A's address — followed by a `*.jsonl` byte-integrity sweep of
  * the shared home (no torn records) and a single-lease assertion.
  */
@@ -26,7 +26,7 @@ import { createCaseLogger } from './log.js';
 
 describe('session ownership: concurrent dual materialization race (in-process pair)', () => {
   it(
-    'holder serves, peer gets 40921 routable every round, no torn JSONL on disk',
+    'holder serves, peer gets 40922 routable every round, no torn JSONL on disk',
     { timeout: 90_000 },
     async () => {
       const log = createCaseLogger('session-ownership/materialization-race');

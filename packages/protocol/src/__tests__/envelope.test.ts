@@ -89,14 +89,14 @@ describe('envelope', () => {
     );
     expect(withDetails.details).toEqual(details);
     expect(JSON.stringify(withDetails)).toBe(
-      '{"code":40921,"msg":"session is owned by another instance","data":null,"request_id":"req_d","details":{"kind":"held-by-peer","phase":"routable","address":"http://127.0.0.1:58628"}}',
+      '{"code":40922,"msg":"session is owned by another instance","data":null,"request_id":"req_d","details":{"kind":"held-by-peer","phase":"routable","address":"http://127.0.0.1:58628"}}',
     );
     expect(envelopeSchema(z.any()).parse(withDetails).details).toEqual(details);
 
     // No details → field is absent and the wire shape is byte-identical to before.
     const without = errEnvelope(ErrorCode.SESSION_HELD_BY_PEER, 'owned by peer', 'req_f');
     expect(JSON.stringify(without)).toBe(
-      '{"code":40921,"msg":"owned by peer","data":null,"request_id":"req_f"}',
+      '{"code":40922,"msg":"owned by peer","data":null,"request_id":"req_f"}',
     );
   });
 });
@@ -107,7 +107,7 @@ describe('error-codes', () => {
     expect(ErrorCode.VALIDATION_FAILED).toBe(40001);
     expect(ErrorCode.SESSION_NOT_FOUND).toBe(40401);
     expect(ErrorCode.GOAL_UNSUPPORTED_AGENT).toBe(40920);
-    expect(ErrorCode.SESSION_HELD_BY_PEER).toBe(40921);
+    expect(ErrorCode.SESSION_HELD_BY_PEER).toBe(40922);
     expect(ErrorCode.APPROVAL_EXPIRED).toBe(41001);
     expect(ErrorCode.FS_WATCH_LIMIT_EXCEEDED).toBe(42902);
     expect(ErrorCode.INTERNAL_ERROR).toBe(50001);

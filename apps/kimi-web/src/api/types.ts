@@ -537,7 +537,7 @@ export interface KimiEventHandlers {
   onEvent(event: AppEvent, meta: KimiEventMeta): void;
   onResync(sessionId: string, currentSeq: number, epoch?: string): void;
   /** Connection-level error frame. `details` carries the structured payload
-   *  newer servers attach (e.g. SessionOwnershipDetails under 40921); absent
+   *  newer servers attach (e.g. SessionOwnershipDetails under 40922); absent
    *  on older servers. */
   onError(code: number, msg: string, fatal: boolean, details?: unknown): void;
   onConnectionChange(connected: boolean): void;

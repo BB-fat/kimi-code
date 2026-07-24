@@ -1,6 +1,6 @@
 /**
  * Session-ownership error details — the structured `details` payload carried
- * under `SESSION_HELD_BY_PEER` (40921) when an instance receives a request for
+ * under `SESSION_HELD_BY_PEER` (40922) when an instance receives a request for
  * a session whose lease is held by another instance.
  *
  * Wire semantics: the payload rides the REST envelope `details` field (HTTP

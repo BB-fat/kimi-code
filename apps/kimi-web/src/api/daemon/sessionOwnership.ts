@@ -1,6 +1,6 @@
 // apps/kimi-web/src/api/daemon/sessionOwnership.ts
 // Session-ownership (multi-instance) error details — local re-implementation
-// of the `details` payload carried under envelope code 40921
+// of the `details` payload carried under envelope code 40922
 // (`session.held_by_peer`). kimi-web must not depend on @moonshot-ai/agent-core
 // or @moonshot-ai/protocol, so the zod schema in
 // packages/protocol/src/session-ownership.ts is mirrored here as plain types
@@ -14,7 +14,7 @@
 import { isDaemonApiError } from '../errors';
 
 /** Envelope `code` for `session.held_by_peer` (see kap-server error-handler). */
-export const SESSION_HELD_BY_PEER_CODE = 40921;
+export const SESSION_HELD_BY_PEER_CODE = 40922;
 
 export type SessionOwnershipPhase =
   | 'creating'
@@ -70,7 +70,7 @@ export function narrowSessionOwnershipDetails(
 }
 
 /** Extract the ownership details from any thrown value: a DaemonApiError with
- *  code 40921 carrying a well-formed details payload. Anything else → undefined. */
+ *  code 40922 carrying a well-formed details payload. Anything else → undefined. */
 export function getSessionOwnershipDetails(err: unknown): SessionOwnershipDetails | undefined {
   if (!isDaemonApiError(err)) return undefined;
   if (err.code !== SESSION_HELD_BY_PEER_CODE) return undefined;
