@@ -7,10 +7,9 @@
  * App scope.
  */
 
-import { InstantiationType } from '#/_base/di/extensions';
 import { BugIndicatingError } from '#/_base/errors/errors';
 import { toDisposable, type IDisposable } from '#/_base/di/lifecycle';
-import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
+import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { Error2, ErrorCodes } from '#/errors';
 import type { ISessionWriteAdmission } from '#/persistence/interface/sessionWriteAdmission';
 import { IStorageWriteAdmission } from '#/persistence/interface/storageWriteAdmission';
@@ -71,6 +70,6 @@ registerScopedService(
   LifecycleScope.App,
   IStorageWriteAdmission,
   StorageWriteAdmissionService,
-  InstantiationType.Eager,
+  ScopeActivation.OnScopeCreated,
   'storage',
 );

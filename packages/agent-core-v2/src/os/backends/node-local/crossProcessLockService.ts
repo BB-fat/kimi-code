@@ -16,8 +16,7 @@ import {
 } from '@moonshot-ai/kernel-file-lock';
 import { ulid } from 'ulid';
 
-import { InstantiationType } from '#/_base/di/extensions';
-import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
+import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import {
   CrossProcessLockError,
   CrossProcessLockErrorCode,
@@ -298,6 +297,6 @@ registerScopedService(
   LifecycleScope.App,
   ICrossProcessLockService,
   CrossProcessLockService,
-  InstantiationType.Eager,
+  ScopeActivation.OnScopeCreated,
   'crossProcessLock',
 );

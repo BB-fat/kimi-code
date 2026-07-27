@@ -106,6 +106,12 @@ const DOMAIN_LAYER = new Map([
   // It depends only on the L1 cross-process lock and write-authority contracts
   // (plus L0 infrastructure), so consumers must not pull it up to their layer.
   ['sessionLease', 1],
+  // `state` is the per-scope keyed state container (`IStateService` /
+  // `ISessionStateService` / `IAgentStateService`, one per scope tier under
+  // `app/state`, `session/state`, `agent/state` — all resolve to this domain).
+  // It wraps the `_base` `StateRegistry` and depends on nothing else, so any
+  // domain may hold its plain-data state through it; sits in L1 beside `event`.
+  ['state', 1],
   // persistence/ and os/ — the two-level scopes. `interface` holds contracts
   // (same layer as the old domains they replace); `backends` holds
   // implementations that may depend on cross-domain services at various layers.
@@ -179,6 +185,10 @@ const DOMAIN_LAYER = new Map([
   ['fileFencing', 4],
   ['toolSelect', 4],
   ['toolPolicy', 4],
+  // `toolActivation` turns the `toolRegistry` (L3) contribution table into
+  // per-agent runtime registrations, filtered by the bound Profile's tool
+  // policy (`profile`, L4) — the reason it cannot live in L3 itself.
+  ['toolActivation', 4],
   ['contextMemory', 4],
   ['contextInjector', 4],
   ['agentPlugin', 4],
@@ -225,6 +235,11 @@ const DOMAIN_LAYER = new Map([
   ['sessionExport', 6],
   ['interaction', 6],
   ['sessionMetadata', 6],
+  // `undo` owns the undo pipeline (quiesce → context.undo → reconcile): it
+  // coordinates L4 agent domains (loop / prompt / contextMemory /
+  // fullCompaction), L5 task delivery, and `sessionMetadata`, so it sits in
+  // L6 beside the other cross-agent coordinators.
+  ['undo', 6],
   ['sessionActivity', 6],
   ['session', 6],
   ['terminal', 6],
@@ -245,6 +260,11 @@ const DOMAIN_LAYER = new Map([
   ['approval', 7],
   ['question', 7],
   ['questionTools', 7],
+  // `tools` is the unified home of every AgentTool (contract + impl per tool,
+  // one directory each). Individual tools depend on `question` (L7),
+  // `approval` (L7), `subagent` (L6), `agentLifecycle` (L6), `cron` (L5),
+  // `agentTask` (L5), and others — the domain takes the highest layer.
+  ['tools', 7],
   ['gateway', 7],
   ['rpc', 7],
   
@@ -432,6 +452,10 @@ const ALLOWED_EXCEPTIONS = new Set([
   // the `kosongConfig` persistence wrapper (L3), when provisioning or clearing
   // OAuth-managed config. Slated for cleanup with the auth layering rework.
   'auth>kosongConfig',
+  // `auth` (L2) builds the OAuth-backed `WebSearchProvider` that the
+  // `WebSearch` tool delegates to; the provider/result contract types moved
+  // with the tool into the `tools` domain (L7).
+  'auth>tools',
   // `toolApproval` (Agent, L3) owns the approval round-trip for permissionGate
   // asks and plan/goal reviews, driven through the Session approval broker.
   'toolApproval>approval',
@@ -453,7 +477,14 @@ const ALLOWED_EXCEPTIONS = new Set([
   // config defaults reaches the `subagent` section (L6) for the subagent
   // timeout — same cross-scope config-fill shape as `swarm>subagent`.
   'agentTask>subagent',
+  // `agentTask` (L5) formats its task list through the Task tool's
+  // `formatTaskList` helper, which lives in the `tools` domain (L7).
+  'agentTask>tools',
   'cron>agentLifecycle',
+  // `sessionCronServiceImpl` (cron, L5) imports the three `ICronXxxTool`
+  // contracts (schedule/list/cancel) from the `tools` domain (L7) to bind
+  // the cron tools into agents.
+  'cron>tools',
   'cron>sessionContext',
   'todo>agentLifecycle',
   // L3/L4 type-sharing: tool contract + execution hook contexts now live in
@@ -461,6 +492,10 @@ const ALLOWED_EXCEPTIONS = new Set([
   'contextMemory>agentTask',
   'llmRequester>session',
   'loop>mcp',
+  // `registerMediaTools` (media, L4) imports the `ReadMediaFileTool`
+  // implementation from the `tools` domain (L7) to register it for media
+  // capability agents.
+  'media>tools',
   'permissionGate>externalHooks',
   'permissionMode>contextInjector',
   'permissionMode>replayBuilder',

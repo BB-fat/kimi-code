@@ -12,6 +12,8 @@ import { LifecycleScope } from '#/_base/di/scope';
 import { createScopedTestHost, stubPair } from '#/_base/di/test';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IHostFsWatchService } from '#/os/interface/hostFsWatch';
+import { ISessionStateService } from '#/session/state/sessionState';
+import { SessionStateService } from '#/session/state/sessionStateService';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 import type { FsChangeEvent } from '#/session/sessionFs/fsWatch';
 
@@ -64,6 +66,7 @@ function makeSession(gitignore?: string, hostFs?: IHostFileSystem): Harness {
   const watch = fakeHostFsWatch();
   const host = createScopedTestHost();
   const session = host.child(LifecycleScope.Session, 's1', [
+    stubPair(ISessionStateService, new SessionStateService()),
     stubPair(ISessionWorkspaceContext, stubWorkspace()),
     stubPair(IHostFsWatchService, watch.service),
     stubPair(IHostFileSystem, hostFs ?? fakeHostFs(gitignore)),

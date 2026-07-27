@@ -10,8 +10,7 @@
  */
 
 import { Disposable } from '#/_base/di/lifecycle';
-import { InstantiationType } from '#/_base/di/extensions';
-import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
+import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
 
@@ -67,6 +66,6 @@ registerScopedService(
   LifecycleScope.Agent,
   IAgentSkillListingReminderService,
   AgentSkillListingReminderService,
-  InstantiationType.Eager,
+  ScopeActivation.OnScopeCreated,
   'profile',
 );

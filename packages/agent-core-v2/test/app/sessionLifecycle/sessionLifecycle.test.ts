@@ -5,12 +5,12 @@ import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 
-import { InstantiationType } from '#/_base/di/extensions';
 import { Disposable } from '#/_base/di/lifecycle';
 import {
   type IAgentScopeHandle,
   type ISessionScopeHandle,
   LifecycleScope,
+  ScopeActivation,
   _clearScopedRegistryForTests,
   registerScopedService,
 } from '#/_base/di/scope';
@@ -54,6 +54,8 @@ import { FileStorageService } from '#/persistence/backends/node-fs/fileStorageSe
 import { StorageWriteAdmissionService } from '#/persistence/backends/node-fs/storageWriteAdmissionService';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 import { SessionWorkspaceContextService } from '#/session/workspaceContext/workspaceContextService';
+import { ISessionStateService } from '#/session/state/sessionState';
+import { SessionStateService } from '#/session/state/sessionStateService';
 import { IWorkspaceService, type Workspace } from '#/app/workspace/workspace';
 import { encodeWorkDirKey } from '#/_base/utils/workdir-slug';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
@@ -467,21 +469,21 @@ describe('SessionLifecycleService', () => {
       LifecycleScope.App,
       ISessionLifecycleService,
       SessionLifecycleService,
-      InstantiationType.Delayed,
+      ScopeActivation.OnDemand,
       'sessionLifecycle',
     );
     registerScopedService(
       LifecycleScope.Session,
       ISessionExternalHooksService,
       NoopSessionExternalHooksService,
-      InstantiationType.Eager,
+      ScopeActivation.OnScopeCreated,
       'externalHooks',
     );
     registerScopedService(
       LifecycleScope.App,
       IHostFileSystem,
       HostFileSystem,
-      InstantiationType.Delayed,
+      ScopeActivation.OnDemand,
       'hostFs',
     );
   });
@@ -954,7 +956,7 @@ describe('SessionLifecycleService', () => {
       LifecycleScope.Session,
       ISessionExternalHooksService,
       RecordingSessionExternalHooksService,
-      InstantiationType.Eager,
+      ScopeActivation.OnScopeCreated,
       'externalHooks',
     );
     const svc = build();
@@ -1062,9 +1064,16 @@ describe('SessionLifecycleService', () => {
     beforeEach(() => {
       registerScopedService(
         LifecycleScope.Session,
+        ISessionStateService,
+        SessionStateService,
+        ScopeActivation.OnScopeCreated,
+        'state',
+      );
+      registerScopedService(
+        LifecycleScope.Session,
         ISessionWorkspaceContext,
         SessionWorkspaceContextService,
-        InstantiationType.Delayed,
+        ScopeActivation.OnDemand,
         'workspaceContext',
       );
     });

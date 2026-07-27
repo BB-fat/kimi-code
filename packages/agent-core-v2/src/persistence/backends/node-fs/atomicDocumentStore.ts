@@ -9,9 +9,8 @@
 
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 
-import { InstantiationType } from '#/_base/di/extensions';
 import { toDisposable, type IDisposable } from '#/_base/di/lifecycle';
-import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
+import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { Event } from '#/_base/event';
 import { enqueueKeyedOperation } from '#/_base/utils/promise';
 
@@ -133,7 +132,7 @@ registerScopedService(
   LifecycleScope.App,
   IAtomicDocumentStore,
   JsonAtomicDocumentStore,
-  InstantiationType.Eager,
+  ScopeActivation.OnScopeCreated,
   'storage',
 );
 
@@ -141,6 +140,6 @@ registerScopedService(
   LifecycleScope.App,
   IAtomicTomlDocumentStore,
   TomlAtomicDocumentStore,
-  InstantiationType.Eager,
+  ScopeActivation.OnScopeCreated,
   'storage',
 );
