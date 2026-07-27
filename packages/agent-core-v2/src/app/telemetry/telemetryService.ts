@@ -22,6 +22,7 @@ import {
   nullTelemetryAppender,
   type TelemetryContextPatch,
   type TelemetryProperties,
+  type TelemetryShutdownOptions,
 } from './telemetry';
 
 export class TelemetryService implements ITelemetryService {
@@ -64,6 +65,7 @@ export class TelemetryService implements ITelemetryService {
   }
 
   addAppender(appender: ITelemetryAppender): IDisposable {
+    this.startAppender(appender);
     this.appenders.push(appender);
     return toDisposable(() => this.removeAppender(appender));
   }
@@ -73,6 +75,7 @@ export class TelemetryService implements ITelemetryService {
   }
 
   setAppender(appender: ITelemetryAppender): void {
+    this.startAppender(appender);
     this.appenders = [appender];
   }
 
@@ -88,12 +91,20 @@ export class TelemetryService implements ITelemetryService {
     );
   }
 
-  async shutdown(): Promise<void> {
+  async shutdown(options?: TelemetryShutdownOptions): Promise<void> {
     await Promise.all(
       this.appenders.map((appender) =>
-        Promise.resolve(appender.shutdown?.()).catch(onUnexpectedError),
+        Promise.resolve(appender.shutdown?.(options)).catch(onUnexpectedError),
       ),
     );
+  }
+
+  private startAppender(appender: ITelemetryAppender): void {
+    try {
+      appender.start?.();
+    } catch (error) {
+      onUnexpectedError(error);
+    }
   }
 }
 
@@ -147,8 +158,8 @@ class TelemetryContextView implements ITelemetryService {
     return this.root.flush();
   }
 
-  shutdown(): Promise<void> {
-    return this.root.shutdown();
+  shutdown(options?: TelemetryShutdownOptions): Promise<void> {
+    return this.root.shutdown(options);
   }
 }
 

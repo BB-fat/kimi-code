@@ -63,13 +63,6 @@ export async function initializeServerTelemetry(
     getAccessToken: async () => (await auth.getCachedAccessToken()) ?? null,
   });
   const registration = service.addAppender(appender);
-  try {
-    // The server is long-lived: flush on a timer, not only at the threshold.
-    appender.startPeriodicFlush();
-  } catch (error) {
-    registration.dispose();
-    throw error;
-  }
   return { appender, registration };
 }
 
@@ -82,7 +75,7 @@ export async function shutdownServerTelemetry(
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
-      telemetry.appender.shutdown(),
+      telemetry.appender.shutdown({ deadlineMs }),
       new Promise<void>((resolve) => {
         timer = setTimeout(resolve, Math.max(0, deadlineMs - Date.now()));
       }),

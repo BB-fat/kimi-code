@@ -1,3 +1,9 @@
+/**
+ * Telemetry facade tests — exercise appender fan-out, context views, error
+ * isolation, lifecycle-option forwarding, and App-scope registration through
+ * the public `ITelemetryService` surface.
+ */
+
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { LifecycleScope, ScopeActivation, _clearScopedRegistryForTests, registerScopedService } from '#/_base/di/scope';
@@ -6,21 +12,32 @@ import {
   resetUnexpectedErrorHandler,
   setUnexpectedErrorHandler,
 } from '#/_base/errors/unexpectedError';
-import { type ITelemetryAppender, type TelemetryProperties, ITelemetryService } from '#/app/telemetry/telemetry';
+import {
+  type ITelemetryAppender,
+  type TelemetryProperties,
+  type TelemetryShutdownOptions,
+  ITelemetryService,
+} from '#/app/telemetry/telemetry';
 import { TelemetryService } from '#/app/telemetry/telemetryService';
 
 class CapturingAppender implements ITelemetryAppender {
   readonly events: { event: string; properties?: TelemetryProperties }[] = [];
+  startCalls = 0;
   flushCalls = 0;
   shutdownCalls = 0;
+  shutdownOptions: TelemetryShutdownOptions | undefined;
+  start(): void {
+    this.startCalls += 1;
+  }
   track(event: string, properties?: TelemetryProperties): void {
     this.events.push({ event, properties });
   }
   flush(): void {
     this.flushCalls += 1;
   }
-  shutdown(): void {
+  shutdown(options?: TelemetryShutdownOptions): void {
     this.shutdownCalls += 1;
+    this.shutdownOptions = options;
   }
 }
 
@@ -101,6 +118,15 @@ describe('TelemetryService (unit)', () => {
     expect(b.events).toHaveLength(1);
   });
 
+  it('addAppender starts the registered appender', () => {
+    const appender = new CapturingAppender();
+    const svc = new TelemetryService();
+
+    svc.addAppender(appender);
+
+    expect(appender.startCalls).toBe(1);
+  });
+
   it('removeAppender stops delivery to that appender', () => {
     const a = new CapturingAppender();
     const b = new CapturingAppender();
@@ -109,6 +135,15 @@ describe('TelemetryService (unit)', () => {
     svc.track('evt');
     expect(a.events).toHaveLength(0);
     expect(b.events).toHaveLength(1);
+  });
+
+  it('setAppender starts the replacement appender', () => {
+    const appender = new CapturingAppender();
+    const svc = new TelemetryService();
+
+    svc.setAppender(appender);
+
+    expect(appender.startCalls).toBe(1);
   });
 
   it('setEnabled(false) drops track; setEnabled(true) resumes', () => {
@@ -165,6 +200,21 @@ describe('TelemetryService (unit)', () => {
     expect(b.shutdownCalls).toBe(1);
   });
 
+  it('shutdown forwards one lifecycle budget to every appender', async () => {
+    const first = new CapturingAppender();
+    const second = new CapturingAppender();
+    const svc = telemetryWithAppenders(first, second);
+    const options = {
+      signal: new AbortController().signal,
+      deadlineMs: Date.now() + 25,
+    };
+
+    await svc.shutdown(options);
+
+    expect(first.shutdownOptions).toBe(options);
+    expect(second.shutdownOptions).toBe(options);
+  });
+
   it('flush is a no-op for appenders without flush', async () => {
     const minimal: ITelemetryAppender = { track() {} };
     const svc = telemetryWithAppenders(minimal);
@@ -186,6 +236,23 @@ describe('TelemetryService (error isolation)', () => {
     const good = new CapturingAppender();
     const svc = telemetryWithAppenders(bad, good);
     expect(() => svc.track('evt')).not.toThrow();
+    expect(good.events).toEqual([{ event: 'evt', properties: {} }]);
+  });
+
+  it('a throwing appender start does not prevent other appenders from registering', () => {
+    const bad: ITelemetryAppender = {
+      start() {
+        throw new Error('boom');
+      },
+      track() {},
+    };
+    const good = new CapturingAppender();
+    const svc = new TelemetryService();
+
+    svc.addAppender(bad);
+    svc.addAppender(good);
+    svc.track('evt');
+
     expect(good.events).toEqual([{ event: 'evt', properties: {} }]);
   });
 

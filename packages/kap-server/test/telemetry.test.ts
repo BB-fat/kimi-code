@@ -113,7 +113,11 @@ describe('server telemetry', () => {
     const telemetry = await initializeServerTelemetry(app, home as string);
     app.accessor.get(ITelemetryService).track('server_probe');
 
-    await expect(shutdownServerTelemetry(telemetry, Date.now())).resolves.toBeUndefined();
+    try {
+      await expect(shutdownServerTelemetry(telemetry, Date.now())).resolves.toBeUndefined();
+    } finally {
+      await telemetry.appender?.shutdown();
+    }
   });
 
   it('keeps the null appender when config sets telemetry = false', async () => {

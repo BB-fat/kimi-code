@@ -1,4 +1,20 @@
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+/**
+ * Cloud telemetry lifecycle tests — exercise the real appender, transport,
+ * and file-storage stack while stubbing only the outbound HTTP boundary.
+ * Covers batching, durable shutdown, startup replay, privacy, and wire shape.
+ * Run with `pnpm --filter @moonshot-ai/agent-core-v2 exec vitest run
+ * test/app/telemetry/cloudAppender.test.ts`.
+ */
+
+import { getEventListeners } from 'node:events';
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -10,12 +26,14 @@ import {
 } from '#/_base/errors/unexpectedError';
 import { FileStorageService } from '#/persistence/backends/node-fs/fileStorageService';
 import { CloudAppender, type CloudAppenderOptions } from '#/app/telemetry/cloudAppender';
+import { CloudTransport } from '#/app/telemetry/cloudTransport';
 
 import { stubBootstrap } from '../bootstrap/stubs';
 
 interface CapturedRequest {
   readonly url: string;
   readonly headers: Record<string, string>;
+  readonly signal?: AbortSignal;
   readonly body: {
     readonly user_id: string;
     readonly events: readonly Record<string, unknown>[];
@@ -26,10 +44,15 @@ type Responder = (req: CapturedRequest) => Response | Promise<Response>;
 
 function makeFetch(responder: Responder): typeof fetch {
   return (async (input: unknown, init: unknown) => {
-    const requestInit = init as { headers: Record<string, string>; body: string };
+    const requestInit = init as {
+      headers: Record<string, string>;
+      body: string;
+      signal?: AbortSignal;
+    };
     const req: CapturedRequest = {
       url: String(input),
       headers: requestInit.headers,
+      signal: requestInit.signal,
       body: JSON.parse(requestInit.body) as CapturedRequest['body'],
     };
     return responder(req);
@@ -44,6 +67,17 @@ function statusResponse(status: number): Response {
   return new Response(null, { status });
 }
 
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 function baseOptions(
   overrides: Partial<CloudAppenderOptions> & { homeDir?: string } = {},
 ): CloudAppenderOptions {
@@ -56,6 +90,18 @@ function baseOptions(
     sleep: async () => {},
     ...rest,
   };
+}
+
+function listFailedSpoolFiles(homeDir: string): string[] {
+  return readdirSync(join(homeDir, 'telemetry-v2')).filter((file) =>
+    file.startsWith('failed_'),
+  );
+}
+
+function readFirstFailedEvent(homeDir: string): Record<string, unknown> {
+  const file = listFailedSpoolFiles(homeDir)[0] as string;
+  const persisted = readFileSync(join(homeDir, 'telemetry-v2', file), 'utf8');
+  return JSON.parse(persisted.trim()) as Record<string, unknown>;
 }
 
 describe('CloudAppender', () => {
@@ -202,6 +248,171 @@ describe('CloudAppender', () => {
     expect(sends).toBe(1);
   });
 
+  it('shutdown returns the original lifecycle promise when called repeatedly', async () => {
+    const appender = new CloudAppender(
+      baseOptions({
+        homeDir,
+        fetchImpl: makeFetch(() => okResponse()),
+      }),
+    );
+    appender.track('once');
+
+    const first = appender.shutdown();
+    const second = appender.shutdown();
+
+    expect(second).toBe(first);
+    await first;
+  });
+
+  it('a later shutdown cancellation tightens an active lifecycle', async () => {
+    const requestStarted = deferred<void>();
+    const appender = new CloudAppender(
+      baseOptions({
+        homeDir,
+        fetchImpl: makeFetch(() => {
+          requestStarted.resolve();
+          return new Promise<Response>(() => {});
+        }),
+      }),
+    );
+    const cancellation = new AbortController();
+    appender.track('cancelled_by_later_caller');
+
+    const first = appender.shutdown();
+    await requestStarted.promise;
+    const second = appender.shutdown({ signal: cancellation.signal });
+    cancellation.abort();
+    await second;
+
+    expect(second).toBe(first);
+    const files = listFailedSpoolFiles(homeDir);
+    expect(files).toHaveLength(1);
+  });
+
+  it('track drops events after shutdown begins', async () => {
+    let requests = 0;
+    const appender = new CloudAppender(
+      baseOptions({
+        homeDir,
+        fetchImpl: makeFetch(() => {
+          requests += 1;
+          return okResponse();
+        }),
+      }),
+    );
+
+    await appender.shutdown();
+    appender.track('too_late');
+    await appender.flush();
+
+    expect(requests).toBe(0);
+  });
+
+  it('flush drains events tracked while an earlier batch is in flight', async () => {
+    const firstResponse = deferred<Response>();
+    const firstRequestStarted = deferred<void>();
+    const batches: string[][] = [];
+    const appender = new CloudAppender(
+      baseOptions({
+        homeDir,
+        fetchImpl: makeFetch((request) => {
+          batches.push(request.body.events.map((event) => String(event['event'])));
+          if (batches.length === 1) {
+            firstRequestStarted.resolve();
+            return firstResponse.promise;
+          }
+          return okResponse();
+        }),
+      }),
+    );
+
+    appender.track('first');
+    const flushing = appender.flush();
+    await firstRequestStarted.promise;
+    appender.track('second');
+    firstResponse.resolve(okResponse());
+    await flushing;
+
+    expect(batches).toEqual([['kfc_first'], ['kfc_second']]);
+  });
+
+  it('concurrent flush calls share ownership of one batch', async () => {
+    const response = deferred<Response>();
+    const requestStarted = deferred<void>();
+    let requests = 0;
+    const appender = new CloudAppender(
+      baseOptions({
+        homeDir,
+        fetchImpl: makeFetch(() => {
+          requests += 1;
+          requestStarted.resolve();
+          return response.promise;
+        }),
+      }),
+    );
+    appender.track('once');
+
+    const first = appender.flush();
+    await requestStarted.promise;
+    const second = appender.flush();
+    response.resolve(okResponse());
+    await Promise.all([first, second]);
+
+    expect(second).toBe(first);
+    expect(requests).toBe(1);
+  });
+
+  it('shutdown persists a threshold batch already in flight when cancellation fires', async () => {
+    const requestStarted = deferred<void>();
+    let requestSignal: AbortSignal | undefined;
+    const appender = new CloudAppender(
+      baseOptions({
+        homeDir,
+        flushThreshold: 1,
+        fetchImpl: makeFetch((request) => {
+          requestSignal = request.signal;
+          requestStarted.resolve();
+          return new Promise<Response>(() => {});
+        }),
+      }),
+    );
+    const cancellation = new AbortController();
+
+    appender.track('threshold_in_flight');
+    await requestStarted.promise;
+    const closing = appender.shutdown({ signal: cancellation.signal });
+    cancellation.abort();
+    await closing;
+
+    expect(requestSignal?.aborted).toBe(true);
+    const files = listFailedSpoolFiles(homeDir);
+    expect(files).toHaveLength(1);
+    expect(readFirstFailedEvent(homeDir)).toMatchObject({
+      event: 'threshold_in_flight',
+    });
+  });
+
+  it('shutdown persists buffered events when its absolute deadline has elapsed', async () => {
+    let requests = 0;
+    const appender = new CloudAppender(
+      baseOptions({
+        homeDir,
+        fetchImpl: makeFetch(() => {
+          requests += 1;
+          return okResponse();
+        }),
+      }),
+    );
+
+    appender.track('deadline_elapsed');
+    await appender.shutdown({ deadlineMs: Date.now() - 1 });
+
+    expect(requests).toBe(0);
+    const files = listFailedSpoolFiles(homeDir);
+    expect(files).toHaveLength(1);
+    expect(readFirstFailedEvent(homeDir)).toMatchObject({ event: 'deadline_elapsed' });
+  });
+
   it('retries on 5xx and saves to disk after exhausting backoffs', async () => {
     let attempts = 0;
     const appender = new CloudAppender(
@@ -218,8 +429,40 @@ describe('CloudAppender', () => {
     await appender.flush();
 
     expect(attempts).toBe(4);
-    const files = readdirSync(join(homeDir, 'telemetry')).filter((f) => f.startsWith('failed_'));
+    const files = listFailedSpoolFiles(homeDir);
     expect(files).toHaveLength(1);
+  });
+
+  it('releases lifecycle abort listeners after a retry backoff completes', async () => {
+    let attempts = 0;
+    const transport = new CloudTransport({
+      storage: new FileStorageService(homeDir),
+      deviceId: 'dev',
+      retryBackoffsMs: [0],
+      fetchImpl: makeFetch(() => {
+        attempts += 1;
+        return attempts === 1 ? statusResponse(500) : okResponse();
+      }),
+    });
+    const lifecycle = new AbortController();
+
+    await transport.send(
+      [
+        {
+          event_id: 'event-1',
+          device_id: 'dev',
+          session_id: null,
+          event: 'retry_listener_cleanup',
+          timestamp: 1,
+          properties: {},
+          context: {},
+        },
+      ],
+      lifecycle.signal,
+    );
+
+    expect(attempts).toBe(2);
+    expect(getEventListeners(lifecycle.signal, 'abort')).toHaveLength(0);
   });
 
   it('retries a 401 once without the Authorization header', async () => {
@@ -255,15 +498,63 @@ describe('CloudAppender', () => {
 
     appender.track('evt');
     await appender.flush();
-    expect(
-      readdirSync(join(homeDir, 'telemetry')).filter((f) => f.startsWith('failed_')),
-    ).toHaveLength(1);
+    expect(listFailedSpoolFiles(homeDir)).toHaveLength(1);
 
     shouldFail = false;
     await appender.retryDiskEvents();
-    expect(
-      readdirSync(join(homeDir, 'telemetry')).filter((f) => f.startsWith('failed_')),
-    ).toHaveLength(0);
+    expect(listFailedSpoolFiles(homeDir)).toHaveLength(0);
+  });
+
+  it('start replays recoverable events left by an earlier appender', async () => {
+    const failingAppender = new CloudAppender(
+      baseOptions({
+        homeDir,
+        fetchImpl: makeFetch(() => statusResponse(500)),
+      }),
+    );
+    failingAppender.track('persisted_before_restart');
+    await failingAppender.flush();
+    expect(listFailedSpoolFiles(homeDir)).toHaveLength(1);
+
+    let replayed = 0;
+    const restartedAppender = new CloudAppender(
+      baseOptions({
+        homeDir,
+        fetchImpl: makeFetch(() => {
+          replayed += 1;
+          return okResponse();
+        }),
+      }),
+    );
+
+    restartedAppender.start();
+    await restartedAppender.shutdown();
+
+    expect(replayed).toBe(1);
+    expect(listFailedSpoolFiles(homeDir)).toHaveLength(0);
+  });
+
+  it('start leaves legacy telemetry spool files for their owning pipeline', async () => {
+    const telemetryDir = join(homeDir, 'telemetry');
+    mkdirSync(telemetryDir, { recursive: true });
+    const legacyFile = 'failed_abcdef123456.jsonl';
+    writeFileSync(join(telemetryDir, legacyFile), '{"event":"legacy"}\n');
+    let requests = 0;
+    const appender = new CloudAppender(
+      baseOptions({
+        homeDir,
+        fetchImpl: makeFetch(() => {
+          requests += 1;
+          return okResponse();
+        }),
+      }),
+    );
+
+    appender.start();
+    await appender.shutdown();
+
+    expect(requests).toBe(0);
+    expect(readdirSync(telemetryDir)).toContain(legacyFile);
   });
 
   it('drops non-primitive properties and reports the violation', async () => {
