@@ -26,6 +26,11 @@ import {
   type TelemetryShutdownOptions,
 } from './telemetry';
 
+interface PendingTelemetryEvent {
+  readonly event: string;
+  readonly properties: TelemetryProperties;
+}
+
 export class TelemetryService implements ITelemetryService {
   declare readonly _serviceBrand: undefined;
 
@@ -36,21 +41,23 @@ export class TelemetryService implements ITelemetryService {
   >();
   private readonly retirements = new Map<ITelemetryAppender, Promise<void>>();
   private readonly retiredAppenders = new WeakSet<ITelemetryAppender>();
+  private appenderTransition: Promise<void> | null = null;
+  private pendingEvents: PendingTelemetryEvent[] | null = null;
   private shutdownPromise: Promise<void> | null = null;
   private context: TelemetryProperties = {};
   private enabled = true;
 
   track(event: string, properties?: TelemetryProperties): void {
-    if (!this.enabled) {
+    if (!this.enabled || this.shutdownPromise !== null) {
       return;
     }
     const merged = { ...this.context, ...properties };
+    if (this.pendingEvents !== null) {
+      this.pendingEvents.push({ event, properties: merged });
+      return;
+    }
     for (const appender of this.appenders) {
-      try {
-        appender.track(event, merged);
-      } catch (error) {
-        onUnexpectedError(error);
-      }
+      this.trackAppender(appender, event, merged);
     }
   }
 
@@ -99,24 +106,43 @@ export class TelemetryService implements ITelemetryService {
   ): Promise<void> {
     this.assertOpen();
     this.assertReusable(appender);
-    const active = this.appenders.includes(appender);
-    if (!this.registrations.has(appender)) this.createRegistration(appender);
-    const previous = this.appenders.filter((candidate) => candidate !== appender);
-    this.appenders = [appender];
-    await Promise.all(previous.map((candidate) => this.retireAppender(candidate, options)));
-    if (
-      this.shutdownPromise === null &&
-      this.appenders.includes(appender) &&
-      !this.retiredAppenders.has(appender)
-    ) {
-      if (active) {
-        if (previous.length > 0) {
-          await this.invokeAppender(() => appender.recover?.());
-        }
-      } else {
-        this.startAppender(appender);
-      }
+    const previousTransition = this.appenderTransition;
+    const transition = (async () => {
+      if (previousTransition !== null) await previousTransition;
+      await this.replaceAppender(appender, options);
+    })();
+    this.appenderTransition = transition;
+    try {
+      await transition;
+    } finally {
+      if (this.appenderTransition === transition) this.appenderTransition = null;
     }
+  }
+
+  private async replaceAppender(
+    appender: ITelemetryAppender,
+    options?: TelemetryShutdownOptions,
+  ): Promise<void> {
+    this.assertReusable(appender);
+    const active = this.appenders.includes(appender);
+    const previous = this.appenders.filter((candidate) => candidate !== appender);
+    const pendingEvents: PendingTelemetryEvent[] = [];
+    this.pendingEvents = pendingEvents;
+    this.appenders = [];
+    await Promise.all(previous.map((candidate) => this.retireAppender(candidate, options)));
+    if (active) {
+      if (previous.length > 0) {
+        await this.invokeAppender(() => appender.recover?.());
+      }
+    } else {
+      this.startAppender(appender);
+    }
+    if (!this.registrations.has(appender)) this.createRegistration(appender);
+    this.appenders = [appender];
+    for (const pending of pendingEvents) {
+      this.trackAppender(appender, pending.event, pending.properties);
+    }
+    if (this.pendingEvents === pendingEvents) this.pendingEvents = null;
   }
 
   setEnabled(enabled: boolean): void {
@@ -124,6 +150,8 @@ export class TelemetryService implements ITelemetryService {
   }
 
   async flush(): Promise<void> {
+    const transition = this.appenderTransition;
+    if (transition !== null) await transition;
     await Promise.all(
       this.appenders.map((appender) => this.invokeAppender(() => appender.flush?.())),
     );
@@ -131,18 +159,44 @@ export class TelemetryService implements ITelemetryService {
 
   shutdown(options?: TelemetryShutdownOptions): Promise<void> {
     if (this.shutdownPromise === null) {
-      const appenders = new Set([...this.appenders, ...this.retirements.keys()]);
-      this.appenders = [];
-      for (const appender of appenders) {
-        void this.retireAppender(appender, options);
-      }
-      this.shutdownPromise = Promise.all(this.retirements.values()).then(() => undefined);
+      this.shutdownPromise = this.shutdownAfterTransition(this.appenderTransition, options);
     } else if (options !== undefined) {
-      for (const appender of this.retirements.keys()) {
-        void this.retireAppender(appender, options);
-      }
+      const tighten = (): void => {
+        const appenders = new Set([...this.appenders, ...this.retirements.keys()]);
+        for (const appender of appenders) {
+          void this.retireAppender(appender, options);
+        }
+      };
+      const transition = this.appenderTransition;
+      if (transition === null) tighten();
+      else void transition.then(tighten);
     }
     return this.shutdownPromise;
+  }
+
+  private async shutdownAfterTransition(
+    transition: Promise<void> | null,
+    options?: TelemetryShutdownOptions,
+  ): Promise<void> {
+    if (transition !== null) await transition;
+    const appenders = new Set([...this.appenders, ...this.retirements.keys()]);
+    this.appenders = [];
+    for (const appender of appenders) {
+      void this.retireAppender(appender, options);
+    }
+    await Promise.all(this.retirements.values());
+  }
+
+  private trackAppender(
+    appender: ITelemetryAppender,
+    event: string,
+    properties: TelemetryProperties,
+  ): void {
+    try {
+      appender.track(event, properties);
+    } catch (error) {
+      onUnexpectedError(error);
+    }
   }
 
   private startAppender(appender: ITelemetryAppender): void {

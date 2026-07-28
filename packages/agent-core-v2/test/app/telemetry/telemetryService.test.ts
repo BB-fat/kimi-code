@@ -45,11 +45,7 @@ class CapturingAppender implements ITelemetryAppender {
 
 function telemetryWithAppenders(...appenders: ITelemetryAppender[]): TelemetryService {
   const svc = new TelemetryService();
-  const [first, ...rest] = appenders;
-  if (first !== undefined) {
-    void svc.setAppender(first);
-  }
-  for (const appender of rest) {
+  for (const appender of appenders) {
     svc.addAppender(appender);
   }
   return svc;
@@ -69,10 +65,10 @@ describe('TelemetryService (unit)', () => {
     expect(() => svc.track('evt', { a: 1 })).not.toThrow();
   });
 
-  it('merges bound context into tracked properties', () => {
+  it('merges bound context into tracked properties', async () => {
     const appender = new CapturingAppender();
     const svc = new TelemetryService();
-    void svc.setAppender(appender);
+    await svc.setAppender(appender);
     svc.setContext({ sessionId: 's1' });
     svc.track('turn.start', { agentId: 'main' });
     expect(appender.events[0]).toEqual({
@@ -81,10 +77,10 @@ describe('TelemetryService (unit)', () => {
     });
   });
 
-  it('withContext merges context and shares the appender', () => {
+  it('withContext merges context and shares the appender', async () => {
     const appender = new CapturingAppender();
     const root = new TelemetryService();
-    void root.setAppender(appender);
+    await root.setAppender(appender);
     root.setContext({ sessionId: 's1' });
     const child = root.withContext({ agentId: 'main', turnId: 't1' });
     child.track('tool.call', { name: 'bash' });
@@ -96,10 +92,10 @@ describe('TelemetryService (unit)', () => {
     });
   });
 
-  it('per-call properties override bound context on key collision', () => {
+  it('per-call properties override bound context on key collision', async () => {
     const appender = new CapturingAppender();
     const svc = new TelemetryService();
-    void svc.setAppender(appender);
+    await svc.setAppender(appender);
     svc.setContext({ sessionId: 's1' });
     svc.track('evt', { sessionId: 'override' });
     expect(appender.events[0]?.properties?.['sessionId']).toBe('override');
@@ -238,6 +234,50 @@ describe('TelemetryService (unit)', () => {
     ]);
   });
 
+  it('setAppender holds replacement traffic until previous retirement completes', async () => {
+    const retired = deferred();
+    const lifecycle: string[] = [];
+    const previous: ITelemetryAppender = {
+      track() {},
+      async shutdown() {
+        lifecycle.push('shutdown-started');
+        await retired.promise;
+        lifecycle.push('shutdown-finished');
+      },
+    };
+    const replacement: ITelemetryAppender = {
+      start() {
+        lifecycle.push('replacement-started');
+      },
+      track(event) {
+        lifecycle.push(`replacement-tracked:${event}`);
+      },
+      flush() {
+        lifecycle.push('replacement-flushed');
+      },
+    };
+    const svc = new TelemetryService();
+    await svc.setAppender(previous);
+
+    const replacing = svc.setAppender(replacement);
+    svc.track('during-replacement');
+    const flushing = svc.flush();
+    await Promise.resolve();
+
+    expect(lifecycle).toEqual(['shutdown-started']);
+
+    retired.resolve();
+    await Promise.all([replacing, flushing]);
+
+    expect(lifecycle).toEqual([
+      'shutdown-started',
+      'shutdown-finished',
+      'replacement-started',
+      'replacement-tracked:during-replacement',
+      'replacement-flushed',
+    ]);
+  });
+
   it('setAppender recovers an active replacement after the previous appender retires', async () => {
     const retired = deferred();
     const lifecycle: string[] = [];
@@ -323,12 +363,12 @@ describe('TelemetryService (unit)', () => {
     expect(appender.events).toEqual([{ event: 'sent', properties: { turnId: 't1' } }]);
   });
 
-  it('withContext view follows root appender changes', () => {
+  it('withContext view follows root appender changes', async () => {
     const root = new TelemetryService();
     const child = root.withContext({ agent_id: 'main' });
     const appender = new CapturingAppender();
 
-    void root.setAppender(appender);
+    await root.setAppender(appender);
     child.track('sent');
 
     expect(appender.events).toEqual([{ event: 'sent', properties: { agent_id: 'main' } }]);
@@ -350,6 +390,41 @@ describe('TelemetryService (unit)', () => {
     await svc.shutdown();
     expect(a.shutdownCalls).toBe(1);
     expect(b.shutdownCalls).toBe(1);
+  });
+
+  it('shutdown durably retires a replacement accepted during transition', async () => {
+    const retired = deferred();
+    const lifecycle: string[] = [];
+    const previous: ITelemetryAppender = {
+      track() {},
+      shutdown: () => retired.promise,
+    };
+    const replacement: ITelemetryAppender = {
+      start() {
+        lifecycle.push('replacement-started');
+      },
+      track(event) {
+        lifecycle.push(`replacement-tracked:${event}`);
+      },
+      shutdown() {
+        lifecycle.push('replacement-shutdown');
+      },
+    };
+    const svc = new TelemetryService();
+    await svc.setAppender(previous);
+
+    const replacing = svc.setAppender(replacement);
+    svc.track('before-shutdown');
+    const closing = svc.shutdown();
+    retired.resolve();
+
+    await Promise.all([replacing, closing]);
+
+    expect(lifecycle).toEqual([
+      'replacement-started',
+      'replacement-tracked:before-shutdown',
+      'replacement-shutdown',
+    ]);
   });
 
   it('shutdown forwards one lifecycle budget to every appender', async () => {

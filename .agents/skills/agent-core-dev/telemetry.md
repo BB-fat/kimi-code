@@ -85,7 +85,7 @@ const registration = telemetry.addAppender(createCloudAppender(   // production
 
 `addAppender` starts the appender and returns an `ITelemetryAppenderRegistration`. `registration.dispose()` begins best-effort retirement without waiting; use `await registration.shutdown(options)` when the host must wait until the appender is durably retired. `removeAppender(appender, options)` has the same awaited retirement contract.
 
-`await setAppender(appender, options)` switches fan-out to one appender, durably retires every previous appender, then starts the replacement. If the replacement was already active, its optional `recover()` hook runs after retirement so it can pick up batches handed to the shared spool during the transition. Shutdown is terminal: a retired appender object cannot be registered again.
+`await setAppender(appender, options)` stages new events, durably retires every previous appender, then starts the replacement before releasing those events to it. `flush()` and `shutdown()` join that transition. If the replacement was already active, its optional `recover()` hook runs after retirement so it can pick up batches handed to the shared spool before staged events resume. Shutdown is terminal: a retired appender object cannot be registered again.
 
 `TelemetryService` defaults to `[nullTelemetryAppender]`, so each host owns registration. Kap-server and the experimental v2 CLI register a `CloudAppender` when telemetry is enabled.
 
