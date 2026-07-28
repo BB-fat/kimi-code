@@ -17,20 +17,26 @@
  *   GET    /sessions/{session_id}/warnings     session-level notices
  *
  * The `POST /sessions/{tail}` actions split into two groups. The thin
- * pass-throughs — `fork` / `compact` / `abort` / `archive` / `restore` — call
- * the native v2 services directly (`ISessionLifecycleService.fork` / `archive` / `restore`,
- * `IAgentFullCompactionService.begin`, `IAgentRPCService.cancel`); there is no
- * v1-only projection to centralize, so no adapter is involved. `undo` likewise
- * calls `IAgentConversationUndoService.undo` directly (it throws
+ * pass-throughs — `fork` / `compact` / `abort` / `archive` / `restore` —
+ * resolve the bare id through the v1 ref resolver and delegate to the runtime
+ * session host (M5c, plan §6.3): `IRuntimeSessionHostService.fork` /
+ * `archive`, a resolver-gated ensure-live + un-archive for `restore` (the
+ * legacy `restore` recipe, ownership-agnostic),
+ * `IAgentFullCompactionService.begin`,
+ * `IAgentRPCService.cancel`; there is no v1-only projection to centralize, so
+ * no adapter is involved. `undo` likewise calls
+ * `IAgentConversationUndoService.undo` directly (it throws
  * `session.undo_unavailable` with a structured reason) and only borrows
  * `ISessionLegacyService.status` for the cross-domain status rollup. The
- * `/sessions/{id}/children` endpoints call `ISessionLifecycleService.createChild`
- * and `ISessionIndex.list({ childOf })` directly — the child markers and
- * parent-title default live in the lifecycle, and the child filter lives in the
- * index. Only `POST /sessions/{id}/profile` (`updateProfile`),
+ * `/sessions/{id}/children` endpoints fork through the runtime session host
+ * with the child markers and parent-title default applied at the edge (the
+ * legacy `createChild` recipe) and filter the resolver's cross-runtime list
+ * by the same markers. Only `POST /sessions/{id}/profile` (`updateProfile`),
  * `GET /sessions/{id}/status`, and `GET /sessions/{id}/goal` go through
  * `ISessionLegacyService` (the `agent_config` patch, the status rollup, and the
- * current-goal read hold real cross-domain adaptation);
+ * current-goal read hold real cross-domain adaptation) — after the route has
+ * ensured the session is live through the resolver + runtime open/resume, so
+ * the legacy service's internal lookup always hits the active handle;
  * the route forwards each adapter result verbatim, mirroring v1's thin handler.
  * `create`, `fork`, and child creation publish `event.session.created` on the
  * core event bus, matching v1.
@@ -74,6 +80,8 @@
  */
 
 import {
+  CHILD_SESSION_KIND,
+  CHILD_SESSION_KIND_KEY,
   ErrorCodes,
   IAgentContextMemoryService,
   IAgentProfileService,
@@ -81,22 +89,22 @@ import {
   IAgentFullCompactionService,
   IAgentRPCService,
   IAuthSummaryService,
+  IRuntimeSessionHostService,
   ISessionActivityView,
   ISessionBtwService,
   ISessionContext,
-  ISessionIndex,
   ISessionLifecycleService,
   ISessionMetadata,
   ISessionLegacyService,
   ISessionSecondaryModelWarningService,
   IEventService,
   IWorkspaceAliases,
+  PARENT_SESSION_ID_KEY,
   isError2,
-  Error2,
   toProtocolMessage,
   type ContextMessage,
-  type IAgentScopeHandle,
   type Scope,
+  type SessionDescriptor,
 } from '@moonshot-ai/agent-core-v2';
 import { ErrorCode } from '../protocol/error-codes';
 import { pageResponseSchema } from '../protocol/pagination';
@@ -126,6 +134,11 @@ import {
 import { workspaceIdSchema } from '../protocol/workspace';
 import { z } from 'zod';
 
+import {
+  ensureV1LiveSession,
+  resolveV1LiveSession,
+  v1LiveSessionFailureEnvelope,
+} from '../app/v1Compatibility/v1LiveSession';
 import { createV1WorkspaceSession } from '../app/v1Compatibility/v1WorkspaceSessionAdapter';
 import {
   createV1SessionRefResolver,
@@ -216,8 +229,9 @@ const sessionIdParamSchema = z.object({
 
 // Mirrors v1's children query: id-cursors + page_size + busy. The route
 // projects the live busy fact onto each child and filters the page by it
-// (post-page, matching v1); the child-marker filtering lives in
-// `ISessionIndex.list({ childOf })`, the busy filter stays at the edge.
+// (post-page, matching v1); the child-marker filtering runs over the
+// resolver's cross-runtime list (same markers the index matched), the busy
+// filter stays at the edge.
 const sessionChildrenListQueryCoercion = z
   .object({
     before_id: z.string().min(1).optional(),
@@ -531,6 +545,16 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
     async (req, reply) => {
       try {
         const { session_id } = req.params;
+        // M5c: ensure the session is live through the resolver + runtime
+        // open/resume FIRST (plan §6.3); the legacy service's internal
+        // `lifecycle.resume` below then hits the already-active handle, so
+        // the cross-domain `agent_config` patch and its wire projection run
+        // unchanged.
+        const live = await resolveV1LiveSession(core, session_id);
+        if (live.kind !== 'live') {
+          reply.send(v1LiveSessionFailureEnvelope(live, session_id, req.id));
+          return;
+        }
         const fields = await core.accessor
           .get(ISessionLegacyService)
           .updateProfile(session_id, req.body);
@@ -606,13 +630,21 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
 
         if (parsed.action === 'fork') {
           const body = forkSessionRequestSchema.parse(req.body);
-          // `lifecycle.fork` throws `session.not_found` for an unknown source,
-          // so no explicit existence check is needed here.
-          const handle = await core.accessor.get(ISessionLifecycleService).fork({
-            sourceSessionId: parsed.id,
-            title: body.title,
-            metadata: body.metadata,
-          });
+          // M5c: the bare id resolves through the v1 ref resolver, then the
+          // runtime session host owns the same-runtime fork + target
+          // activation (plan §6.3). An unknown source keeps the current
+          // 40401 ("does not exist") via the resolver mapping — the legacy
+          // `lifecycle.fork` threw `session.not_found` to the same envelope.
+          const source = await createV1SessionRefResolver(core).resolve(parsed.id);
+          if (source.kind !== 'resolved') {
+            reply.send(v1ResolveFailureEnvelope(source, parsed.id, req.id));
+            return;
+          }
+          const forked = await core.accessor.get(IRuntimeSessionHostService).fork(
+            source.resolution.ref,
+            { title: body.title, metadata: body.metadata },
+          );
+          const handle = forked.handle;
           const meta = await handle.accessor.get(ISessionMetadata).read();
           const ctx = handle.accessor.get(ISessionContext);
           const session = toWireSession(
@@ -634,7 +666,12 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
 
         if (parsed.action === 'compact') {
           const body = compactSessionRequestSchema.parse(req.body);
-          const agent = await resolveMainAgent(core, parsed.id);
+          const live = await resolveV1LiveSession(core, parsed.id);
+          if (live.kind !== 'live') {
+            reply.send(v1LiveSessionFailureEnvelope(live, parsed.id, req.id));
+            return;
+          }
+          const agent = await ensureMainAgent(live.handle);
           // `begin` returns false when busy / over the per-turn limit — v1
           // treats that as a silent success. It throws `compaction.unable`
           // when there is no compactable prefix, which propagates.
@@ -648,7 +685,13 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
 
         if (parsed.action === 'undo') {
           const body = undoSessionRequestSchema.parse(req.body);
-          const agent = await resolveMainAgent(core, parsed.id);
+          // M5c: live through the resolver + runtime open/resume (plan §6.3).
+          const live = await resolveV1LiveSession(core, parsed.id);
+          if (live.kind !== 'live') {
+            reply.send(v1LiveSessionFailureEnvelope(live, parsed.id, req.id));
+            return;
+          }
+          const agent = await ensureMainAgent(live.handle);
           // The conversation undo service throws `session.undo_unavailable` (with a
           // structured `reason`) when fewer than `count` turns may be cut;
           // it quiesces the loop/compaction first, so the post-undo read
@@ -656,8 +699,11 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
           await agent.accessor.get(IAgentConversationUndoService).undo(body.count);
           const history = agent.accessor.get(IAgentContextMemoryService).get();
           requestLog(req)?.info({ session_id: parsed.id, action: 'undo' }, 'session action completed');
-          const [summary, status] = await Promise.all([
-            core.accessor.get(ISessionIndex).get(parsed.id),
+          // `createdAt` comes from the live session's own metadata document
+          // (the same `state.json` the index summary read pre-migration); the
+          // status rollup hits the already-active handle.
+          const [meta, status] = await Promise.all([
+            live.handle.accessor.get(ISessionMetadata).read(),
             legacy.status(parsed.id),
           ]);
           reply.send(
@@ -665,7 +711,7 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
               {
                 messages: pageUndoMessages(
                   parsed.id,
-                  summary?.createdAt ?? 0,
+                  meta.createdAt,
                   history,
                   body.page_size,
                 ),
@@ -678,7 +724,12 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
         }
 
         if (parsed.action === 'abort') {
-          const agent = await resolveMainAgent(core, parsed.id);
+          const live = await resolveV1LiveSession(core, parsed.id);
+          if (live.kind !== 'live') {
+            reply.send(v1LiveSessionFailureEnvelope(live, parsed.id, req.id));
+            return;
+          }
+          const agent = await ensureMainAgent(live.handle);
           // No turnId → cancel whatever turn is active; a safe no-op when idle.
           // v1 always reports success once the session exists.
           await agent.accessor.get(IAgentRPCService).cancel({});
@@ -688,37 +739,41 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
         }
 
         if (parsed.action === 'btw') {
-          // `resume` (not `get`) so a freshly-opened cold session can start a
-          // side-channel agent; matches v1's `startBtw` which resumes first.
-          const session = await core.accessor.get(ISessionLifecycleService).resume(parsed.id);
-          if (session === undefined) {
-            throw new Error2(
-              ErrorCodes.SESSION_NOT_FOUND,
-              `session ${parsed.id} does not exist`,
-            );
+          // Live through the resolver + runtime open/resume (M5c, plan §6.3):
+          // a freshly-opened cold session can start a side-channel agent;
+          // matches v1's `startBtw` which resumes first.
+          const live = await resolveV1LiveSession(core, parsed.id);
+          if (live.kind !== 'live') {
+            reply.send(v1LiveSessionFailureEnvelope(live, parsed.id, req.id));
+            return;
           }
           await core.accessor.get(IAuthSummaryService).ensureReady();
-          const agentId = await session.accessor.get(ISessionBtwService).start();
+          const agentId = await live.handle.accessor.get(ISessionBtwService).start();
           reply.send(okEnvelope({ agent_id: agentId }, req.id));
           return;
         }
 
         if (parsed.action === 'restore') {
-          // M5a (plan §6.3): the path and the live restore behavior stay; the
-          // bare id is resolved through the v1 ref resolver first so an
-          // ambiguous or unreachable session fails with the frozen mapping
-          // instead of being restored by guesswork. No new restore action.
+          // M5c (plan §6.3/§0.3): the path and the live restore behavior
+          // stay; the bare id is resolved through the v1 ref resolver first
+          // so an ambiguous or unreachable session fails with the frozen
+          // mapping, then the session is ensured live through the RUNTIME
+          // open/resume and un-archived — the legacy `restore` recipe
+          // (resume + clear the flag), ownership-agnostic so an already-live
+          // session is never double-activated. No new restore action.
           const resolution = await createV1SessionRefResolver(core).resolve(parsed.id);
           if (resolution.kind !== 'resolved') {
             reply.send(v1ResolveFailureEnvelope(resolution, parsed.id, req.id));
             return;
           }
-          const restored = await core.accessor.get(ISessionLifecycleService).restore(parsed.id);
-          if (restored === undefined) {
-            throw new Error2(ErrorCodes.SESSION_NOT_FOUND, `session ${parsed.id} does not exist`);
+          const live = await ensureV1LiveSession(core, resolution.resolution);
+          if (live.kind !== 'live') {
+            reply.send(v1LiveSessionFailureEnvelope(live, parsed.id, req.id));
+            return;
           }
-          const meta = await restored.accessor.get(ISessionMetadata).read();
-          const ctx = restored.accessor.get(ISessionContext);
+          await live.handle.accessor.get(ISessionMetadata).setArchived(false);
+          const meta = await live.handle.accessor.get(ISessionMetadata).read();
+          const ctx = live.handle.accessor.get(ISessionContext);
           const session = toWireSession(
             { ...meta, workspaceId: ctx.workspaceId },
             ctx.cwd,
@@ -729,14 +784,16 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
           return;
         }
 
-        // archive — `resume` (not `get`) so archiving a freshly-opened cold
-        // session still works; `resume` returns undefined only when the session
-        // is unknown or its workspace is gone, reported as `session.not_found`.
-        const archived = await core.accessor.get(ISessionLifecycleService).resume(parsed.id);
-        if (archived === undefined) {
-          throw new Error2(ErrorCodes.SESSION_NOT_FOUND, `session ${parsed.id} does not exist`);
+        // archive — ensure live through the resolver + runtime open/resume
+        // (M5c, plan §6.3) so archiving a freshly-opened cold session still
+        // works, then let the runtime session host archive (live-only, same
+        // as the legacy archive).
+        const live = await resolveV1LiveSession(core, parsed.id);
+        if (live.kind !== 'live') {
+          reply.send(v1LiveSessionFailureEnvelope(live, parsed.id, req.id));
+          return;
         }
-        await core.accessor.get(ISessionLifecycleService).archive(parsed.id);
+        await core.accessor.get(IRuntimeSessionHostService).archive(live.resolution.ref);
         requestLog(req)?.info({ session_id: parsed.id, action: 'archive' }, 'session action completed');
         reply.send(okEnvelope({ archived: true }, req.id));
       } catch (error) {
@@ -767,16 +824,14 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
     async (req, reply) => {
       try {
         const { session_id } = req.params;
-        // 404 when the parent is unknown — the live handle wins, otherwise the
-        // v1 ref resolver's cross-runtime probe (a closed parent can still
-        // list children, like v1). Ambiguous/unavailable parents map onto the
-        // frozen resolver envelopes instead of a false "does not exist".
-        if (core.accessor.get(ISessionLifecycleService).get(session_id) === undefined) {
-          const parent = await createV1SessionRefResolver(core).resolve(session_id);
-          if (parent.kind !== 'resolved') {
-            reply.send(v1ResolveFailureEnvelope(parent, session_id, req.id));
-            return;
-          }
+        // 404 when the parent is unknown — the v1 ref resolver's
+        // cross-runtime probe (a closed parent can still list children, like
+        // v1). Ambiguous/unavailable parents map onto the frozen resolver
+        // envelopes instead of a false "does not exist".
+        const parent = await createV1SessionRefResolver(core).resolve(session_id);
+        if (parent.kind !== 'resolved') {
+          reply.send(v1ResolveFailureEnvelope(parent, session_id, req.id));
+          return;
         }
 
         // M5a: the child set comes from the resolver's cross-runtime fan-out,
@@ -873,15 +928,36 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
     async (req, reply) => {
       try {
         const { session_id } = req.params;
-        // `createChild` throws `session.not_found` for an unknown source (via
-        // `fork`), so no explicit existence check is needed here. The child
-        // markers (`parent_session_id` / `child_session_kind`) and the default
-        // `Child: <parent>` title are applied by the lifecycle.
-        const handle = await core.accessor.get(ISessionLifecycleService).createChild({
-          sourceSessionId: session_id,
-          title: req.body.title,
-          metadata: req.body.metadata,
-        });
+        // M5c: resolve the bare id first (an unknown source keeps the
+        // current 40401 — `createChild` threw `session.not_found` via `fork`
+        // to the same envelope), then the runtime session host forks and
+        // activates the child. The child markers (`parent_session_id` /
+        // `child_session_kind`) and the default `Child: <parent>` title are
+        // applied HERE exactly like the legacy `createChild` did.
+        const source = await createV1SessionRefResolver(core).resolve(session_id);
+        if (source.kind !== 'resolved') {
+          reply.send(v1ResolveFailureEnvelope(source, session_id, req.id));
+          return;
+        }
+        // Title default mirrors the legacy priority: the live parent's fresh
+        // metadata first, the persisted descriptor otherwise.
+        const liveParent = core.accessor.get(ISessionLifecycleService).get(session_id);
+        const parentTitle =
+          liveParent !== undefined
+            ? (await liveParent.accessor.get(ISessionMetadata).read()).title
+            : descriptorTitle(source.resolution.descriptor);
+        const forked = await core.accessor.get(IRuntimeSessionHostService).fork(
+          source.resolution.ref,
+          {
+            title: req.body.title ?? `Child: ${parentTitle ?? session_id}`,
+            metadata: {
+              ...req.body.metadata,
+              [PARENT_SESSION_ID_KEY]: session_id,
+              [CHILD_SESSION_KIND_KEY]: CHILD_SESSION_KIND,
+            },
+          },
+        );
+        const handle = forked.handle;
         const meta = await handle.accessor.get(ISessionMetadata).read();
         const ctx = handle.accessor.get(ISessionContext);
         const session = toWireSession(
@@ -921,6 +997,13 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
     async (req, reply) => {
       try {
         const { session_id } = req.params;
+        // M5c: live through the resolver + runtime open/resume (plan §6.3);
+        // the legacy rollup below then reads the already-active handle.
+        const live = await resolveV1LiveSession(core, session_id);
+        if (live.kind !== 'live') {
+          reply.send(v1LiveSessionFailureEnvelope(live, session_id, req.id));
+          return;
+        }
         const status = await core.accessor.get(ISessionLegacyService).status(session_id);
         reply.send(okEnvelope(status, req.id));
       } catch (error) {
@@ -950,6 +1033,12 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
     async (req, reply) => {
       try {
         const { session_id } = req.params;
+        // M5c: live through the resolver + runtime open/resume (plan §6.3).
+        const live = await resolveV1LiveSession(core, session_id);
+        if (live.kind !== 'live') {
+          reply.send(v1LiveSessionFailureEnvelope(live, session_id, req.id));
+          return;
+        }
         const goal = await core.accessor.get(ISessionLegacyService).goal(session_id);
         reply.send(okEnvelope(goal, req.id));
       } catch (error) {
@@ -978,15 +1067,15 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
     },
     async (req, reply) => {
       const { session_id } = req.params;
-      // `resume` (not `get`) so a freshly-opened cold session still computes its
-      // warnings; matches v1's best-effort `resumeSession` before reading them.
-      const session = await core.accessor.get(ISessionLifecycleService).resume(session_id);
-      if (session === undefined) {
-        reply.send(
-          errEnvelope(ErrorCode.SESSION_NOT_FOUND, `session ${session_id} does not exist`, req.id),
-        );
+      // Live through the resolver + runtime open/resume (M5c, plan §6.3) so a
+      // freshly-opened cold session still computes its warnings; matches v1's
+      // best-effort `resumeSession` before reading them.
+      const live = await resolveV1LiveSession(core, session_id);
+      if (live.kind !== 'live') {
+        reply.send(v1LiveSessionFailureEnvelope(live, session_id, req.id));
         return;
       }
+      const session = live.handle;
       try {
         // Surface v2 notices in the v1 wire shape. The agents-md warning is
         // computed (and cached) by `IAgentProfileService` when the main agent
@@ -1090,6 +1179,11 @@ export interface SessionFacts {
  * reason is the main agent's latest turn outcome, `blocked` folds into
  * `failed`). A cold session (no live handle) is not busy and carries no
  * outcome.
+ *
+ * The lookup goes through `ISessionLifecycleService` — the process-wide live
+ * view that ALSO observes runtime-activated sessions (M5c
+ * `trackActivated`), so facts stay accurate whichever path activated the
+ * session.
  */
 export function resolveSessionFacts(core: Scope, sessionId: string): SessionFacts {
   const handle = core.accessor.get(ISessionLifecycleService).get(sessionId);
@@ -1103,26 +1197,17 @@ export function resolveSessionFacts(core: Scope, sessionId: string): SessionFact
   return handle.accessor.get(ISessionActivityView).state();
 }
 
-/**
- * Resume the session (cold-load if needed) and resolve its main agent, throwing
- * `session.not_found` when the session is unknown or its workspace is gone.
- * Shared by the `compact` / `abort` actions, which both operate on the main
- * agent but carry no v1-specific projection worth keeping in
- * `ISessionLegacyService`.
- */
-async function resolveMainAgent(core: Scope, sessionId: string): Promise<IAgentScopeHandle> {
-  const session = await core.accessor.get(ISessionLifecycleService).resume(sessionId);
-  if (session === undefined) {
-    throw new Error2(ErrorCodes.SESSION_NOT_FOUND, `session ${sessionId} does not exist`);
-  }
-  return ensureMainAgent(session);
-}
-
 /** Trim a compaction instruction; treat an empty/blank value as absent. */
 function normalizeOptional(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
   const trimmed = value.trim();
   return trimmed.length === 0 ? undefined : trimmed;
+}
+
+/** The persisted `title` of a runtime session descriptor, when it is a string. */
+function descriptorTitle(descriptor: SessionDescriptor): string | undefined {
+  const title = descriptor.metadata['title'];
+  return typeof title === 'string' && title.length > 0 ? title : undefined;
 }
 
 /** v1 `:undo` message page-size clamp (`packages/agent-core/.../sessionService.ts`). */

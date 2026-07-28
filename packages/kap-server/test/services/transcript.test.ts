@@ -14,6 +14,7 @@ import {
   IAgentLifecycleService,
   IAgentLoopService,
   IEventBus,
+  IRuntimeSessionHostService,
   ISessionIndex,
   ISessionInteractionService,
   ISessionLifecycleService,
@@ -1477,6 +1478,12 @@ describe('AgentTranscriptProjector', () => {
         core: {
           accessor: {
             get: (token: unknown) => {
+              if (token === IRuntimeSessionHostService) {
+                return {
+                  onDidCloseSession: () => ({ dispose: () => undefined }),
+                  onDidArchiveSession: () => ({ dispose: () => undefined }),
+                };
+              }
               if (token === ISessionLifecycleService) {
                 return {
                   onDidCloseSession: () => ({ dispose: () => undefined }),
@@ -1577,6 +1584,12 @@ describe('AgentTranscriptProjector', () => {
         core: {
           accessor: {
             get: (token: unknown) => {
+              if (token === IRuntimeSessionHostService) {
+                return {
+                  onDidCloseSession: () => ({ dispose: () => undefined }),
+                  onDidArchiveSession: () => ({ dispose: () => undefined }),
+                };
+              }
               if (token === ISessionLifecycleService) {
                 return {
                   onDidCloseSession: () => ({ dispose: () => undefined }),
@@ -1892,6 +1905,12 @@ describe('bindSessionTranscript', () => {
     return {
       accessor: {
         get: (token: unknown) => {
+          if (token === IRuntimeSessionHostService) {
+            return {
+              onDidCloseSession: () => ({ dispose: () => undefined }),
+              onDidArchiveSession: () => ({ dispose: () => undefined }),
+            };
+          }
           if (token === ISessionLifecycleService) {
             return {
               onDidCloseSession: () => ({ dispose: () => undefined }),
@@ -2224,6 +2243,67 @@ describe('bindSessionTranscript', () => {
         prompt: 'live hi',
       });
       service.dropSession('s1');
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it('drops the live store on the runtime session host close/archive events (M5c)', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'transcript-host-events-'));
+    try {
+      // Real listener registries on the host stub — after M5c the eager
+      // cleanup subscribes to the runtime session host's lifecycle events,
+      // not the legacy lifecycle's.
+      const closeListeners = new Set<(event: { ref: { sessionId: string } }) => void>();
+      const archiveListeners = new Set<(event: { ref: { sessionId: string } }) => void>();
+      const hostStub = {
+        onDidCloseSession: (listener: (event: { ref: { sessionId: string } }) => void) => {
+          closeListeners.add(listener);
+          return { dispose: () => closeListeners.delete(listener) };
+        },
+        onDidArchiveSession: (listener: (event: { ref: { sessionId: string } }) => void) => {
+          archiveListeners.add(listener);
+          return { dispose: () => archiveListeners.delete(listener) };
+        },
+      };
+      const agents = new FakeAgents();
+      const interactions = new SessionInteractionService(new TestSessionStateService());
+      let liveHandle: ISessionScopeHandle | undefined = fakeSession(interactions, agents);
+      const core = {
+        accessor: {
+          get: (token: unknown) => {
+            if (token === IRuntimeSessionHostService) return hostStub;
+            if (token === ISessionLifecycleService) return { get: () => liveHandle };
+            return undefined;
+          },
+        },
+      } as unknown as Scope;
+      const service = new TranscriptService({
+        resolver: fakeRuntimeHarness(home).resolver,
+        core,
+      });
+
+      const first = service.forSessionLive('s1');
+      expect(first).toBeDefined();
+
+      // The host's close event drops the entry EAGERLY: the next lookup
+      // rebuilds a brand-new store instead of serving the stale one — the
+      // session is still live here, so a re-check alone would have kept it.
+      for (const listener of closeListeners) listener({ ref: { sessionId: 's1' } });
+      const second = service.forSessionLive('s1');
+      expect(second).toBeDefined();
+      expect(second).not.toBe(first);
+
+      // Same for archive.
+      for (const listener of archiveListeners) listener({ ref: { sessionId: 's1' } });
+      const third = service.forSessionLive('s1');
+      expect(third).toBeDefined();
+      expect(third).not.toBe(second);
+
+      // And once the session is gone from the live lookup, reads report cold.
+      liveHandle = undefined;
+      for (const listener of closeListeners) listener({ ref: { sessionId: 's1' } });
+      expect(service.forSessionLive('s1')).toBeUndefined();
     } finally {
       await rm(home, { recursive: true, force: true });
     }

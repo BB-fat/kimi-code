@@ -24,6 +24,7 @@ import {
   IAgentUsageService,
   IEventBus,
   IEventService,
+  IRuntimeSessionHostService,
   ISessionActivityView,
   ISessionInteractionService,
   ISessionLifecycleService,
@@ -352,6 +353,13 @@ function makeCore(
   const accessor = {
     get(token: unknown): unknown {
       if (token === IEventService) return eventBus;
+      if (token === IRuntimeSessionHostService) {
+        return {
+          // Inert host lifecycle events (TranscriptService subscribes on construction).
+          onDidCloseSession: () => ({ dispose: () => {} }),
+          onDidArchiveSession: () => ({ dispose: () => {} }),
+        };
+      }
       if (token === ISessionLifecycleService) {
         return {
           // Inert lifecycle events (TranscriptService subscribes on construction).

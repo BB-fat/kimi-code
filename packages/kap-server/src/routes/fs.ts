@@ -33,6 +33,10 @@ import {
 } from '@moonshot-ai/agent-core-v2/session/sessionFs/fs';
 import { z } from 'zod';
 
+import {
+  resolveV1LiveSession,
+  v1LiveSessionFailureEnvelope,
+} from '../app/v1Compatibility/v1LiveSession';
 import { errEnvelope, okEnvelope } from '../envelope';
 import {
   launchDetached,
@@ -100,6 +104,8 @@ type FsAction = (typeof FS_ACTIONS)[number];
 const FS_TAIL_PREFIX = 'fs:';
 
 function resolveFs(core: Scope, sessionId: string): ISessionFsService {
+  // The route ensured the session is live (resolver + runtime open/resume);
+  // the process-wide lookup observes runtime-activated sessions (M5c).
   const session = core.accessor.get(ISessionLifecycleService).get(sessionId);
   if (session === undefined) {
     throw new Error2(ErrorCodes.SESSION_NOT_FOUND, `session ${sessionId} does not exist`);
@@ -150,15 +156,13 @@ export function registerFsRoutes(app: FsRouteHost, core: Scope): void {
       }
       const fsAction = action as FsAction;
 
-      // Cold-load a persisted-but-not-live session so fs actions (which only
-      // need the work dir) do not 404 on a freshly-opened session. Matches v1,
-      // which reads the persisted cwd. `resume` returns undefined only when the
-      // session is unknown or its workspace is gone.
-      const session = await core.accessor.get(ISessionLifecycleService).resume(session_id);
-      if (session === undefined) {
-        reply.send(
-          errEnvelope(ErrorCode.SESSION_NOT_FOUND, `session ${session_id} does not exist`, req.id),
-        );
+      // Cold-load a persisted-but-not-live session through the v1 ref
+      // resolver + runtime open/resume (M5c, plan §6.3) so fs actions (which
+      // only need the work dir) do not 404 on a freshly-opened session.
+      // Matches v1, which reads the persisted cwd.
+      const live = await resolveV1LiveSession(core, session_id);
+      if (live.kind !== 'live') {
+        reply.send(v1LiveSessionFailureEnvelope(live, session_id, req.id));
         return;
       }
 
@@ -249,13 +253,12 @@ export function registerFsRoutes(app: FsRouteHost, core: Scope): void {
         return;
       }
 
-      // Cold-load so a freshly-opened (persisted but not live) session can still
-      // serve downloads; `resume` only returns undefined for unknown / workspace-gone.
-      const session = await core.accessor.get(ISessionLifecycleService).resume(session_id);
-      if (session === undefined) {
-        reply.send(
-          errEnvelope(ErrorCode.SESSION_NOT_FOUND, `session ${session_id} does not exist`, req.id),
-        );
+      // Cold-load through the v1 ref resolver + runtime open/resume (M5c) so
+      // a freshly-opened (persisted but not live) session can still serve
+      // downloads.
+      const live = await resolveV1LiveSession(core, session_id);
+      if (live.kind !== 'live') {
+        reply.send(v1LiveSessionFailureEnvelope(live, session_id, req.id));
         return;
       }
 

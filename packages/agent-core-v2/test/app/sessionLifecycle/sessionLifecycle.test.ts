@@ -7,6 +7,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { Disposable } from '#/_base/di/lifecycle';
 import {
   type IAgentScopeHandle,
+  type ISessionScopeHandle,
   LifecycleScope,
   ScopeActivation,
   _clearScopedRegistryForTests,
@@ -502,6 +503,37 @@ describe('SessionLifecycleService', () => {
 
     await svc.close('s1');
     expect(svc.get('s1')).toBeUndefined();
+  });
+
+  it('observes externally activated sessions in the live lookup (M5c trackActivated bridge)', async () => {
+    const svc = build();
+    const external = {
+      id: 'ext-1',
+      kind: LifecycleScope.Session,
+      accessor: { get: () => undefined },
+      dispose: () => undefined,
+    } as unknown as ISessionScopeHandle;
+
+    expect(svc.get('ext-1')).toBeUndefined();
+    const tracking = svc.trackActivated('ext-1', external);
+    // get / list / resume all observe the tracked session — a resume NEVER
+    // re-materializes it through the legacy path.
+    expect(svc.get('ext-1')).toBe(external);
+    expect(svc.list()).toEqual([external]);
+    await expect(svc.resume('ext-1')).resolves.toBe(external);
+
+    // Ownership stays with the registrar: close/archive (own-map operations)
+    // are no-ops for a tracked session.
+    await svc.close('ext-1');
+    await svc.archive('ext-1');
+    expect(svc.get('ext-1')).toBe(external);
+
+    // Detach is idempotent and identity-checked; afterwards the session is
+    // gone from every lookup.
+    tracking.dispose();
+    tracking.dispose();
+    expect(svc.get('ext-1')).toBeUndefined();
+    expect(svc.list()).toEqual([]);
   });
 
   it('create seeds identity and materializes metadata', async () => {

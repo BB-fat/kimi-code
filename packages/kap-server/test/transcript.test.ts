@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import {
   IAgentContextMemoryService,
   IAgentLifecycleService,
+  IRuntimeSessionHostService,
   IWireService,
   IEventBus,
   ISessionInteractionService,
@@ -27,6 +28,7 @@ import {
 } from '@moonshot-ai/agent-core-v2';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { createV1SessionRefResolver } from '../src/app/v1Compatibility/v1SessionRefResolver';
 import { type RunningServer, startServer } from '../src/start';
 import { authHeaders } from './helpers/auth';
 
@@ -201,6 +203,19 @@ describe('server-v2 /api/v1/sessions/{sid}/transcript', () => {
     if (session.accessor.get(IAgentLifecycleService).get('main') === undefined) {
       await session.accessor.get(IAgentLifecycleService).create({ agentId: 'main' });
     }
+  }
+
+  /**
+   * Force a session cold (the post-restart state): close it through its
+   * OWNER — the runtime session host, whose sessions are activated via
+   * `host.create` (M5c) — resolved through the production v1 resolver.
+   */
+  async function closeLiveSession(sessionId: string): Promise<void> {
+    const resolved = await createV1SessionRefResolver(server!.core).resolve(sessionId);
+    if (resolved.kind !== 'resolved') {
+      throw new Error(`cannot resolve session ${sessionId} (${resolved.kind})`);
+    }
+    await server!.core.accessor.get(IRuntimeSessionHostService).close(resolved.resolution.ref);
   }
 
   function mainAgentBus(sessionId: string): IEventBus {
@@ -708,7 +723,7 @@ describe('server-v2 /api/v1/sessions/{sid}/transcript', () => {
     bus.publish(serverEvent({ type: 'turn.started', turnId: 1, origin: { kind: 'user' } }));
     bus.publish(serverEvent({ type: 'turn.ended', turnId: 1, reason: 'completed' }));
 
-    await server!.core.accessor.get(ISessionLifecycleService).close(id);
+    await closeLiveSession(id);
 
     const { body } = await getJson<TranscriptContract>(`/api/v1/sessions/${id}/transcript?agent_id=main`);
     expect(body.code).toBe(0);

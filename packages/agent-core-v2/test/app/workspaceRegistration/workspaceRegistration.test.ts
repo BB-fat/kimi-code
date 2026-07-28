@@ -26,6 +26,11 @@ import type { IWorkspaceService } from '#/app/workspace/workspace';
 import type { WorkspaceRuntimeRef } from '#/app/workspaceRegistration/workspaceRuntimeManager';
 import { WorkspaceRuntimeManagerService } from '#/app/workspaceRegistration/workspaceRuntimeManagerService';
 import { WorkspaceSessionServiceImpl } from '#/app/workspaceRegistration/workspaceSessionServiceImpl';
+import { HostEnvironmentService } from '#/os/backends/node-local/hostEnvironmentService';
+import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
+import { HostFsWatchService } from '#/os/backends/node-local/hostFsWatchService';
+import { HostProcessService } from '#/os/backends/node-local/hostProcessService';
+import { HostTerminalService } from '#/os/backends/node-local/hostTerminalService';
 import { jsonDocumentCodec } from '#/persistence/backends/node-fs/atomicDocumentStore';
 import { FileStorageService } from '#/persistence/backends/node-fs/fileStorageService';
 
@@ -86,6 +91,11 @@ async function makeEnv(options?: { catalog?: { id: string; root: string }[] }): 
     { homeDir } as IBootstrapService,
     new FileStorageService(homeDir, 0o700, 0o600),
     stubWorkspaceService(options?.catalog ?? []),
+    new HostFileSystem(),
+    new HostProcessService(),
+    new HostTerminalService(),
+    new HostFsWatchService(),
+    new HostEnvironmentService(),
   );
   const facade = new WorkspaceSessionServiceImpl(manager);
   const remoteProvider = new FakeRemoteWorkspaceProvider();

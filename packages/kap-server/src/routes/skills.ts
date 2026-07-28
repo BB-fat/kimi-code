@@ -25,12 +25,12 @@
  * are exported for exactly this purpose.
  *
  * **Activation gate**: by convention the session endpoints are only valid for
- * an *activated* session — one that is live in `ISessionLifecycleService`. When
- * the session is not in the live map we still answer `40401 session.not_found`
- * (the only session error code on the v1 wire contract), but we enrich the
- * message:
- *   - persisted in `ISessionIndex` but not live → `"... is not activated, you need to activate it first"`;
- *   - not in the index at all                  → `"... does not exist"`.
+ * a session that can be served live. M5c: the bare id resolves through the v1
+ * ref resolver and the session is cold-loaded through the runtime open/resume
+ * when needed (matching v1's `resumeSession`). Failures answer the frozen
+ * envelopes: `40401 session.not_found` for an unknown id (the only session
+ * error code on the v1 wire contract), `50001` for an ambiguous or
+ * unavailable one (plan §1.3).
  *
  * **Scope split**: v1 resolves a single `ISkillService` for every verb. v2
  * splits the domain, so the route borrows different scoped services per verb:
@@ -77,8 +77,6 @@ import {
   IConfigService,
   IEventService,
   IPluginService,
-  ISessionIndex,
-  ISessionLifecycleService,
   ISessionMetadata,
   ISessionSkillCatalog,
   ISkillCatalogRuntimeOptions,
@@ -102,6 +100,10 @@ import {
 import { z } from 'zod';
 
 import { errEnvelope, okEnvelope } from '../envelope';
+import {
+  resolveV1LiveSession,
+  v1LiveSessionFailureEnvelope,
+} from '../app/v1Compatibility/v1LiveSession';
 import { requestLog } from '../lib/requestLog';
 import { defineRoute } from '../middleware/defineRoute';
 import { ensureMainAgent } from '../transport/mainAgent';
@@ -148,28 +150,21 @@ type ResolvedSession =
   | { readonly envelope: ReturnType<typeof errEnvelope> };
 
 /**
- * Resolve the session only when it is activated (live in the lifecycle map).
- * Otherwise build a `40401` envelope whose message distinguishes "not
- * activated" (persisted but not live) from "does not exist" (not persisted).
+ * Resolve the session only when it can be served live: the v1 ref resolver
+ * probes the owner runtime, then the runtime open/resume cold-loads it
+ * (M5c, plan §6.3) — listing/activating skills on a freshly-opened cold
+ * session works instead of reporting "not activated", matching v1's
+ * `resumeSession` in SkillService. An unknown id keeps the 40401 "does not
+ * exist" envelope; an ambiguous/unavailable one maps onto the frozen 50001.
  */
 async function resolveActivatedSession(
   core: Scope,
   sessionId: string,
   requestId: string,
 ): Promise<ResolvedSession> {
-  // `resume` (not `get`) so listing/activating skills on a freshly-opened cold
-  // session cold-loads it instead of reporting "not activated"; matches v1's
-  // `resumeSession` in SkillService. `resume` returns undefined only when the
-  // session is unknown or its workspace is gone.
-  const handle = await core.accessor.get(ISessionLifecycleService).resume(sessionId);
-  if (handle !== undefined) return { handle };
-
-  const summary = await core.accessor.get(ISessionIndex).get(sessionId);
-  const msg =
-    summary === undefined
-      ? `session ${sessionId} does not exist`
-      : `session ${sessionId} is not activated, you need to activate it first`;
-  return { envelope: errEnvelope(ErrorCode.SESSION_NOT_FOUND, msg, requestId) };
+  const live = await resolveV1LiveSession(core, sessionId);
+  if (live.kind === 'live') return { handle: live.handle };
+  return { envelope: v1LiveSessionFailureEnvelope(live, sessionId, requestId) };
 }
 
 export function registerSkillsRoutes(app: SkillsRouteHost, core: Scope): void {

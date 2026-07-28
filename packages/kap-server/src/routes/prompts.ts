@@ -30,7 +30,6 @@ import {
   type PromptHandle,
   type PromptQueueSnapshot,
   ISessionContext,
-  ISessionLifecycleService,
   ITelemetryService,
   applyPromptMetadataUpdate,
   buildImageCompressionCaption,
@@ -65,6 +64,10 @@ import {
 import { z } from 'zod';
 
 import { errEnvelope, okEnvelope } from '../envelope';
+import {
+  resolveV1LiveSession,
+  v1LiveSessionFailureEnvelope,
+} from '../app/v1Compatibility/v1LiveSession';
 import { requestLog } from '../lib/requestLog';
 import { defineRoute } from '../middleware/defineRoute';
 import { ensureMainAgent, MAIN_AGENT_ID } from '../transport/mainAgent';
@@ -104,22 +107,6 @@ const VIDEO_EXT_BY_MIME: Record<string, string> = {
   'video/x-matroska': '.mkv',
   'video/mpeg': '.mpeg',
 };
-
-async function resolveSession(core: Scope, sessionId: string): Promise<ISessionScopeHandle> {
-  // `resume` (not `get`) so a persisted-but-cold session — created by a previous
-  // process, by v1, or closed in this one — is loaded from disk instead of
-  // being reported as `session.not_found`. Mirrors the snapshot route. Returns
-  // `undefined` only when the session is unknown or its workspace is gone.
-  const session = await core.accessor.get(ISessionLifecycleService).resume(sessionId);
-  if (session === undefined) {
-    throw new Error2('session.not_found', `session ${sessionId} does not exist`);
-  }
-  return session;
-}
-
-async function resolvePrompt(core: Scope, sessionId: string, agentId?: string) {
-  return resolvePromptFromSession(await resolveSession(core, sessionId), agentId);
-}
 
 async function resolvePromptFromSession(session: ISessionScopeHandle, agentId?: string) {
   // A prompt may target a forked side-channel agent (e.g. `/btw`) via
@@ -214,7 +201,14 @@ export function registerPromptsRoutes(app: PromptRouteHost, core: Scope): void {
     async (req, reply) => {
       try {
         const { session_id } = req.params;
-        const result = projectPromptList((await resolvePrompt(core, session_id)).prompt.list());
+        const live = await resolveV1LiveSession(core, session_id);
+        if (live.kind !== 'live') {
+          reply.send(v1LiveSessionFailureEnvelope(live, session_id, req.id));
+          return;
+        }
+        const result = projectPromptList(
+          (await resolvePromptFromSession(live.handle)).prompt.list(),
+        );
         reply.send(okEnvelope(result, req.id));
       } catch (error) {
         sendMappedError(reply, req, error);
@@ -250,7 +244,14 @@ export function registerPromptsRoutes(app: PromptRouteHost, core: Scope): void {
         // mutated: a bad `file_id` must not create the agent, register `main`
         // in session metadata, or touch the session's controls.
         await assertPromptFileRefs(req.body, core.accessor.get(IFileService));
-        const resolved = await resolvePrompt(core, session_id, req.body.agent_id);
+        // M5c: live through the resolver + runtime open/resume (plan §6.3).
+        const live = await resolveV1LiveSession(core, session_id);
+        if (live.kind !== 'live') {
+          reply.send(v1LiveSessionFailureEnvelope(live, session_id, req.id));
+          return;
+        }
+        const session = live.handle;
+        const resolved = await resolvePromptFromSession(session, req.body.agent_id);
         await resolved.auth.ensureReady();
 
         // Media resolution runs BEFORE any control mutation, so a failed
@@ -266,16 +267,10 @@ export function registerPromptsRoutes(app: PromptRouteHost, core: Scope): void {
           core.accessor.get(IBootstrapService).cacheDir,
           {
             telemetry,
-            resolveOriginalsDir: async () => {
-              const session = await core.accessor.get(ISessionLifecycleService).resume(session_id);
-              if (session === undefined) return undefined;
-              return sessionMediaOriginalsDir(session.accessor.get(ISessionContext).sessionDir);
-            },
-            resolveAttachmentsDir: async () => {
-              const session = await core.accessor.get(ISessionLifecycleService).resume(session_id);
-              if (session === undefined) return undefined;
-              return join(session.accessor.get(ISessionContext).sessionDir, 'attachments');
-            },
+            resolveOriginalsDir: async () =>
+              sessionMediaOriginalsDir(session.accessor.get(ISessionContext).sessionDir),
+            resolveAttachmentsDir: async () =>
+              join(session.accessor.get(ISessionContext).sessionDir, 'attachments'),
           },
         );
 
@@ -307,7 +302,6 @@ export function registerPromptsRoutes(app: PromptRouteHost, core: Scope): void {
           }
         }
         const parts = contentToCoreParts(resolvedBody.content);
-        const session = await resolveSession(core, session_id);
         await applyPromptMetadataUpdate({
           metadata: session.accessor.get(ISessionMetadata),
           eventService: core.accessor.get(IEventService),
@@ -346,7 +340,12 @@ export function registerPromptsRoutes(app: PromptRouteHost, core: Scope): void {
     async (req, reply) => {
       try {
         const { session_id } = req.params;
-        const resolved = await resolvePrompt(core, session_id);
+        const live = await resolveV1LiveSession(core, session_id);
+        if (live.kind !== 'live') {
+          reply.send(v1LiveSessionFailureEnvelope(live, session_id, req.id));
+          return;
+        }
+        const resolved = await resolvePromptFromSession(live.handle);
         await resolved.prompt.steer(req.body.prompt_ids);
         reply.send(okEnvelope({ steered: true, prompt_ids: [...req.body.prompt_ids] }, req.id));
       } catch (error) {
@@ -384,7 +383,12 @@ export function registerPromptsRoutes(app: PromptRouteHost, core: Scope): void {
           reply.send(errEnvelope(ErrorCode.VALIDATION_FAILED, message, req.id));
           return;
         }
-        const resolved = await resolvePrompt(core, session_id);
+        const live = await resolveV1LiveSession(core, session_id);
+        if (live.kind !== 'live') {
+          reply.send(v1LiveSessionFailureEnvelope(live, session_id, req.id));
+          return;
+        }
+        const resolved = await resolvePromptFromSession(live.handle);
         if (parsed.action === 'abort') {
           resolved.prompt.abort(parsed.id);
           requestLog(req)?.info({ session_id, prompt_id: parsed.id }, 'prompt aborted');

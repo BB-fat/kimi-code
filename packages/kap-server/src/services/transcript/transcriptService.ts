@@ -32,10 +32,10 @@
  * `foldWireRecordFacts` — best-effort fidelity. A live flush is visible to
  * the cold reader immediately (same files, same or higher revision).
  *
- * Lifecycle: entries are dropped when the session closes or archives
- * (`onDidCloseSession` / `onDidArchiveSession`, plus a lifecycle re-check on
- * the cached-entry path), so later reads fall through to the cold rebuild
- * instead of serving a stale store.
+ * Lifecycle: entries are dropped when the session closes or archives (the
+ * runtime session host's `onDidCloseSession` / `onDidArchiveSession`, M5c,
+ * plus a live-lookup re-check on the cached-entry path), so later reads fall
+ * through to the cold rebuild instead of serving a stale store.
  *
  * Post-turn heal: a projector that attached mid-turn (or a backfill that ran
  * before the request's content was flushed to `wire.jsonl`) holds only the
@@ -46,6 +46,7 @@
 
 import {
   IAgentLifecycleService,
+  IRuntimeSessionHostService,
   ISessionLifecycleService,
   ISessionMetadata,
   IAgentLoopService,
@@ -132,10 +133,14 @@ export class TranscriptService {
 
   constructor(private readonly deps: TranscriptServiceDeps) {
     // Live entries must not outlive their session: once it closes or archives,
-    // reads should fall through to the cold rebuild from disk.
-    const lifecycle = deps.core.accessor.get(ISessionLifecycleService);
-    lifecycle.onDidCloseSession(({ sessionId }) => this.dropSession(sessionId));
-    lifecycle.onDidArchiveSession(({ sessionId }) => this.dropSession(sessionId));
+    // reads should fall through to the cold rebuild from disk. M5c: sessions
+    // are activated through the runtime session host, so the eager cleanup
+    // rides the HOST's lifecycle events; the `forSessionLive` re-check (via
+    // the process-wide live lookup, which also observes legacy-activated
+    // sessions) remains the safety net for any other activation path.
+    const host = deps.core.accessor.get(IRuntimeSessionHostService);
+    host.onDidCloseSession(({ ref }) => this.dropSession(ref.sessionId));
+    host.onDidArchiveSession(({ ref }) => this.dropSession(ref.sessionId));
   }
 
   /**

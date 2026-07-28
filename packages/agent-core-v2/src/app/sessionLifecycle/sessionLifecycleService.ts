@@ -39,7 +39,7 @@ import { join } from 'pathe';
 import { ulid } from 'ulid';
 
 import { IInstantiationService } from '#/_base/di/instantiation';
-import { Disposable } from '#/_base/di/lifecycle';
+import { Disposable, type IDisposable } from '#/_base/di/lifecycle';
 import {
   createScopedChildHandle,
   type ISessionScopeHandle,
@@ -109,6 +109,12 @@ type MaterializeSessionOptions = Omit<CreateSessionOptions, 'sessionId'> & {
 export class SessionLifecycleService extends Disposable implements ISessionLifecycleService {
   declare readonly _serviceBrand: undefined;
   private readonly sessions = new Map<string, ISessionScopeHandle>();
+  /**
+   * Sessions activated outside this service and published through
+   * `trackActivated` (the runtime session host). Lookup-only: every lifecycle
+   * decision stays with the registrar, which detaches on close/archive.
+   */
+  private readonly tracked = new Map<string, ISessionScopeHandle>();
   private readonly _onDidCreateSession = this._register(new Emitter<SessionCreatedEvent>());
   readonly onDidCreateSession: Event<SessionCreatedEvent> = this._onDidCreateSession.event;
   private readonly _onDidCloseSession = this._register(new Emitter<SessionClosedEvent>());
@@ -259,13 +265,13 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
 
   get(sessionId: string): ISessionScopeHandle | undefined {
     if (this.resuming.has(sessionId)) return undefined;
-    return this.sessions.get(sessionId);
+    return this.sessions.get(sessionId) ?? this.tracked.get(sessionId);
   }
 
   resume(sessionId: string): Promise<ISessionScopeHandle | undefined> {
     const inflight = this.resuming.get(sessionId);
     if (inflight !== undefined) return inflight;
-    const live = this.sessions.get(sessionId);
+    const live = this.sessions.get(sessionId) ?? this.tracked.get(sessionId);
     if (live !== undefined) return Promise.resolve(live);
     const promise = this.doResume(sessionId)
       .catch((error: unknown) => {
@@ -310,7 +316,23 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
     for (const [id, handle] of this.sessions) {
       if (!this.resuming.has(id)) ready.push(handle);
     }
+    for (const [id, handle] of this.tracked) {
+      if (!this.sessions.has(id) && !this.resuming.has(id)) ready.push(handle);
+    }
     return ready;
+  }
+
+  trackActivated(sessionId: string, handle: ISessionScopeHandle): IDisposable {
+    // Keyed by the bare sessionId: two same-named sessions live at once (on
+    // different runtimes) would overwrite each other here. Unreachable on the
+    // v1 surface (the resolver rejects ambiguous ids, create uses UUIDs);
+    // M6 re-keys internal maps by full SessionRef.
+    this.tracked.set(sessionId, handle);
+    return {
+      dispose: () => {
+        if (this.tracked.get(sessionId) === handle) this.tracked.delete(sessionId);
+      },
+    };
   }
 
   async close(sessionId: string): Promise<void> {

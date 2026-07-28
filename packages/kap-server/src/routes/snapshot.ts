@@ -25,7 +25,6 @@ import {
   ILogService,
   ISessionInteractionService,
   ISessionContext,
-  ISessionLifecycleService,
   ISessionMetadata,
   IWorkspaceService,
   toProtocolMessage,
@@ -42,6 +41,7 @@ import {
 import { z } from 'zod';
 
 import { errEnvelope, okEnvelope } from '../envelope';
+import { resolveV1LiveSession } from '../app/v1Compatibility/v1LiveSession';
 import { defineRoute } from '../middleware/defineRoute';
 import {
   SnapshotNotFoundError,
@@ -145,13 +145,23 @@ async function readViaLegacyAssembly(
   broadcaster: SessionEventBroadcaster,
   sessionId: string,
 ): Promise<SessionSnapshotResponse> {
-  // Resolve the live handle, loading the session from disk when it is cold
-  // (created by a previous process or by v1). `resume` returns `undefined`
-  // only when the session is unknown or its workspace is gone → 404.
-  const handle = await core.accessor.get(ISessionLifecycleService).resume(sessionId);
-  if (handle === undefined) {
+  // Resolve the live handle through the v1 ref resolver + runtime open/resume
+  // (M5c, plan §6.3), loading the session from its owner runtime when it is
+  // cold (created by a previous process or by v1). `not_found` keeps the 404
+  // mapping; ambiguous/unavailable surface as the frozen 50001 message via
+  // the global error handler.
+  const live = await resolveV1LiveSession(core, sessionId);
+  if (live.kind === 'not_found') {
     throw new SnapshotNotFoundError(sessionId);
   }
+  if (live.kind !== 'live') {
+    throw new Error(
+      live.kind === 'ambiguous'
+        ? `session ${sessionId} is ambiguous across runtimes`
+        : `session ${sessionId} is temporarily unavailable`,
+    );
+  }
+  const handle = live.handle;
 
   // Watermark + in-flight turn (drains the dispatch queue for consistency).
   const snapState = await broadcaster.getSnapshotState(sessionId);

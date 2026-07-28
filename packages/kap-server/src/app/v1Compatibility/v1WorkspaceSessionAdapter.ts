@@ -16,21 +16,21 @@
  * `ISessionService.create` and Session Core never open a provider, and no
  * per-session runtime is ever created (plan §6.2).
  *
- * Session creation itself keeps today's observable behavior exactly:
+ * Session creation itself keeps today's observable behavior exactly, now
+ * through the runtime session host (M5c, plan §6.3):
  *
- *   1. `runtime.sessions.create({ sessionId })` persists the session under the
- *      owner runtime (the M2 byte-identical `state.json` +
- *      `session_index.jsonl` layout — the persistence owner);
- *   2. `ISessionLifecycleService.create({ workDir, sessionId })` then builds
- *      the live Session scope through the EXISTING engine path: its metadata
- *      store tolerant-reads the state.json written in step 1 (same document
- *      version/shape, zero rewrite), and everything else about today's create
- *      — scope materialization, main-agent/plan-mode handling, lifecycle
- *      hooks (`SessionStart` with source `startup`), telemetry
- *      (`session_started { resumed: false }`), the session_index discovery
- *      line and the failure rollback — is preserved verbatim. The session id
- *      keeps the current globally-random `session_<uuid>` strategy, so the
- *      bare-id v1 wire never changes shape.
+ *   1. `IRuntimeSessionHostService.create({ runtimeId, sessionId })` runs the
+ *      runtime-owned persistence create (`runtime.sessions.create` — the M2
+ *      byte-identical `state.json` + `session_index.jsonl` layout) and then
+ *      opens + activates the session through the runtime lease — scope
+ *      materialization, additional-dirs seeding, the `defaultPlanMode`
+ *      auto-enter, lifecycle hooks (`SessionStart` with source `startup`),
+ *      telemetry (`session_started { resumed: false }`) and the failure
+ *      rollback all mirror the legacy lifecycle branch (the M5b black-box
+ *      parity proof). The live scope is published into the process-wide live
+ *      lookup via `trackActivated`.
+ *   2. The session id keeps the current globally-random `session_<uuid>`
+ *      strategy, so the bare-id v1 wire never changes shape.
  *
  * The wire surface stays frozen: the route keeps its path/method/schema, its
  * numeric error codes and envelope, and projects the outcome with the same
@@ -40,7 +40,7 @@
 import { randomUUID } from 'node:crypto';
 
 import {
-  ISessionLifecycleService,
+  IRuntimeSessionHostService,
   ISessionMetadata,
   IWorkspaceRuntimeManager,
   IWorkspaceService,
@@ -139,16 +139,20 @@ export async function createV1WorkspaceSession(
     root: touched.root,
   });
 
-  // The owner runtime persists the session (M2 byte-identical layout); the
-  // existing lifecycle path then activates it live with today's full behavior.
+  // The owner runtime persists the session AND activates it through its own
+  // lease (M5c): one `host.create` covers the legacy `runtime.sessions.create`
+  // + `ISessionLifecycleService.create` pair, with the same hooks, telemetry,
+  // plan-mode auto-enter and rollback. The v1 UUID id strategy is unchanged.
   const sessionId = `session_${randomUUID()}`;
-  await runtime.sessions.create({ sessionId });
-  const handle = await core.accessor.get(ISessionLifecycleService).create({ workDir, sessionId });
+  const created = await core.accessor.get(IRuntimeSessionHostService).create({
+    runtimeId: runtime.id,
+    sessionId,
+  });
 
   if (typeof body.title === 'string') {
-    await handle.accessor.get(ISessionMetadata).setTitle(body.title);
+    await created.handle.accessor.get(ISessionMetadata).setTitle(body.title);
   }
-  const meta = await handle.accessor.get(ISessionMetadata).read();
+  const meta = await created.handle.accessor.get(ISessionMetadata).read();
   return { kind: 'created', meta, workspace: touched };
 }
 

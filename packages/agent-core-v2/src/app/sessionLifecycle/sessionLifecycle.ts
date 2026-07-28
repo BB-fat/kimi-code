@@ -15,6 +15,7 @@
  */
 
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';
+import type { IDisposable } from '#/_base/di/lifecycle';
 import type { ISessionScopeHandle } from '#/_base/di/scope';
 import type { Event } from '#/_base/event';
 import type { McpServerConfig } from '#/agent/mcp/config-schema';
@@ -90,6 +91,17 @@ export interface ISessionLifecycleService {
   get(sessionId: string): ISessionScopeHandle | undefined;
   list(): readonly ISessionScopeHandle[];
   resume(sessionId: string): Promise<ISessionScopeHandle | undefined>;
+  /**
+   * Register a session activated OUTSIDE this service (the runtime session
+   * host, multi-runtime refactor M5c) so the process-wide live lookup (`get`
+   * / `list` / `resume`) observes it alongside the sessions this service
+   * activated itself. The registrar keeps full ownership: activation,
+   * close/archive and every lifecycle event stay with it — this service never
+   * disposes, re-resumes, or fires events for a tracked session, and its
+   * `close` / `archive` (own-map operations) are no-ops for one. The returned
+   * `IDisposable` detaches the entry (idempotent, identity-checked).
+   */
+  trackActivated(sessionId: string, handle: ISessionScopeHandle): IDisposable;
   close(sessionId: string): Promise<void>;
   archive(sessionId: string): Promise<void>;
   restore(sessionId: string): Promise<ISessionScopeHandle | undefined>;

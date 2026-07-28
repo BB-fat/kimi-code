@@ -10,7 +10,7 @@
  *      layout/index machinery — cold surfaces read through the owner runtime,
  *      never the App home dir (plan §7.6/§9.7). No exemptions.
  *   2. `ISessionIndex` imports are confined to an explicit exemption list
- *      (the not-yet-migrated LIVE routes/WS surface, owned by M5b/M6). The
+ *      (the not-yet-migrated LIVE WS surface, owned by M6). The
  *      list may only shrink; every entry states its reason.
  *   3. `ISessionHostRuntimeRegistry` / `IWorkspaceRuntimeManager` may only be
  *      imported inside `src/app/v1Compatibility/` — routes and services must
@@ -76,13 +76,10 @@ const LAYOUT_BANS: { pattern: RegExp; label: string }[] = [
 
 /**
  * Rule 2 exemptions: files still allowed to import `ISessionIndex` (the LIVE
- * surface M5b/M6 migrates). Anything not listed here must be clean.
+ * WS surface M6 migrates). Anything not listed here must be clean. The list
+ * may only shrink; every entry states its reason.
  */
 const SESSION_INDEX_EXEMPTIONS: Record<string, string> = {
-  'routes/sessions.ts':
-    'live actions still on the engine lifecycle (undo/fork/profile POST/status/goal/warnings) — M5b',
-  'routes/skills.ts': 'live skill surface — M5b',
-  'routes/tools.ts': 'live tool surface — M5b',
   'transport/ws/v1/sessionEventBroadcaster.ts': 'WebSocket live surface — M6',
 };
 
@@ -106,7 +103,7 @@ describe('v1 compatibility guardrails (plan §10.1)', () => {
     expect(violations).toEqual([]);
   });
 
-  it('ISessionIndex imports stay inside the explicit M5b/M6 exemption list', async () => {
+  it('ISessionIndex imports stay inside the explicit M6 exemption list', async () => {
     const importers: string[] = [];
     for (const file of await listSourceFiles(SRC_ROOT)) {
       const rel = relative(SRC_ROOT, file);

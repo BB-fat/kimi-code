@@ -22,13 +22,17 @@ import {
   IAgentLifecycleService,
   IEventBus,
   IEventService,
+  IRuntimeSessionHostService,
+  ISessionHostRuntimeRegistry,
   ISessionLifecycleService,
   MAIN_AGENT_ID,
+  type ISessionHostRuntime,
   type ServiceIdentifier,
 } from '@moonshot-ai/agent-core-v2';
 import { sessionWarningsResponseSchema } from '@moonshot-ai/agent-core-v2/app/sessionLegacy/sessionProtocol';
 import { encodeWorkDirKey } from '@moonshot-ai/agent-core-v2/_base/utils/workdir-slug';
 
+import { createV1SessionRefResolver } from '../src/app/v1Compatibility/v1SessionRefResolver';
 import { type RunningServer, startServer } from '../src/start';
 import { authHeaders } from './helpers/auth';
 
@@ -140,6 +144,25 @@ describe('server-v2 /api/v1/sessions', () => {
       headers: authHeaders(server as RunningServer),
     } as never);
     return { status: res.status, body: (await res.json()) as Envelope<T> };
+  }
+
+  /**
+   * Force a session cold (the post-restart state): close it through its
+   * OWNER — the runtime session host, whose sessions are activated via
+   * `host.create` (M5c) — resolved through the production v1 resolver. The
+   * process-wide live lookup must report it gone afterwards (the
+   * `trackActivated` detachment).
+   */
+  async function closeLiveSession(sessionId: string): Promise<void> {
+    const resolved = await createV1SessionRefResolver(
+      (server as RunningServer).core,
+    ).resolve(sessionId);
+    if (resolved.kind !== 'resolved') {
+      throw new Error(`cannot resolve session ${sessionId} (${resolved.kind})`);
+    }
+    await (server as RunningServer).core.accessor
+      .get(IRuntimeSessionHostService)
+      .close(resolved.resolution.ref);
   }
 
   it('downloads a ZIP with the supplied Web log and cleans up its temporary directory', async () => {
@@ -744,6 +767,114 @@ describe('server-v2 /api/v1/sessions', () => {
     expect(body.code).toBe(40401);
   });
 
+  it('restores an archived session through the runtime open/resume after it went cold (M5c)', async () => {
+    const cwd = home as string;
+    const created = await postJson<SessionWire>('/api/v1/sessions', { metadata: { cwd } });
+    const id = created.body.data.id;
+
+    // Archive closes the session (drain + scope teardown): it is cold and the
+    // process-wide live lookup no longer sees it. The `:restore` below must
+    // therefore run the full runtime open/resume path (M5c, plan §6.3) — not
+    // a memory shortcut.
+    const archived = await postJson<{ archived: boolean }>(`/api/v1/sessions/${id}:archive`);
+    expect(archived.body.code).toBe(0);
+    expect(
+      (server as RunningServer).core.accessor.get(ISessionLifecycleService).get(id),
+    ).toBeUndefined();
+
+    const restored = await postJson<SessionWire>(`/api/v1/sessions/${id}:restore`);
+    expect(restored.body.code).toBe(0);
+    expect(restored.body.data.id).toBe(id);
+    expect(restored.body.data.archived).toBe(false);
+
+    // Live again through the runtime activation (tracked into the live
+    // lookup), with the archived flag cleared on the persisted document too.
+    expect(
+      (server as RunningServer).core.accessor.get(ISessionLifecycleService).get(id),
+    ).toBeDefined();
+    const got = await getJson<SessionWire>(`/api/v1/sessions/${id}`);
+    expect(got.body.code).toBe(0);
+    expect(got.body.data.archived).toBe(false);
+  });
+
+  it('maps an ambiguous bare session id onto the frozen 50001 envelope on live routes (M5c)', async () => {
+    const cwd = home as string;
+    const created = await postJson<SessionWire>('/api/v1/sessions', { metadata: { cwd } });
+    const id = created.body.data.id;
+
+    // A second runtime answers the SAME session id: the resolver must report
+    // ambiguity (plan §1.3 rule 3) instead of silently picking a candidate.
+    const duplicate: ISessionHostRuntime = {
+      id: 'test-runtime-duplicate',
+      kind: 'test-fake',
+      sessions: {
+        get: async (sessionId: string) =>
+          sessionId === id
+            ? {
+                ref: { runtimeId: 'test-runtime-duplicate', sessionId: id },
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+                status: 'active',
+                metadata: {},
+              }
+            : undefined,
+      } as ISessionHostRuntime['sessions'],
+      status: () => 'online',
+      capabilities: () => new Set(),
+      close: async () => {},
+    };
+    (server as RunningServer).core.accessor
+      .get(ISessionHostRuntimeRegistry)
+      .register(duplicate);
+
+    // Even though the session IS live in this process, the bare id no longer
+    // routes (rule 5: never pick silently) — every live route answers the
+    // same frozen envelope.
+    const aborted = await postJson<null>(`/api/v1/sessions/${id}:abort`);
+    expect(aborted.body.code).toBe(50001);
+    expect(aborted.body.msg).toBe(`session ${id} is ambiguous across runtimes`);
+
+    const status = await getJson<null>(`/api/v1/sessions/${id}/status`);
+    expect(status.body.code).toBe(50001);
+    expect(status.body.msg).toBe(`session ${id} is ambiguous across runtimes`);
+
+    const skills = await getJson<null>(`/api/v1/sessions/${id}/skills`);
+    expect(skills.body.code).toBe(50001);
+    expect(skills.body.msg).toBe(`session ${id} is ambiguous across runtimes`);
+  });
+
+  it('maps an offline runtime onto the frozen 50001 envelope on live routes (M5c)', async () => {
+    // An offline registry entry means "not queried" — never proof of absence
+    // (plan §1.3 rule 4): an id no online runtime owns answers 50001, not
+    // 40401.
+    const offline: ISessionHostRuntime = {
+      id: 'test-runtime-offline',
+      kind: 'test-fake',
+      sessions: {
+        get: async () => undefined,
+      } as unknown as ISessionHostRuntime['sessions'],
+      status: () => 'offline',
+      capabilities: () => new Set(),
+      close: async () => {},
+    };
+    (server as RunningServer).core.accessor.get(ISessionHostRuntimeRegistry).register(offline);
+
+    const missing = 'session_unresolvable';
+    const aborted = await postJson<null>(`/api/v1/sessions/${missing}:abort`);
+    expect(aborted.body.code).toBe(50001);
+    expect(aborted.body.msg).toBe(`session ${missing} is temporarily unavailable`);
+
+    const approvals = await getJson<null>(`/api/v1/sessions/${missing}/approvals?status=pending`);
+    expect(approvals.body.code).toBe(50001);
+    expect(approvals.body.msg).toBe(`session ${missing} is temporarily unavailable`);
+
+    const prompts = await postJson<null>(`/api/v1/sessions/${missing}/prompts`, {
+      content: [{ type: 'text', text: 'hi' }],
+    });
+    expect(prompts.body.code).toBe(50001);
+    expect(prompts.body.msg).toBe(`session ${missing} is temporarily unavailable`);
+  });
+
   it('cold-loads a persisted session on :undo instead of 40401', async () => {
     const cwd = home as string;
     const created = await postJson<SessionWire>('/api/v1/sessions', { metadata: { cwd } });
@@ -753,7 +884,10 @@ describe('server-v2 /api/v1/sessions', () => {
     // only) — the state right after opening a session in the web UI before any
     // prompt has been sent. Before the fix, `:undo` resolved the main agent via
     // `lifecycle.get` (memory only) and reported 40401 "session does not exist".
-    await (server as RunningServer).core.accessor.get(ISessionLifecycleService).close(id);
+    await closeLiveSession(id);
+    expect(
+      (server as RunningServer).core.accessor.get(ISessionLifecycleService).get(id),
+    ).toBeUndefined();
 
     const res = await postJson<{ messages: unknown }>(`/api/v1/sessions/${id}:undo`, { count: 1 });
     // Cold-loaded successfully: the empty history yields "nothing to undo"

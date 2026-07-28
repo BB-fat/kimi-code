@@ -22,16 +22,18 @@
  */
 
 import {
-  ErrorCodes,
-  ISessionLifecycleService,
   ISessionTerminalService,
   isError2,
-  Error2,
+  ErrorCodes,
   type Scope,
 } from '@moonshot-ai/agent-core-v2';
 import { createTerminalRequestSchema } from '@moonshot-ai/agent-core-v2/os/interface/terminal';
 import { z } from 'zod';
 
+import {
+  resolveV1LiveSession,
+  v1LiveSessionFailureEnvelope,
+} from '../app/v1Compatibility/v1LiveSession';
 import { errEnvelope, okEnvelope } from '../envelope';
 import { requestLog } from '../lib/requestLog';
 import { defineRoute } from '../middleware/defineRoute';
@@ -78,18 +80,27 @@ const sessionAndTailParamSchema = z.object({
 
 const detailsSchema = z.array(z.object({ path: z.string(), message: z.string() }));
 
+type ResolvedTerminal =
+  | { readonly service: ISessionTerminalService }
+  | { readonly envelope: ReturnType<typeof errEnvelope> };
+
 /**
  * Resolve the session's `ISessionTerminalService` from the URL session id,
- * cold-loading a persisted-but-not-live session first (matches v1, which spawns
- * from the persisted cwd). Throws `session.not_found` only when the session is
- * unknown or its workspace is gone.
+ * cold-loading a persisted-but-not-live session through the v1 ref resolver +
+ * runtime open/resume (M5c, plan §6.3; matches v1, which spawns from the
+ * persisted cwd). Failures come back as the frozen envelopes (`40401` for an
+ * unknown id, `50001` for an ambiguous/unavailable one).
  */
-async function resolveTerminal(core: Scope, sessionId: string): Promise<ISessionTerminalService> {
-  const session = await core.accessor.get(ISessionLifecycleService).resume(sessionId);
-  if (session === undefined) {
-    throw new Error2(ErrorCodes.SESSION_NOT_FOUND, `session ${sessionId} does not exist`);
+async function resolveTerminal(
+  core: Scope,
+  sessionId: string,
+  requestId: string,
+): Promise<ResolvedTerminal> {
+  const live = await resolveV1LiveSession(core, sessionId);
+  if (live.kind !== 'live') {
+    return { envelope: v1LiveSessionFailureEnvelope(live, sessionId, requestId) };
   }
-  return session.accessor.get(ISessionTerminalService);
+  return { service: live.handle.accessor.get(ISessionTerminalService) };
 }
 
 export function registerTerminalsRoutes(app: TerminalsRouteHost, core: Scope): void {
@@ -109,7 +120,12 @@ export function registerTerminalsRoutes(app: TerminalsRouteHost, core: Scope): v
     async (req, reply) => {
       try {
         const { session_id } = req.params;
-        const items = await (await resolveTerminal(core, session_id)).list();
+        const resolved = await resolveTerminal(core, session_id, req.id);
+        if ('envelope' in resolved) {
+          reply.send(resolved.envelope);
+          return;
+        }
+        const items = await resolved.service.list();
         reply.send(okEnvelope({ items }, req.id));
       } catch (err) {
         sendMappedError(reply, req.id, err);
@@ -140,7 +156,12 @@ export function registerTerminalsRoutes(app: TerminalsRouteHost, core: Scope): v
     async (req, reply) => {
       try {
         const { session_id } = req.params;
-        const terminal = await (await resolveTerminal(core, session_id)).create(req.body);
+        const resolved = await resolveTerminal(core, session_id, req.id);
+        if ('envelope' in resolved) {
+          reply.send(resolved.envelope);
+          return;
+        }
+        const terminal = await resolved.service.create(req.body);
         requestLog(req)?.info({ session_id, terminal_id: terminal.id }, 'terminal created');
         reply.send(okEnvelope(terminal, req.id));
       } catch (err) {
@@ -171,7 +192,12 @@ export function registerTerminalsRoutes(app: TerminalsRouteHost, core: Scope): v
     async (req, reply) => {
       try {
         const { session_id, terminal_id } = req.params;
-        const terminal = await (await resolveTerminal(core, session_id)).get(terminal_id);
+        const resolved = await resolveTerminal(core, session_id, req.id);
+        if ('envelope' in resolved) {
+          reply.send(resolved.envelope);
+          return;
+        }
+        const terminal = await resolved.service.get(terminal_id);
         reply.send(okEnvelope(terminal, req.id));
       } catch (err) {
         sendMappedError(reply, req.id, err);
@@ -213,7 +239,12 @@ export function registerTerminalsRoutes(app: TerminalsRouteHost, core: Scope): v
           reply.send(errEnvelope(ErrorCode.VALIDATION_FAILED, message, req.id));
           return;
         }
-        const result = await (await resolveTerminal(core, session_id)).close(parsed.id);
+        const resolved = await resolveTerminal(core, session_id, req.id);
+        if ('envelope' in resolved) {
+          reply.send(resolved.envelope);
+          return;
+        }
+        const result = await resolved.service.close(parsed.id);
         requestLog(req)?.info({ session_id, terminal_id: parsed.id }, 'terminal closed');
         reply.send(okEnvelope(result, req.id));
       } catch (err) {

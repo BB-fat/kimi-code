@@ -32,7 +32,7 @@ import { jsonDocumentCodec } from '#/persistence/backends/node-fs/atomicDocument
 import { FileStorageService } from '#/persistence/backends/node-fs/fileStorageService';
 import type { IFileSystemStorageService } from '#/persistence/interface/storage';
 
-import { LocalWorkspaceRuntime } from './localWorkspaceRuntime';
+import { LocalWorkspaceRuntime, type LocalOsHandles } from './localWorkspaceRuntime';
 import { isValidIdSegment } from './localWorkspaceLayout';
 
 /**
@@ -56,15 +56,25 @@ export interface LocalWorkspaceProviderOptions {
    * `FileStorageService` (rooted at `homeDir`) per opened runtime.
    */
   readonly storage?: IFileSystemStorageService;
+  /**
+   * OS capability handles projected onto every opened runtime's session
+   * leases (plan §7.4). Composition that already holds the App-scope host
+   * services passes them in so runtimes share (not duplicate) the host
+   * connections; any handle left out defaults to the node-local backend per
+   * runtime.
+   */
+  readonly os?: Partial<LocalOsHandles>;
 }
 
 export class LocalWorkspaceProvider implements IWorkspaceProvider {
   private readonly homeDir: string;
   private readonly storage: IFileSystemStorageService | undefined;
+  private readonly os: Partial<LocalOsHandles> | undefined;
 
   constructor(options: LocalWorkspaceProviderOptions) {
     this.homeDir = options.homeDir;
     this.storage = options.storage;
+    this.os = options.os;
   }
 
   async open(descriptor: WorkspaceDescriptor): Promise<IWorkspaceRuntimeRegistration> {
@@ -92,6 +102,7 @@ export class LocalWorkspaceProvider implements IWorkspaceProvider {
       cwd: descriptor.root,
       homeDir: this.homeDir,
       storage: this.storage ?? new FileStorageService(this.homeDir, 0o700, 0o600),
+      os: this.os,
     });
     return {
       workspaceId,

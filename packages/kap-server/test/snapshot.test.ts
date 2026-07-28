@@ -14,10 +14,13 @@ import {
   IAgentLifecycleService,
   IAgentPromptService,
   ILogService,
+  IRuntimeSessionHostService,
+  ISessionHostRuntimeRegistry,
   ISessionInteractionService,
   ISessionContext,
   ISessionLifecycleService,
   ISessionMetadata,
+  IWorkspaceRuntimeManager,
   IWorkspaceService,
 } from '@moonshot-ai/agent-core-v2';
 import { sessionSnapshotResponseSchema } from '../src/protocol/rest-snapshot';
@@ -76,6 +79,32 @@ describe('server-v2 snapshot route enrichment', () => {
     };
     const core = {
       accessor: fakeAccessor([
+        // The M5c live path resolves the bare id through the v1 ref resolver
+        // (registry probe), then ensures liveness through the runtime host.
+        [
+          ISessionHostRuntimeRegistry,
+          {
+            list: () => [
+              { id: 'rt', kind: 'test', status: 'online', capabilities: [] },
+            ],
+            get: () => ({
+              sessions: {
+                get: async (sid: string) =>
+                  sid === sessionId
+                    ? {
+                        ref: { runtimeId: 'rt', sessionId },
+                        createdAt: new Date(now).toISOString(),
+                        updatedAt: new Date(now).toISOString(),
+                        status: 'active',
+                        metadata: {},
+                      }
+                    : undefined,
+              },
+            }),
+          },
+        ],
+        [IWorkspaceRuntimeManager, { ensureDiscovered: async () => undefined }],
+        [IRuntimeSessionHostService, { resume: async () => ({ handle: session }) }],
         [
           ISessionLifecycleService,
           { resume: async () => session, get: () => undefined },

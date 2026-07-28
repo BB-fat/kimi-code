@@ -8,10 +8,12 @@ import {
   IAgentLifecycleService,
   IAgentProfileService,
   IAgentToolPolicyService,
+  IRuntimeSessionHostService,
   ISessionLifecycleService,
 } from '@moonshot-ai/agent-core-v2';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { createV1SessionRefResolver } from '../src/app/v1Compatibility/v1SessionRefResolver';
 import { type RunningServer, startServer } from '../src/start';
 import { authHeaders } from './helpers/auth';
 
@@ -187,6 +189,19 @@ describe('server-v2 /api/v1 prompts', () => {
     const session = server!.core.accessor.get(ISessionLifecycleService).get(sessionId);
     if (session === undefined) throw new Error(`session ${sessionId} not found`);
     await session.accessor.get(IAgentLifecycleService).create({ agentId: 'main' });
+  }
+
+  // Force a session cold (the post-restart state): resolve the bare id through
+  // the production v1 resolver and close it through its OWNER — the runtime
+  // session host, whose sessions are activated via `host.create` (M5c). The
+  // process-wide live lookup must report it gone afterwards (the
+  // `trackActivated` detachment).
+  async function closeLiveSession(sessionId: string): Promise<void> {
+    const resolved = await createV1SessionRefResolver(server!.core).resolve(sessionId);
+    if (resolved.kind !== 'resolved') {
+      throw new Error(`cannot resolve session ${sessionId} (${resolved.kind})`);
+    }
+    await server!.core.accessor.get(IRuntimeSessionHostService).close(resolved.resolution.ref);
   }
 
   it('submits a prompt and lists it as active', async () => {
@@ -639,7 +654,7 @@ describe('server-v2 /api/v1 prompts', () => {
     // Drop the in-memory handle so the session only exists on disk / in the
     // index — the state a session is in after a server restart. The route must
     // cold-resume it rather than report 40401.
-    await server!.core.accessor.get(ISessionLifecycleService).close(id);
+    await closeLiveSession(id);
     expect(server!.core.accessor.get(ISessionLifecycleService).get(id)).toBeUndefined();
 
     const list = await call<{ active: PromptItemWire | null; queued: PromptItemWire[] }>(
@@ -886,7 +901,7 @@ describe('server-v2 /api/v1 prompts', () => {
     expect(submitted.body.code).toBe(0);
 
     // Drop the live handle; the next submit cold-resumes the session from disk.
-    await server!.core.accessor.get(ISessionLifecycleService).close(id);
+    await closeLiveSession(id);
     expect(server!.core.accessor.get(ISessionLifecycleService).get(id)).toBeUndefined();
 
     const again = await call<PromptItemWire>('POST', `/api/v1/sessions/${id}/prompts`, {

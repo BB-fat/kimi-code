@@ -30,6 +30,11 @@ import type {
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IWorkspaceService } from '#/app/workspace/workspace';
 import { ErrorCodes, Error2 } from '#/errors';
+import { IHostEnvironment } from '#/os/interface/hostEnvironment';
+import { IHostFileSystem } from '#/os/interface/hostFileSystem';
+import { IHostFsWatchService } from '#/os/interface/hostFsWatch';
+import { IHostProcessService } from '#/os/interface/hostProcess';
+import { IHostTerminalService } from '#/os/interface/terminal';
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
 
 import {
@@ -64,8 +69,27 @@ export class WorkspaceRuntimeManagerService implements IWorkspaceRuntimeManager 
     @IBootstrapService bootstrap: IBootstrapService,
     @IFileSystemStorageService storage: IFileSystemStorageService,
     @IWorkspaceService private readonly workspaces: IWorkspaceService,
+    @IHostFileSystem hostFs: IHostFileSystem,
+    @IHostProcessService hostProcess: IHostProcessService,
+    @IHostTerminalService hostTerminal: IHostTerminalService,
+    @IHostFsWatchService hostWatch: IHostFsWatchService,
+    @IHostEnvironment hostEnvironment: IHostEnvironment,
   ) {
-    this.localProvider = new LocalWorkspaceProvider({ homeDir: bootstrap.homeDir, storage });
+    // The App-scope host services double as every local runtime's OS handles
+    // (plan §1.5: runtime-level shared resources): one process-wide instance
+    // per capability, never duplicated per runtime — and the process's
+    // override channel (tests, headless compositions) keeps working.
+    this.localProvider = new LocalWorkspaceProvider({
+      homeDir: bootstrap.homeDir,
+      storage,
+      os: {
+        filesystem: hostFs,
+        process: hostProcess,
+        terminal: hostTerminal,
+        watch: hostWatch,
+        environment: hostEnvironment,
+      },
+    });
     this.providers.set('local', this.localProvider);
   }
 

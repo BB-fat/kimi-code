@@ -745,6 +745,8 @@ describe('runtimeSessionHost branch behavior', () => {
     readonly host: IRuntimeSessionHostService;
     readonly registry: ISessionHostRuntimeRegistry;
     readonly telemetry: TelemetryRecord[];
+    /** Session ids currently published into the live lookup via `trackActivated`. */
+    readonly tracked: Set<string>;
   } {
     const telemetry: TelemetryRecord[] = [];
     const kimiConfig = {
@@ -752,6 +754,7 @@ describe('runtimeSessionHost branch behavior', () => {
       cron: DEFAULT_CRON_CONFIG,
       ...(input.planMode === true ? { defaultPlanMode: true } : {}),
     };
+    const tracked = new Set<string>();
     const lifecycleStub = {
       _serviceBrand: undefined,
       hooks: createHooks(['onDidCreateSession', 'onWillCloseSession']),
@@ -759,6 +762,10 @@ describe('runtimeSessionHost branch behavior', () => {
       onDidCloseSession: Event.None,
       onDidArchiveSession: Event.None,
       onDidForkSession: Event.None,
+      trackActivated: (sessionId: string) => {
+        tracked.add(sessionId);
+        return { dispose: () => tracked.delete(sessionId) };
+      },
     } as unknown as ISessionLifecycleService;
     const { app: root } = bootstrap(
       { homeDir, cwd, osHomeDir: homeDir, env: {} },
@@ -788,6 +795,7 @@ describe('runtimeSessionHost branch behavior', () => {
       host: root.accessor.get(IRuntimeSessionHostService),
       registry: root.accessor.get(ISessionHostRuntimeRegistry),
       telemetry,
+      tracked,
     };
   }
 
@@ -874,6 +882,34 @@ describe('runtimeSessionHost branch behavior', () => {
     expect(scope.handle.accessor.get(IAgentLifecycleService).get(MAIN_AGENT_ID)).toBeUndefined();
     expect(existsSync(join(cwd, 'agents'))).toBe(false);
     await app.host.close({ runtimeId: 'rt-mem', sessionId: 'pm-headless' });
+    app.root.dispose();
+  });
+
+  it('publishes activations into the process-wide live lookup and detaches on close/archive (M5c)', async () => {
+    const app = makeBranchApp({});
+    app.registry.register(new StandaloneMemoryHostRuntime({ id: 'rt-mem' }));
+
+    // create publishes immediately.
+    await app.host.create({ runtimeId: 'rt-mem', sessionId: 's-created' });
+    expect([...app.tracked].toSorted()).toEqual(['s-created']);
+
+    // A cold resume publishes too; the fork tracks the target and leaves the
+    // source tracked.
+    await app.host.create({ runtimeId: 'rt-mem', sessionId: 's-parent' });
+    await app.host.close({ runtimeId: 'rt-mem', sessionId: 's-parent' });
+    expect(app.tracked.has('s-parent')).toBe(false);
+    await app.host.resume({ runtimeId: 'rt-mem', sessionId: 's-parent' });
+    expect(app.tracked.has('s-parent')).toBe(true);
+    await app.host.fork({ runtimeId: 'rt-mem', sessionId: 's-parent' }, { newSessionId: 's-fork' });
+    expect(app.tracked.has('s-fork')).toBe(true);
+    expect(app.tracked.has('s-parent')).toBe(true);
+
+    // close detaches exactly its own session; archive detaches too.
+    await app.host.close({ runtimeId: 'rt-mem', sessionId: 's-fork' });
+    expect(app.tracked.has('s-fork')).toBe(false);
+    expect(app.tracked.has('s-parent')).toBe(true);
+    await app.host.archive({ runtimeId: 'rt-mem', sessionId: 's-parent' });
+    expect([...app.tracked].toSorted()).toEqual(['s-created']);
     app.root.dispose();
   });
 });

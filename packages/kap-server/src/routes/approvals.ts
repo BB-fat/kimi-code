@@ -31,7 +31,6 @@
 import {
   ISessionApprovalService,
   ISessionInteractionService,
-  ISessionLifecycleService,
   type ApprovalRequest,
   type ApprovalResponse,
   type Interaction,
@@ -47,6 +46,10 @@ import {
 } from '../protocol/rest-approval';
 import { z } from 'zod';
 
+import {
+  resolveV1LiveSession,
+  v1LiveSessionFailureEnvelope,
+} from '../app/v1Compatibility/v1LiveSession';
 import { errEnvelope, okEnvelope } from '../envelope';
 import { requestLog } from '../lib/requestLog';
 import { defineRoute } from '../middleware/defineRoute';
@@ -101,14 +104,13 @@ export function registerApprovalsRoutes(app: ApprovalRouteHost, core: Scope): vo
     },
     async (req, reply) => {
       const { session_id } = req.params;
-      const handle = await core.accessor.get(ISessionLifecycleService).resume(session_id);
-      if (handle === undefined) {
-        reply.send(
-          errEnvelope(ErrorCode.SESSION_NOT_FOUND, `session ${session_id} does not exist`, req.id),
-        );
+      // M5c: live through the resolver + runtime open/resume (plan §6.3).
+      const live = await resolveV1LiveSession(core, session_id);
+      if (live.kind !== 'live') {
+        reply.send(v1LiveSessionFailureEnvelope(live, session_id, req.id));
         return;
       }
-      const pending = handle.accessor.get(ISessionInteractionService).listPending('approval');
+      const pending = live.handle.accessor.get(ISessionInteractionService).listPending('approval');
       const items = pending.map((i) => toWireApproval(i, session_id));
       reply.send(okEnvelope({ items }, req.id));
     },
@@ -135,13 +137,13 @@ export function registerApprovalsRoutes(app: ApprovalRouteHost, core: Scope): vo
     },
     async (req, reply) => {
       const { session_id, approval_id } = req.params;
-      const handle = await core.accessor.get(ISessionLifecycleService).resume(session_id);
-      if (handle === undefined) {
-        reply.send(
-          errEnvelope(ErrorCode.SESSION_NOT_FOUND, `session ${session_id} does not exist`, req.id),
-        );
+      // M5c: live through the resolver + runtime open/resume (plan §6.3).
+      const live = await resolveV1LiveSession(core, session_id);
+      if (live.kind !== 'live') {
+        reply.send(v1LiveSessionFailureEnvelope(live, session_id, req.id));
         return;
       }
+      const handle = live.handle;
       const interaction = handle.accessor.get(ISessionInteractionService);
       const isPending = interaction
         .listPending('approval')

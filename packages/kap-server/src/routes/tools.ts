@@ -17,9 +17,11 @@
  *
  * **Resolution**: v1 serves these from a global singleton that falls back to
  * the most-recent session. v2 has no global tool/MCP state — both services are
- * Agent-scoped — so we reproduce the fallback: `core` → `ISessionIndex` (pick
- * the newest session by `createdAt`, or the explicit `session_id`) →
- * `ISessionLifecycleService` → `IAgentLifecycleService` (the `main` agent) →
+ * Agent-scoped — so we reproduce the fallback: `core` → the v1 ref resolver's
+ * cross-runtime list (pick the newest non-archived session by `createdAt`, or
+ * the explicit `session_id`) → the process-wide live lookup
+ * (`ISessionLifecycleService`, which also observes runtime-activated
+ * sessions) → `IAgentLifecycleService` (the `main` agent) →
  * the service. When no session is live, or the main agent does not exist yet
  * (server-v2 gap G10), the GET endpoints answer an empty list and `:restart`
  * answers `40408`, exactly like v1.
@@ -50,7 +52,6 @@
 import {
   ErrorCodes,
   IAgentMcpService,
-  ISessionIndex,
   ISessionLifecycleService,
   IAgentToolRegistryService,
   IAgentToolPolicyService,
@@ -60,6 +61,7 @@ import {
   type ToolSource,
 } from '@moonshot-ai/agent-core-v2';
 
+import { createV1SessionRefResolver } from '../app/v1Compatibility/v1SessionRefResolver';
 import { errEnvelope, okEnvelope } from '../envelope';
 import { defineRoute } from '../middleware/defineRoute';
 import { ensureMainAgent } from '../transport/mainAgent';
@@ -222,21 +224,33 @@ export function registerToolsRoutes(app: ToolsRouteHost, core: Scope): void {
 async function resolveEffectiveAgent(core: Scope, sessionId: string | undefined) {
   const sid = sessionId ?? (await mostRecentSessionId(core));
   if (sid === undefined) return undefined;
+  // Only an already-live session serves tools (v1 never cold-loads here); the
+  // lifecycle lookup also observes runtime-activated sessions (M5c
+  // `trackActivated`).
   const session = core.accessor.get(ISessionLifecycleService).get(sid);
   if (session === undefined) return undefined;
   return ensureMainAgent(session);
 }
 
-/** Pick the most-recently-created session id, mirroring v1's fallback. */
+/**
+ * Pick the most-recently-created session id, mirroring v1's fallback. The
+ * candidates come from the v1 ref resolver's cross-runtime list (M5c) with
+ * the same default exclusion the index applied: archived sessions do not
+ * serve as the fallback.
+ */
 async function mostRecentSessionId(core: Scope): Promise<string | undefined> {
-  const page = await core.accessor.get(ISessionIndex).list({});
-  const [first, ...rest] = page.items;
-  if (first === undefined) return undefined;
-  let newest = first;
-  for (const item of rest) {
-    if (item.createdAt > newest.createdAt) newest = item;
+  const resolutions = await createV1SessionRefResolver(core).listAll();
+  let newestId: string | undefined;
+  let newestCreatedAt = Number.NEGATIVE_INFINITY;
+  for (const resolution of resolutions) {
+    if (resolution.descriptor.status === 'archived') continue;
+    const createdAt = Date.parse(resolution.descriptor.createdAt);
+    if (newestId === undefined || createdAt > newestCreatedAt) {
+      newestId = resolution.ref.sessionId;
+      newestCreatedAt = createdAt;
+    }
   }
-  return newest.id;
+  return newestId;
 }
 
 // ---------------------------------------------------------------------------

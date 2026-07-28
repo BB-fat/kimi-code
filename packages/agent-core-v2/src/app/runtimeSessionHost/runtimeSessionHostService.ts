@@ -23,7 +23,7 @@
  *    index tolerates exactly like an externally removed directory.
  */
 
-import { Disposable } from '#/_base/di/lifecycle';
+import { Disposable, type IDisposable } from '#/_base/di/lifecycle';
 import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { Emitter, type Event } from '#/_base/event';
 import { DEFAULT_PLAN_MODE_SECTION } from '#/agent/plan/configSection';
@@ -65,6 +65,14 @@ export class RuntimeSessionHostService extends Disposable implements IRuntimeSes
   private readonly live = new Map<string, IRuntimeSessionScope>();
   /** In-flight resumes, folded per ref — the legacy `resuming` semantics. */
   private readonly resuming = new Map<string, Promise<IRuntimeSessionScope | undefined>>();
+  /**
+   * `ISessionLifecycleService.trackActivated` registrations, per live ref:
+   * they publish runtime-activated sessions into the process-wide live lookup
+   * the kap-server edge (broadcaster, transcript, snapshot, facts) reads.
+   * Detached on close/archive BEFORE the scope teardown begins — the legacy
+   * ordering (map removal precedes dispose).
+   */
+  private readonly trackings = new Map<string, IDisposable>();
 
   private readonly _onDidActivateSession = this._register(
     new Emitter<RuntimeSessionActivatedEvent>(),
@@ -139,6 +147,7 @@ export class RuntimeSessionHostService extends Disposable implements IRuntimeSes
       throw error;
     }
     this.live.set(sessionRefKey(ref), scope);
+    this.trackLive(ref, scope);
     await this.announceActivated({ ref, scope, source: 'startup' });
     return scope;
   }
@@ -222,6 +231,7 @@ export class RuntimeSessionHostService extends Disposable implements IRuntimeSes
       throw error;
     }
     this.live.set(sessionRefKey(ref), scope);
+    this.trackLive(ref, scope);
     await this.announceActivated({ ref, scope, source: 'resume' });
     return scope;
   }
@@ -275,6 +285,7 @@ export class RuntimeSessionHostService extends Disposable implements IRuntimeSes
       throw error;
     }
     this.live.set(sessionRefKey(targetRef), scope);
+    this.trackLive(targetRef, scope);
     this._onDidForkSession.fire({ source: ref, ref: targetRef, scope });
     await this.announceActivated({ ref: targetRef, scope, source: 'fork' });
     return scope;
@@ -287,8 +298,17 @@ export class RuntimeSessionHostService extends Disposable implements IRuntimeSes
   async archive(ref: SessionRef): Promise<void> {
     const key = sessionRefKey(ref);
     const scope = this.live.get(key);
-    // Legacy archive acts on live sessions only; a cold session is a no-op.
-    if (scope === undefined) return;
+    if (scope === undefined) {
+      // A session live in the legacy lifecycle's OWN map was activated
+      // outside this host (the in-process CLI / debug-RPC paths — its tracked
+      // entries mirror THIS host's live map, so a hit here can only be
+      // legacy-owned): the legacy service owns its archive sequence.
+      if (this.lifecycle.get(ref.sessionId) !== undefined) {
+        await this.lifecycle.archive(ref.sessionId);
+      }
+      // Legacy archive acts on live sessions only; a cold session is a no-op.
+      return;
+    }
     await scope.handle.accessor.get(ISessionMetadata).setArchived(true);
     await this.drainAgents(scope);
     this.event.publish({
@@ -297,6 +317,7 @@ export class RuntimeSessionHostService extends Disposable implements IRuntimeSes
     });
     await this.announceWillClose(ref, scope);
     this.live.delete(key);
+    this.untrackLive(key);
     await scope.close('explicit');
     this._onDidArchiveSession.fire({ ref });
   }
@@ -304,9 +325,16 @@ export class RuntimeSessionHostService extends Disposable implements IRuntimeSes
   async close(ref: SessionRef): Promise<void> {
     const key = sessionRefKey(ref);
     const scope = this.live.get(key);
-    if (scope === undefined) return;
+    if (scope === undefined) {
+      // Same legacy-owner delegation as `archive` (see above).
+      if (this.lifecycle.get(ref.sessionId) !== undefined) {
+        await this.lifecycle.close(ref.sessionId);
+      }
+      return;
+    }
     await this.announceWillClose(ref, scope);
     this.live.delete(key);
+    this.untrackLive(key);
     await scope.close('explicit');
     this._onDidCloseSession.fire({ ref });
   }
@@ -314,6 +342,28 @@ export class RuntimeSessionHostService extends Disposable implements IRuntimeSes
   /* ---------------------------------------------------------------------- */
   /* Side effects                                                            */
   /* ---------------------------------------------------------------------- */
+
+  /**
+   * Publish a freshly-activated scope into the process-wide live lookup
+   * (`ISessionLifecycleService.get/list/resume`) BEFORE the activation is
+   * announced, so every consumer reacting to the hooks/events — the
+   * kap-server broadcaster, transcript service, snapshot reader, wire-facts
+   * projection — already observes the session as live.
+   */
+  private trackLive(ref: SessionRef, scope: IRuntimeSessionScope): void {
+    this.trackings.set(
+      sessionRefKey(ref),
+      this.lifecycle.trackActivated(ref.sessionId, scope.handle),
+    );
+  }
+
+  /** Detach the live-lookup registration (idempotent per ref). */
+  private untrackLive(key: string): void {
+    const tracking = this.trackings.get(key);
+    if (tracking === undefined) return;
+    this.trackings.delete(key);
+    tracking.dispose();
+  }
 
   /**
    * The legacy `announceCreated`: run the shared lifecycle hook slot (the

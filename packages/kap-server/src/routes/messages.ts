@@ -24,6 +24,10 @@ import { getMessageResponseSchema, listMessagesResponseSchema } from '../protoco
 import { z } from 'zod';
 
 import { errEnvelope, okEnvelope } from '../envelope';
+import {
+  resolveV1LiveSession,
+  v1LiveSessionFailureEnvelope,
+} from '../app/v1Compatibility/v1LiveSession';
 import { requestLog } from '../lib/requestLog';
 import { defineRoute } from '../middleware/defineRoute';
 
@@ -97,6 +101,14 @@ export function registerMessagesRoutes(app: MessageRouteHost, core: Scope): void
     async (req, reply) => {
       try {
         const { session_id } = req.params;
+        // M5c: live through the resolver + runtime open/resume FIRST (plan
+        // §6.3), so the legacy service below reads the already-active handle
+        // instead of cold-activating through the legacy path.
+        const live = await resolveV1LiveSession(core, session_id);
+        if (live.kind !== 'live') {
+          reply.send(v1LiveSessionFailureEnvelope(live, session_id, req.id));
+          return;
+        }
         const page = await core.accessor.get(IMessageLegacyService).list(session_id, req.query);
         reply.send(okEnvelope(page, req.id));
       } catch (err) {
@@ -128,6 +140,12 @@ export function registerMessagesRoutes(app: MessageRouteHost, core: Scope): void
     async (req, reply) => {
       try {
         const { session_id, message_id } = req.params;
+        // M5c: live through the resolver + runtime open/resume (plan §6.3).
+        const live = await resolveV1LiveSession(core, session_id);
+        if (live.kind !== 'live') {
+          reply.send(v1LiveSessionFailureEnvelope(live, session_id, req.id));
+          return;
+        }
         const message = await core.accessor.get(IMessageLegacyService).get(session_id, message_id);
         reply.send(okEnvelope(message, req.id));
       } catch (err) {

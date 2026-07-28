@@ -45,7 +45,6 @@ import {
   type Interaction,
   ISessionInteractionService,
   ISessionQuestionService,
-  ISessionLifecycleService,
   type QuestionAnswers,
   type QuestionItem,
   type QuestionOption,
@@ -71,6 +70,10 @@ import {
 import { z } from 'zod';
 
 import { errEnvelope, okEnvelope } from '../envelope';
+import {
+  resolveV1LiveSession,
+  v1LiveSessionFailureEnvelope,
+} from '../app/v1Compatibility/v1LiveSession';
 import { requestLog } from '../lib/requestLog';
 import { defineRoute } from '../middleware/defineRoute';
 import { parseActionSuffix } from './action-suffix';
@@ -122,14 +125,13 @@ export function registerQuestionsRoutes(app: QuestionRouteHost, core: Scope): vo
     },
     async (req, reply) => {
       const { session_id } = req.params;
-      const handle = await core.accessor.get(ISessionLifecycleService).resume(session_id);
-      if (handle === undefined) {
-        reply.send(
-          errEnvelope(ErrorCode.SESSION_NOT_FOUND, `session ${session_id} does not exist`, req.id),
-        );
+      // M5c: live through the resolver + runtime open/resume (plan §6.3).
+      const live = await resolveV1LiveSession(core, session_id);
+      if (live.kind !== 'live') {
+        reply.send(v1LiveSessionFailureEnvelope(live, session_id, req.id));
         return;
       }
-      const pending = handle.accessor.get(ISessionInteractionService).listPending('question');
+      const pending = live.handle.accessor.get(ISessionInteractionService).listPending('question');
       const items = pending.map((i) => toWireQuestion(i, session_id));
       reply.send(okEnvelope({ items }, req.id));
     },
@@ -171,13 +173,13 @@ export function registerQuestionsRoutes(app: QuestionRouteHost, core: Scope): vo
       const questionId = parsed.id;
       const action: 'resolve' | 'dismiss' = parsed.kind === 'bare' ? 'resolve' : parsed.action;
 
-      const handle = await core.accessor.get(ISessionLifecycleService).resume(session_id);
-      if (handle === undefined) {
-        reply.send(
-          errEnvelope(ErrorCode.SESSION_NOT_FOUND, `session ${session_id} does not exist`, req.id),
-        );
+      // M5c: live through the resolver + runtime open/resume (plan §6.3).
+      const live = await resolveV1LiveSession(core, session_id);
+      if (live.kind !== 'live') {
+        reply.send(v1LiveSessionFailureEnvelope(live, session_id, req.id));
         return;
       }
+      const handle = live.handle;
 
       const interaction = handle.accessor.get(ISessionInteractionService);
       const pendingInteraction = interaction
