@@ -1021,6 +1021,45 @@ describe('SessionSkillCatalogService', () => {
     }
   });
 
+  it('reloads the plugin source after an fs event under a plugin skill root', async () => {
+    const store = new InMemorySkillDiscovery();
+    store.setPluginSkills([
+      stubSkill('initial-plugin', { source: 'extra', plugin: { id: 'demo' } }),
+    ]);
+    const pluginRoot: SkillRoot = {
+      path: '/plugins/demo/skills',
+      source: 'extra',
+      plugin: { id: 'demo' },
+    };
+    const { stub: ws } = workspaceStub('/work');
+    const { host, session, watch } = makeHost(store, ws, [pluginRoot]);
+
+    try {
+      const catalog = session.accessor.get(ISessionSkillCatalog);
+      await catalog.load();
+      expect(catalog.catalog.getPluginSkill('demo', 'initial-plugin')).toBeDefined();
+      expect(watch.watchedPaths()).toContain(pluginRoot.path);
+
+      store.setPluginSkills([
+        stubSkill('initial-plugin', { source: 'extra', plugin: { id: 'demo' } }),
+        stubSkill('added-plugin', { source: 'extra', plugin: { id: 'demo' } }),
+      ]);
+      const refreshed = new Promise<string>((resolve) => {
+        const subscription = catalog.onDidChange((sourceId) => {
+          if (sourceId !== 'plugin') return;
+          subscription.dispose();
+          resolve(sourceId);
+        });
+      });
+      watch.fire('/plugins/demo/skills/added-plugin/SKILL.md', { action: 'created' });
+
+      await expect(refreshed).resolves.toBe('plugin');
+      expect(catalog.catalog.getPluginSkill('demo', 'added-plugin')).toBeDefined();
+    } finally {
+      host.dispose();
+    }
+  });
+
   it('keeps the previous contribution when a watch-triggered reload fails', async () => {
     const store = new InMemorySkillDiscovery();
     store.setUserSkills([stubSkill('initial')]);

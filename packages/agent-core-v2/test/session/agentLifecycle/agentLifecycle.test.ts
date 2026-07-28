@@ -793,6 +793,52 @@ describe('AgentLifecycleService', () => {
     });
   });
 
+  it('fork waits for a cwd prompt refresh before returning the child', async () => {
+    const svc = ix.get(IAgentLifecycleService);
+    const source = await svc.create({ agentId: 'main' });
+    source.accessor.get(IAgentProfileService).applyBindingSnapshot({
+      cwd: '/work',
+      profileName: 'deleted-profile',
+      thinkingLevel: 'high',
+      systemPrompt: 'original prompt',
+    });
+    let markRefreshStarted!: () => void;
+    const refreshStarted = new Promise<void>((resolve) => {
+      markRefreshStarted = resolve;
+    });
+    let releaseRefresh!: () => void;
+    const refreshFinished = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    disposables.add(
+      svc.onDidCreate((handle) => {
+        if (handle.id !== 'forked') return;
+        vi.spyOn(handle.accessor.get(IAgentProfileService), 'refreshSystemPrompt')
+          .mockImplementation(() => {
+            markRefreshStarted();
+            return refreshFinished;
+          });
+      }),
+    );
+
+    let settled = false;
+    const forked = svc.fork('main', {
+      agentId: 'forked',
+      binding: { cwd: '/next-work' },
+    }).then((handle) => {
+      settled = true;
+      return handle;
+    });
+
+    await refreshStarted;
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    releaseRefresh();
+    const child = await forked;
+    expect(child.accessor.get(IAgentProfileService).data().cwd).toBe('/next-work');
+  });
+
   it('run throws when the agent does not exist', () => {
     ix.set(ISessionSubagentService, new SyncDescriptor(SessionSubagentService));
     const svc = ix.get(ISessionSubagentService);

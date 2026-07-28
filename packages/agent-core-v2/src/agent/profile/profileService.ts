@@ -670,7 +670,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
   }
 
   private get cwd(): string {
-    return this.profileState.cwd ?? this.readConfiguredCwd() ?? '';
+    return this.profileState.cwd ?? this.readConfiguredCwd() ?? this.sessionContext.cwd;
   }
 
   private get model(): string {

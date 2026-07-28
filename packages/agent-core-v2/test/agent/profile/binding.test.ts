@@ -107,6 +107,19 @@ describe('AgentProfileService.bind', () => {
     expect(svc.getSystemPrompt()).toContain('Kimi Code CLI');
   });
 
+  it('uses the session cwd when binding omits a cwd override', async () => {
+    ctx = createTestAgent(
+      { autoConfigure: false, cwd: homeDir },
+      hostEnvironmentServices(homeDir),
+    );
+    const svc = ctx.get(IAgentProfileService);
+
+    await svc.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: MOCK_MODEL });
+
+    expect(svc.data().cwd).toBe(homeDir);
+    expect(svc.getSystemPrompt()).toContain(`The current working directory is \`${homeDir}\``);
+  });
+
   it('binds without a skill listing when the skill catalog fails to initialize', async () => {
     const ready = Promise.reject(new Error('skill catalog unavailable'));
     void ready.catch(() => undefined);

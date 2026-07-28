@@ -250,7 +250,10 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
       childProfile.applyBindingSnapshot(sourceData);
       if (override?.model !== undefined) await childProfile.setModel(override.model);
       if (override?.thinking !== undefined) childProfile.setThinking(override.thinking);
-      if (override?.cwd !== undefined) childProfile.update({ cwd: override.cwd });
+      if (override?.cwd !== undefined) {
+        childProfile.update({ cwd: override.cwd });
+        await childProfile.refreshSystemPrompt();
+      }
     }
 
     const sourceMessages = source.accessor.get(IAgentContextMemoryService)?.get();
