@@ -128,6 +128,7 @@ export function makeLeaseSessionContext(
   return {
     _serviceBrand: undefined,
     sessionId: lease.ref.sessionId,
+    runtimeId: lease.ref.runtimeId,
     workspaceId: '',
     sessionDir: '',
     metaScope: scope,

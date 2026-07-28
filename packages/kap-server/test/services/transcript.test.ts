@@ -25,6 +25,7 @@ import {
   type ISessionScopeHandle,
   type ISessionStateService,
   type Scope,
+  type SessionRef,
 } from '@moonshot-ai/agent-core-v2';
 import {
   AgentTranscript,
@@ -53,6 +54,8 @@ import { fakeRuntimeHarness } from '../helpers/fakeRuntime';
 function ev(payload: Record<string, unknown>): DomainEvent {
   return payload as unknown as DomainEvent;
 }
+
+const ref = (sessionId: string): SessionRef => ({ runtimeId: 'test-runtime', sessionId });
 
 class TestSessionStateService extends StateRegistry implements ISessionStateService {
   declare readonly _serviceBrand: undefined;
@@ -1488,6 +1491,7 @@ describe('AgentTranscriptProjector', () => {
                 return {
                   onDidCloseSession: () => ({ dispose: () => undefined }),
                   onDidArchiveSession: () => ({ dispose: () => undefined }),
+                  getByRef: () => undefined,
                 };
               }
               return undefined;
@@ -1594,6 +1598,7 @@ describe('AgentTranscriptProjector', () => {
                 return {
                   onDidCloseSession: () => ({ dispose: () => undefined }),
                   onDidArchiveSession: () => ({ dispose: () => undefined }),
+                  getByRef: () => undefined,
                 };
               }
               if (token === ISessionIndex) return { get: async () => ({ workspaceId: 'ws' }) };
@@ -1647,7 +1652,7 @@ describe('AgentTranscriptProjector', () => {
         expect.objectContaining({ kind: 'marker', marker: 'plan.enter', markerId: 'm2' }),
         expect.objectContaining({ kind: 'taskref', refId: 'ref-task_1', taskId: 'task_1' }),
       ]);
-      service.dropSession('s1');
+      service.dropSession(ref('s1'));
     } finally {
       await rm(home, { recursive: true, force: true });
     }
@@ -1912,10 +1917,13 @@ describe('bindSessionTranscript', () => {
             };
           }
           if (token === ISessionLifecycleService) {
+            const getSession = (sid: string) =>
+              sid === 's1' ? fakeSession(interactions, agents) : undefined;
             return {
               onDidCloseSession: () => ({ dispose: () => undefined }),
               onDidArchiveSession: () => ({ dispose: () => undefined }),
-              get: (sid: string) => (sid === 's1' ? fakeSession(interactions, agents) : undefined),
+              get: getSession,
+              getByRef: (r: SessionRef) => getSession(r.sessionId),
             };
           }
           if (token === ISessionIndex) return { get: async () => ({ workspaceId: 'ws' }) };
@@ -2163,15 +2171,15 @@ describe('bindSessionTranscript', () => {
         resolver: fakeRuntimeHarness(home).resolver,
         core: fakeCoreWithAgents(new SessionInteractionService(new TestSessionStateService()), agents),
       });
-      const store = service.forSessionLive('s1');
-      await service.whenReady('s1');
+      const store = service.forSessionLive(ref('s1'));
+      await service.whenReady(ref('s1'));
       // The cold rebuild marked the turn completed; the overlay restores the
       // in-flight state and keeps the snapshot's prompt.
       expect(store?.getAgent('main')?.getTurn('t0')).toMatchObject({
         state: 'running',
         prompt: 'hi',
       });
-      service.dropSession('s1');
+      service.dropSession(ref('s1'));
     } finally {
       await rm(home, { recursive: true, force: true });
     }
@@ -2186,7 +2194,7 @@ describe('bindSessionTranscript', () => {
         resolver: fakeRuntimeHarness(home).resolver,
         core: fakeCoreWithAgents(new SessionInteractionService(new TestSessionStateService()), agents),
       });
-      const store = service.forSessionLive('s1');
+      const store = service.forSessionLive(ref('s1'));
       // Live events land while the backfill is still reading from disk.
       const bus = agents.get('main')!.bus;
       bus.emit(ev({ type: 'turn.started', turnId: 0, origin: { kind: 'user' }, prompt: 'hi' }));
@@ -2202,7 +2210,7 @@ describe('bindSessionTranscript', () => {
           display: { kind: 'command', command: 'ls' },
         }),
       );
-      await service.whenReady('s1');
+      await service.whenReady(ref('s1'));
 
       const turn = store?.getAgent('main')?.getTurn('t0');
       expect(turn?.state).toBe('running');
@@ -2216,7 +2224,7 @@ describe('bindSessionTranscript', () => {
         output: 'a.txt',
         display: { kind: 'command', command: 'ls' },
       });
-      service.dropSession('s1');
+      service.dropSession(ref('s1'));
     } finally {
       await rm(home, { recursive: true, force: true });
     }
@@ -2231,18 +2239,18 @@ describe('bindSessionTranscript', () => {
         resolver: fakeRuntimeHarness(home).resolver,
         core: fakeCoreWithAgents(new SessionInteractionService(new TestSessionStateService()), agents),
       });
-      const store = service.forSessionLive('s1');
+      const store = service.forSessionLive(ref('s1'));
       // The projector writes the live running header before the disk backfill
       // lands; the snapshot's cold 'completed' header must not win.
       agents
         .get('main')!
         .bus.emit(ev({ type: 'turn.started', turnId: 0, origin: { kind: 'user' }, prompt: 'live hi' }));
-      await service.whenReady('s1');
+      await service.whenReady(ref('s1'));
       expect(store?.getAgent('main')?.getTurn('t0')).toMatchObject({
         state: 'running',
         prompt: 'live hi',
       });
-      service.dropSession('s1');
+      service.dropSession(ref('s1'));
     } finally {
       await rm(home, { recursive: true, force: true });
     }
@@ -2254,14 +2262,14 @@ describe('bindSessionTranscript', () => {
       // Real listener registries on the host stub — after M5c the eager
       // cleanup subscribes to the runtime session host's lifecycle events,
       // not the legacy lifecycle's.
-      const closeListeners = new Set<(event: { ref: { sessionId: string } }) => void>();
-      const archiveListeners = new Set<(event: { ref: { sessionId: string } }) => void>();
+      const closeListeners = new Set<(event: { ref: SessionRef }) => void>();
+      const archiveListeners = new Set<(event: { ref: SessionRef }) => void>();
       const hostStub = {
-        onDidCloseSession: (listener: (event: { ref: { sessionId: string } }) => void) => {
+        onDidCloseSession: (listener: (event: { ref: SessionRef }) => void) => {
           closeListeners.add(listener);
           return { dispose: () => closeListeners.delete(listener) };
         },
-        onDidArchiveSession: (listener: (event: { ref: { sessionId: string } }) => void) => {
+        onDidArchiveSession: (listener: (event: { ref: SessionRef }) => void) => {
           archiveListeners.add(listener);
           return { dispose: () => archiveListeners.delete(listener) };
         },
@@ -2273,7 +2281,9 @@ describe('bindSessionTranscript', () => {
         accessor: {
           get: (token: unknown) => {
             if (token === IRuntimeSessionHostService) return hostStub;
-            if (token === ISessionLifecycleService) return { get: () => liveHandle };
+            if (token === ISessionLifecycleService) {
+              return { get: () => liveHandle, getByRef: () => liveHandle };
+            }
             return undefined;
           },
         },
@@ -2283,27 +2293,27 @@ describe('bindSessionTranscript', () => {
         core,
       });
 
-      const first = service.forSessionLive('s1');
+      const first = service.forSessionLive(ref('s1'));
       expect(first).toBeDefined();
 
       // The host's close event drops the entry EAGERLY: the next lookup
       // rebuilds a brand-new store instead of serving the stale one — the
       // session is still live here, so a re-check alone would have kept it.
-      for (const listener of closeListeners) listener({ ref: { sessionId: 's1' } });
-      const second = service.forSessionLive('s1');
+      for (const listener of closeListeners) listener({ ref: ref('s1') });
+      const second = service.forSessionLive(ref('s1'));
       expect(second).toBeDefined();
       expect(second).not.toBe(first);
 
       // Same for archive.
-      for (const listener of archiveListeners) listener({ ref: { sessionId: 's1' } });
-      const third = service.forSessionLive('s1');
+      for (const listener of archiveListeners) listener({ ref: ref('s1') });
+      const third = service.forSessionLive(ref('s1'));
       expect(third).toBeDefined();
       expect(third).not.toBe(second);
 
       // And once the session is gone from the live lookup, reads report cold.
       liveHandle = undefined;
-      for (const listener of closeListeners) listener({ ref: { sessionId: 's1' } });
-      expect(service.forSessionLive('s1')).toBeUndefined();
+      for (const listener of closeListeners) listener({ ref: ref('s1') });
+      expect(service.forSessionLive(ref('s1'))).toBeUndefined();
     } finally {
       await rm(home, { recursive: true, force: true });
     }
@@ -2317,47 +2327,47 @@ describe('bindSessionTranscript', () => {
         resolver: fakeRuntimeHarness('/nonexistent-home').resolver,
         core: fakeCoreWithAgents(new SessionInteractionService(new TestSessionStateService()), agents),
       });
-      service.forSessionLive('s1');
-      await service.whenReady('s1');
+      service.forSessionLive(ref('s1'));
+      await service.whenReady(ref('s1'));
       // The backfill dispatch is the first journaled batch for main; measure
       // everything relative to it.
-      const base = service.getSeqWatermark('s1', 'main');
+      const base = service.getSeqWatermark(ref('s1'), 'main');
 
       const seen: number[] = [];
-      service.onSessionOps('s1', (_event, seq) => seen.push(seq));
+      service.onSessionOps(ref('s1'), (_event, seq) => seen.push(seq));
       main.bus.emit(ev({ type: 'turn.started', turnId: 0, origin: { kind: 'user' } }));
       main.bus.emit(ev({ type: 'turn.ended', turnId: 0, reason: 'completed' }));
 
       expect(seen).toEqual([base + 1, base + 2]);
-      expect(service.getSeqWatermark('s1', 'main')).toBe(base + 2);
+      expect(service.getSeqWatermark(ref('s1'), 'main')).toBe(base + 2);
 
       // Complete catch-up: exactly the batches past the cursor, ascending.
-      const catchup = service.getOpsSince('s1', 'main', base);
+      const catchup = service.getOpsSince(ref('s1'), 'main', base);
       expect(catchup?.complete).toBe(true);
       expect(catchup?.latestSeq).toBe(base + 2);
       expect(catchup?.batches.map((batch) => batch.seq)).toEqual([base + 1, base + 2]);
 
       // An up-to-date cursor replays nothing but is still complete.
-      expect(service.getOpsSince('s1', 'main', base + 2)).toMatchObject({
+      expect(service.getOpsSince(ref('s1'), 'main', base + 2)).toMatchObject({
         batches: [],
         latestSeq: base + 2,
         complete: true,
       });
       // A cursor ahead of the watermark belongs to a dead journal
       // incarnation — the server cannot vouch for it.
-      expect(service.getOpsSince('s1', 'main', base + 3)?.complete).toBe(false);
+      expect(service.getOpsSince(ref('s1'), 'main', base + 3)?.complete).toBe(false);
 
       // Seqs are per agent: a late agent starts its own counter at 1 (no
       // backfill batch precedes its live ops).
       const sub = agents.add('sub-1');
       sub.bus.emit(ev({ type: 'turn.started', turnId: 0, origin: { kind: 'user' } }));
-      expect(service.getSeqWatermark('s1', 'sub-1')).toBe(1);
-      expect(service.getOpsSince('s1', 'sub-1', 0)?.batches.map((batch) => batch.seq)).toEqual([1]);
+      expect(service.getSeqWatermark(ref('s1'), 'sub-1')).toBe(1);
+      expect(service.getOpsSince(ref('s1'), 'sub-1', 0)?.batches.map((batch) => batch.seq)).toEqual([1]);
 
       // Unknown agent / cold session: watermark 0, no journal at all.
-      expect(service.getSeqWatermark('s1', 'nope')).toBe(0);
-      expect(service.getOpsSince('nope-session', 'main', 0)).toBeUndefined();
-      service.dropSession('s1');
+      expect(service.getSeqWatermark(ref('s1'), 'nope')).toBe(0);
+      expect(service.getOpsSince(ref('nope-session'), 'main', 0)).toBeUndefined();
+      service.dropSession(ref('s1'));
     });
 
     it('marks catch-up incomplete once the bounded journal evicts old batches', async () => {
@@ -2367,30 +2377,30 @@ describe('bindSessionTranscript', () => {
         resolver: fakeRuntimeHarness('/nonexistent-home').resolver,
         core: fakeCoreWithAgents(new SessionInteractionService(new TestSessionStateService()), agents),
       });
-      service.forSessionLive('s1');
-      await service.whenReady('s1');
-      const base = service.getSeqWatermark('s1', 'main');
+      service.forSessionLive(ref('s1'));
+      await service.whenReady(ref('s1'));
+      const base = service.getSeqWatermark(ref('s1'), 'main');
 
       for (let turnId = 1; turnId <= TRANSCRIPT_OPS_JOURNAL_CAPACITY + 1; turnId++) {
         main.bus.emit(ev({ type: 'turn.started', turnId, origin: { kind: 'user' } }));
       }
-      const watermark = service.getSeqWatermark('s1', 'main');
+      const watermark = service.getSeqWatermark(ref('s1'), 'main');
       expect(watermark).toBe(base + TRANSCRIPT_OPS_JOURNAL_CAPACITY + 1);
 
       // The oldest batches evicted: a cursor at the former base is no longer
       // covered.
-      const evicted = service.getOpsSince('s1', 'main', base);
+      const evicted = service.getOpsSince(ref('s1'), 'main', base);
       expect(evicted?.complete).toBe(false);
       expect(evicted?.latestSeq).toBe(watermark);
       expect(evicted?.batches).toHaveLength(TRANSCRIPT_OPS_JOURNAL_CAPACITY);
 
       // A recent cursor is still fully covered.
-      const recent = service.getOpsSince('s1', 'main', watermark - 10);
+      const recent = service.getOpsSince(ref('s1'), 'main', watermark - 10);
       expect(recent?.complete).toBe(true);
       expect(recent?.batches.map((batch) => batch.seq)).toEqual(
         Array.from({ length: 10 }, (_, i) => watermark - 9 + i),
       );
-      service.dropSession('s1');
+      service.dropSession(ref('s1'));
     });
   });
 });

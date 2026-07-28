@@ -102,7 +102,7 @@ async function applyPlanMode(host: SlashCommandHost, session: Session, enabled: 
       const plan = await session.getPlan().catch(() => null);
       host.showNotice(
         'Plan mode: ON',
-        plan?.path !== undefined ? `Plan will be created here: ${plan.path}` : undefined,
+        plan?.path ? `Plan will be created here: ${plan.path}` : undefined,
       );
       return;
     }

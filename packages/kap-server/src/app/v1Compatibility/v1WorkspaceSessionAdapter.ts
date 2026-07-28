@@ -46,6 +46,7 @@ import {
   IWorkspaceService,
   type Scope,
   type SessionMeta,
+  type SessionRef,
   type Workspace,
 } from '@moonshot-ai/agent-core-v2';
 
@@ -59,6 +60,8 @@ export type V1CreateSessionOutcome =
       readonly kind: 'created';
       /** Fresh metadata read from the live session (title already applied). */
       readonly meta: SessionMeta;
+      /** The new session's full internal identity (edge-only; never projected). */
+      readonly ref: SessionRef;
       /** The catalog entry the create resolved/touched (id + root). */
       readonly workspace: Workspace;
     }
@@ -153,7 +156,7 @@ export async function createV1WorkspaceSession(
     await created.handle.accessor.get(ISessionMetadata).setTitle(body.title);
   }
   const meta = await created.handle.accessor.get(ISessionMetadata).read();
-  return { kind: 'created', meta, workspace: touched };
+  return { kind: 'created', meta, ref: created.ref, workspace: touched };
 }
 
 /** The v1 validation-envelope builder (same shape as the route's local one). */

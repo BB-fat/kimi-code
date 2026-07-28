@@ -11,6 +11,7 @@
 import type { Scope } from '@moonshot-ai/agent-core-v2';
 import { WebSocketServer } from 'ws';
 
+import type { IV1SessionRefResolver } from '../../../app/v1Compatibility/v1SessionRefResolver';
 import type { CredentialValidator } from '../../../services/auth/credentials';
 import { type IConnectionRegistry } from '../connectionRegistry';
 import type { SessionEventBroadcaster } from './sessionEventBroadcaster';
@@ -27,6 +28,8 @@ export interface RegisterWsV1Options {
   readonly registry: IConnectionRegistry;
   readonly broadcaster: SessionEventBroadcaster;
   readonly fsWatchBridge: FsWatchBridge;
+  /** The single bare-id entry point every connection resolves control frames through (plan §6.4). */
+  readonly resolver: IV1SessionRefResolver;
   readonly logger?: JournalLogger;
   readonly maxBufferSize?: number;
   readonly flushIntervalMs?: number;
@@ -45,6 +48,7 @@ export function registerWsV1(core: Scope, opts: RegisterWsV1Options): WebSocketS
       broadcaster,
       fsWatchBridge: opts.fsWatchBridge,
       connectionRegistry: registry,
+      resolver: opts.resolver,
       validateCredential: opts.validateCredential,
       remoteAddress: req.socket.remoteAddress ?? null,
       userAgent: req.headers['user-agent'] ?? null,

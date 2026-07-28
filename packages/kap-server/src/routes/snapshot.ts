@@ -164,7 +164,7 @@ async function readViaLegacyAssembly(
   const handle = live.handle;
 
   // Watermark + in-flight turn (drains the dispatch queue for consistency).
-  const snapState = await broadcaster.getSnapshotState(sessionId);
+  const snapState = await broadcaster.getSnapshotState(live.resolution.ref);
 
   // Session wire shape (needs the workspace root for `metadata.cwd`).
   // `ISessionMetadata` normalizes legacy v1 documents on load (absent

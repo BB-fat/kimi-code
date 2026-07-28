@@ -53,6 +53,13 @@ export interface PromptMetadataUpdateTarget {
   readonly metadata: ISessionMetadata;
   readonly eventService: IEventService;
   readonly sessionId: string;
+  /**
+   * The internal `SessionRef`'s runtime half when the session was activated
+   * through a runtime lease (M6) — carried on the internal event payload so
+   * the edge routes the update to the exact session; never projected onto
+   * the v1 wire.
+   */
+  readonly runtimeId?: string;
 }
 
 export async function applyPromptMetadataUpdate(
@@ -74,6 +81,7 @@ export async function applyPromptMetadataUpdate(
     payload: {
       agentId: 'main',
       sessionId: target.sessionId,
+      runtimeId: target.runtimeId,
       title: patch.title,
       patch: {
         title: patch.title,

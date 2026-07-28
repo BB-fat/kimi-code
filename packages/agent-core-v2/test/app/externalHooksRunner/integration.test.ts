@@ -197,6 +197,7 @@ function stubSessionLifecycle(): ISessionLifecycleService {
       throw new Error('not implemented');
     },
     get: () => undefined,
+    getByRef: () => undefined,
     list: () => [],
     resume: async () => undefined,
     trackActivated: () => ({ dispose: () => undefined }),

@@ -13,6 +13,7 @@ import type { Scope } from '@moonshot-ai/agent-core-v2';
 import { ulid } from 'ulid';
 
 import { okEnvelope } from '../envelope';
+import { createV1SessionRefResolver } from '../app/v1Compatibility/v1SessionRefResolver';
 import { type IConnectionRegistry } from '../transport/ws/connectionRegistry';
 import { type SessionEventBroadcaster } from '../transport/ws/v1/sessionEventBroadcaster';
 import type { TranscriptService } from '../services/transcript/transcriptService';
@@ -166,6 +167,7 @@ export async function registerApiV1Routes(
       registerTranscriptRoutes(apiV1 as unknown as Parameters<typeof registerTranscriptRoutes>[0], {
         core,
         transcriptService: opts.transcriptService,
+        resolver: createV1SessionRefResolver(core),
       });
       if (opts.enableShutdown !== false) {
         registerShutdownRoutes(apiV1 as unknown as Parameters<typeof registerShutdownRoutes>[0], {

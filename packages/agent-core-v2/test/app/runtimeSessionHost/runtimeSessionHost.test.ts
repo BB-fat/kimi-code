@@ -762,9 +762,9 @@ describe('runtimeSessionHost branch behavior', () => {
       onDidCloseSession: Event.None,
       onDidArchiveSession: Event.None,
       onDidForkSession: Event.None,
-      trackActivated: (sessionId: string) => {
-        tracked.add(sessionId);
-        return { dispose: () => tracked.delete(sessionId) };
+      trackActivated: (ref: SessionRef) => {
+        tracked.add(ref.sessionId);
+        return { dispose: () => tracked.delete(ref.sessionId) };
       },
     } as unknown as ISessionLifecycleService;
     const { app: root } = bootstrap(

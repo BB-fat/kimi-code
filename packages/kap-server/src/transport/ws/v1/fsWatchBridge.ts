@@ -31,7 +31,9 @@ import {
   ISessionFsWatchService,
   ISessionLifecycleService,
   ISessionWorkspaceContext,
+  sessionRefKey,
   type Scope,
+  type SessionRef,
 } from '@moonshot-ai/agent-core-v2';
 import type { FsChangeEntry, FsChangeEvent } from '@moonshot-ai/agent-core-v2/session/sessionFs/fsWatch';
 
@@ -73,6 +75,11 @@ interface ConnEntry {
 }
 
 interface SessionWatch {
+  /** The map key: the full `SessionRef`'s `sessionRefKey` (M6). */
+  readonly key: string;
+  /** The session's full identity (resolved at the WS edge). */
+  readonly ref: SessionRef;
+  /** The bare session id — WIRE PROJECTION ONLY (`session_id` frame field). */
   readonly id: string;
   readonly session: ISessionScopeHandle;
   readonly fsWatch: ISessionFsWatchService;
@@ -86,6 +93,7 @@ interface SessionWatch {
 export class FsWatchBridge {
   private readonly core: Scope;
   private readonly logger: JournalLogger | undefined;
+  /** Live watches, keyed by the full `SessionRef` (`sessionRefKey`) — M6: two same-named sessions hosted by different runtimes never share a watch. */
   private readonly bySession = new Map<string, SessionWatch>();
   private readonly connPathCount = new Map<string, number>();
 
@@ -96,10 +104,10 @@ export class FsWatchBridge {
 
   async addWatch(
     conn: FsWatchConnection,
-    sessionId: string,
+    ref: SessionRef,
     rawPaths: readonly string[],
   ): Promise<FsWatchAck> {
-    const resolved = this.resolveSession(sessionId);
+    const resolved = this.resolveSession(ref);
     if (resolved === undefined) {
       return { code: FS_WATCH_CODE.SESSION_NOT_FOUND, msg: 'session not found' };
     }
@@ -141,7 +149,10 @@ export class FsWatchBridge {
     sessionId: string,
     rawPaths: readonly string[],
   ): Promise<FsWatchAck> {
-    const sw = this.bySession.get(sessionId);
+    // Removal arrives with the bare wire id; the ref was pinned at add time.
+    // A connection can hold at most one watch per bare id (a second add for
+    // the same id would have re-resolved), so the per-conn match is unique.
+    const sw = this.findConnWatch(conn, sessionId);
     const entry = sw?.conns.get(conn.id);
     if (sw === undefined || entry === undefined) {
       return { code: FS_WATCH_CODE.OK, msg: 'success', watched_paths: [], current_count: this.countFor(conn.id) };
@@ -173,13 +184,20 @@ export class FsWatchBridge {
     this.connPathCount.delete(conn.id);
   }
 
-  private resolveSession(sessionId: string): SessionWatch | undefined {
-    const existing = this.bySession.get(sessionId);
+  private resolveSession(ref: SessionRef): SessionWatch | undefined {
+    const key = sessionRefKey(ref);
+    const existing = this.bySession.get(key);
     if (existing !== undefined) return existing;
-    const session = this.core.accessor.get(ISessionLifecycleService).get(sessionId);
+    // The process-wide live lookup, addressed by the FULL ref (M6): host
+    // sessions surface through their ref-keyed `trackActivated` entries and
+    // legacy-activated sessions through the lifecycle's own map. A session
+    // that is not live keeps the pre-M6 not-found mapping (40409).
+    const session = this.core.accessor.get(ISessionLifecycleService).getByRef(ref);
     if (session === undefined) return undefined;
     const sw: SessionWatch = {
-      id: sessionId,
+      key,
+      ref,
+      id: ref.sessionId,
       session,
       fsWatch: session.accessor.get(ISessionFsWatchService),
       workspace: session.accessor.get(ISessionWorkspaceContext),
@@ -188,8 +206,16 @@ export class FsWatchBridge {
       seq: 0,
       sub: undefined,
     };
-    this.bySession.set(sessionId, sw);
+    this.bySession.set(key, sw);
     return sw;
+  }
+
+  /** The connection's own watch for a bare session id (unique per connection). */
+  private findConnWatch(conn: FsWatchConnection, sessionId: string): SessionWatch | undefined {
+    for (const sw of this.bySession.values()) {
+      if (sw.id === sessionId && sw.conns.has(conn.id)) return sw;
+    }
+    return undefined;
   }
 
   private recomputeAndApply(sw: SessionWatch): void {
@@ -200,7 +226,7 @@ export class FsWatchBridge {
     sw.union = union;
     sw.fsWatch.setWatchedPaths([...union]);
     if (union.size > 0 && sw.sub === undefined) {
-      sw.sub = sw.fsWatch.onDidChangeFiles((ev) => this.onSessionEvent(sw.id, ev));
+      sw.sub = sw.fsWatch.onDidChangeFiles((ev) => this.onSessionEvent(sw.key, ev));
     }
   }
 
@@ -208,11 +234,11 @@ export class FsWatchBridge {
     sw.sub?.dispose();
     sw.sub = undefined;
     sw.fsWatch.setWatchedPaths([]);
-    this.bySession.delete(sw.id);
+    this.bySession.delete(sw.key);
   }
 
-  private onSessionEvent(sessionId: string, ev: FsChangeEvent): void {
-    const sw = this.bySession.get(sessionId);
+  private onSessionEvent(key: string, ev: FsChangeEvent): void {
+    const sw = this.bySession.get(key);
     if (sw === undefined) return;
     for (const { conn, paths } of sw.conns.values()) {
       let changes: FsChangeEntry[];
@@ -226,7 +252,7 @@ export class FsWatchBridge {
       const frame: FsChangedFrame = {
         type: 'event.fs.changed',
         seq: sw.seq,
-        session_id: sessionId,
+        session_id: sw.id,
         timestamp: new Date().toISOString(),
         payload: {
           changes,
@@ -237,7 +263,7 @@ export class FsWatchBridge {
       try {
         conn.send(frame as EventEnvelope);
       } catch (error) {
-        this.logger?.warn({ sessionId, err: String(error) }, 'fs-watch send failed');
+        this.logger?.warn({ sessionId: sw.id, err: String(error) }, 'fs-watch send failed');
       }
     }
   }

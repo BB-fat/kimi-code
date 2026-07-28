@@ -537,7 +537,13 @@ export class LocalWorkspaceSessionManager implements ISessionManager {
       ...this.contributions,
       sessionServices: [
         ...this.contributions.sessionServices,
-        localSessionContextContribution(this.workspaceId, sessionId, this.homeDir, this.cwd),
+        localSessionContextContribution(
+          this.workspaceId,
+          sessionId,
+          this.homeDir,
+          this.cwd,
+          this.runtimeId,
+        ),
       ],
     };
     const lease = new LocalSessionLease(

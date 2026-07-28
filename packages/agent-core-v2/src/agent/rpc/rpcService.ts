@@ -210,6 +210,7 @@ export class AgentRPCService implements IAgentRPCService {
         metadata: this.metadata,
         eventService: this.eventService,
         sessionId: this.sessionContext.sessionId,
+        runtimeId: this.sessionContext.runtimeId,
       },
       text,
     );

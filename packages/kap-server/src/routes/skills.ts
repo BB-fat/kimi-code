@@ -93,6 +93,7 @@ import {
   userRoots,
   type ISessionScopeHandle,
   type Scope,
+  type SessionRef,
   type SkillDefinition,
   type ExtraSkillDirsConfig,
   type MergeAllAvailableSkillsConfig,
@@ -146,7 +147,7 @@ const skillTailParamsSchema = z.object({
 });
 
 type ResolvedSession =
-  | { readonly handle: ISessionScopeHandle }
+  | { readonly handle: ISessionScopeHandle; readonly ref: SessionRef }
   | { readonly envelope: ReturnType<typeof errEnvelope> };
 
 /**
@@ -163,7 +164,7 @@ async function resolveActivatedSession(
   requestId: string,
 ): Promise<ResolvedSession> {
   const live = await resolveV1LiveSession(core, sessionId);
-  if (live.kind === 'live') return { handle: live.handle };
+  if (live.kind === 'live') return { handle: live.handle, ref: live.resolution.ref };
   return { envelope: v1LiveSessionFailureEnvelope(live, sessionId, requestId) };
 }
 
@@ -293,6 +294,8 @@ export function registerSkillsRoutes(app: SkillsRouteHost, core: Scope): void {
             metadata: resolved.handle.accessor.get(ISessionMetadata),
             eventService: core.accessor.get(IEventService),
             sessionId: session_id,
+            // M6: pin the internal event to the resolved runtime (see prompts.ts).
+            runtimeId: resolved.ref.runtimeId,
           },
           promptMetadataTextFromSkill({ name: parsed.id, args: req.body.args }),
         );

@@ -48,6 +48,7 @@ export class LocalSessionContextSeed implements ISessionContext {
     readonly sessionDir: string,
     readonly metaScope: string,
     readonly cwd: string,
+    readonly runtimeId?: string,
   ) {}
 
   scope(subKey?: string): string {
@@ -59,13 +60,16 @@ export class LocalSessionContextSeed implements ISessionContext {
  * Build the per-session `ISessionContext` replacement contribution for one
  * local lease. `scope()`/`metaScope` reproduce the lease's session namespace
  * exactly (the local runtime mints namespaces as the legacy storage scopes),
- * so persistence addressing is unchanged by the replacement.
+ * so persistence addressing is unchanged by the replacement. `runtimeId`
+ * carries the internal `SessionRef`'s other half (M6) — never projected onto
+ * the v1 wire.
  */
 export function localSessionContextContribution(
   workspaceId: string,
   sessionId: string,
   homeDir: string,
   cwd: string,
+  runtimeId?: string,
 ): ScopedServiceContribution {
   const sessionScope = sessionScopeOf(workspaceId, sessionId);
   return {
@@ -76,6 +80,7 @@ export function localSessionContextContribution(
       join(homeDir, sessionScope),
       sessionScope,
       cwd,
+      runtimeId,
     ]),
     requires: ['session.host_files'],
   };

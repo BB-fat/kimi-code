@@ -375,6 +375,7 @@ export async function startServer(opts: ServerStartOptions = {}): Promise<Runnin
     core,
     logger,
     transcriptService,
+    resolver: v1SessionRefResolver,
   });
   const fsWatchBridge = new FsWatchBridge({ core, logger });
 
@@ -452,6 +453,7 @@ export async function startServer(opts: ServerStartOptions = {}): Promise<Runnin
     registry: connectionRegistry,
     broadcaster,
     fsWatchBridge,
+    resolver: v1SessionRefResolver,
     logger,
   });
 

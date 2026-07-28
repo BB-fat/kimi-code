@@ -31,6 +31,15 @@
  * `getSnapshotState` / `getCursor` and stays active for the process lifetime so
  * the journal is continuous from first activation onward.
  *
+ * M6 keying: every public session-addressing method takes the FULL
+ * `SessionRef` — the v1 WS edge resolves the bare wire `session_id` through
+ * `IV1SessionRefResolver` before calling in (plan §6.4). States, pending
+ * activations, journals (file paths), tracker/roster accumulators and the
+ * transcript stream are all keyed by `sessionRefKey`, so two runtimes hosting
+ * a same-named session stream fully independently; every outbound frame keeps
+ * projecting the bare `session_id` from `SessionState.sessionId` (wire shape
+ * unchanged, no `runtimeId`/`ref` fields anywhere).
+ *
  * Fan-out split: global events ({@link isGlobalEvent} — `session.meta.updated`
  * plus the `event.session.*` / `event.workspace.*` / `event.config.*`
  * families, including every session's `event.session.work_changed`) are pushed
@@ -62,6 +71,7 @@ import type {
   ISessionScopeHandle,
   Scope,
   SessionActivityState,
+  SessionRef,
 } from '@moonshot-ai/agent-core-v2';
 import {
   IAgentLifecycleService,
@@ -69,9 +79,9 @@ import {
   IEventService,
   ISessionActivityView,
   ISessionInteractionService,
-  ISessionIndex,
   ISessionLifecycleService,
   MAIN_AGENT_ID,
+  sessionRefKey,
 } from '@moonshot-ai/agent-core-v2';
 import type { SessionCreatedEvent, SessionMetaUpdatedEvent, Event } from './events';
 import { isVolatileEventType } from './events';
@@ -92,6 +102,7 @@ import {
   type TranscriptStore,
 } from '@moonshot-ai/transcript';
 
+import type { IV1SessionRefResolver } from '../../../app/v1Compatibility/v1SessionRefResolver';
 import { toWireApproval } from '../../../routes/approvals';
 import { toWireQuestion } from '../../../routes/questions';
 import { readLegacyStatus, toLegacyPhase } from '../../../services/legacyStatus/legacyStatus';
@@ -100,6 +111,7 @@ import { InFlightTurnTracker } from './inFlightTurnTracker';
 import { SubagentRosterTracker } from './subagentRosterTracker';
 import {
   type EventEnvelope,
+  globalJournalPath,
   type JournalLogger,
   SessionEventJournal,
   sessionJournalPath,
@@ -160,6 +172,16 @@ interface TranscriptStream {
 }
 
 interface SessionState {
+  /**
+   * The map key this state is filed under (M6): the full `SessionRef`'s
+   * `sessionRefKey` for a real session — two same-named sessions hosted by
+   * different runtimes get independent states, journals and trackers — or the
+   * `__global__` pseudo-key for the global watermark state.
+   */
+  readonly key: string;
+  /** The session's full identity; `undefined` only on the global state. */
+  readonly ref?: SessionRef;
+  /** The bare session id — WIRE PROJECTION ONLY (`session_id` frame field). */
   readonly sessionId: string;
   readonly journal: SessionEventJournal;
   readonly tracker: InFlightTurnTracker;
@@ -208,6 +230,12 @@ async function disposeSessionState(state: SessionState): Promise<void> {
 }
 
 export class SessionEventBroadcaster {
+  /**
+   * Live session states, keyed by `SessionState.key` (M6): the full
+   * `SessionRef`'s `sessionRefKey` — NEVER the bare id, so two runtimes
+   * hosting a same-named session fan out fully independently — plus the
+   * `__global__` pseudo-key for the global watermark state.
+   */
   private readonly sessions = new Map<string, SessionState>();
   /**
    * Every established connection, subscribed or not. Global events
@@ -245,6 +273,14 @@ export class SessionEventBroadcaster {
        * transcript disabled (tests / minimal embeds).
        */
       readonly transcriptService?: TranscriptService;
+      /**
+       * The v1 bare-id entry point (plan §1.3), used ONLY to route core events
+       * (`session.meta.updated` without a `runtimeId` on the payload) to their
+       * owning session state (M6). Absent = such events are DROPPED (the
+       * bare-id fallback has no way to find the owner — tests / minimal
+       * embeds that publish these events must pass a resolver).
+       */
+      readonly resolver?: IV1SessionRefResolver;
     },
   ) {
     this.maxBufferSize = opts.maxBufferSize ?? DEFAULT_MAX_BUFFER_SIZE;
@@ -280,13 +316,13 @@ export class SessionEventBroadcaster {
    * → REST + re-subscribe path, which resets the transcript naturally.
    */
   async subscribe(
-    sessionId: string,
+    ref: SessionRef,
     target: BroadcastTarget,
     filter?: AgentFilter,
     transcriptGrades?: TranscriptGradeSpec,
     opts?: { deferTranscriptReset?: boolean; transcriptSince?: Record<string, number> },
   ): Promise<boolean> {
-    const state = await this.ensureState(sessionId);
+    const state = await this.ensureState(ref);
     if (state === undefined) return false;
     const prev = state.targets.get(target);
     state.targets.set(target, { agentFilter: filter, transcriptGrades });
@@ -331,8 +367,8 @@ export class SessionEventBroadcaster {
     prev: TargetSubscription | undefined,
   ): boolean {
     const service = this.opts.transcriptService;
-    if (service === undefined) return false;
-    const store = service.forSessionLive(state.sessionId);
+    if (service === undefined || state.ref === undefined) return false;
+    const store = service.forSessionLive(state.ref);
     if (store === undefined) return false;
     for (const descriptor of store.agents()) {
       const grade = gradeFor(spec, descriptor.agentId);
@@ -354,8 +390,8 @@ export class SessionEventBroadcaster {
    * still covers, in which case replaying exactly the missed batches closes
    * it and no reset is sent for that agent.
    */
-  async flushTranscriptSeed(sessionId: string, target: BroadcastTarget): Promise<void> {
-    const state = this.sessions.get(sessionId);
+  async flushTranscriptSeed(ref: SessionRef, target: BroadcastTarget): Promise<void> {
+    const state = this.sessions.get(sessionRefKey(ref));
     if (state === undefined) return;
     const deferred = state.deferredTranscriptSeeds.get(target);
     if (deferred === undefined) return;
@@ -364,8 +400,8 @@ export class SessionEventBroadcaster {
     if (state.targets.has(target)) state.transcriptSeeded.add(target);
   }
 
-  unsubscribe(sessionId: string, target: BroadcastTarget): void {
-    const state = this.sessions.get(sessionId);
+  unsubscribe(ref: SessionRef, target: BroadcastTarget): void {
+    const state = this.sessions.get(sessionRefKey(ref));
     if (state === undefined) return;
     state.targets.delete(target);
     state.transcriptSeeded.delete(target);
@@ -384,11 +420,11 @@ export class SessionEventBroadcaster {
    * `subscribeTranscript` aborts on its grade re-read.
    */
   unsubscribeTranscript(
-    sessionId: string,
+    ref: SessionRef,
     target: BroadcastTarget,
     agentIds?: readonly string[],
   ): void {
-    const state = this.sessions.get(sessionId);
+    const state = this.sessions.get(sessionRefKey(ref));
     if (state === undefined) return;
     const sub = state.targets.get(target);
     if (sub === undefined) return;
@@ -431,10 +467,11 @@ export class SessionEventBroadcaster {
     transcriptSince?: Record<string, number>,
   ): Promise<void> {
     const service = this.opts.transcriptService;
-    if (service === undefined) return;
-    const store = service.forSessionLive(state.sessionId);
+    const ref = state.ref;
+    if (service === undefined || ref === undefined) return;
+    const store = service.forSessionLive(ref);
     if (store === undefined) return;
-    await service.whenReady(state.sessionId);
+    await service.whenReady(ref);
     const backfill = new Set(
       Object.keys(spec).filter((agentId) => agentId !== '*' && gradeFor(spec, agentId) !== 'off'),
     );
@@ -442,7 +479,7 @@ export class SessionEventBroadcaster {
       if (gradeFor(spec, descriptor.agentId) !== 'off') backfill.add(descriptor.agentId);
     }
     await Promise.all(
-      [...backfill].map((agentId) => service.ensureAgentHistory(state.sessionId, agentId)),
+      [...backfill].map((agentId) => service.ensureAgentHistory(ref, agentId)),
     );
     // A newer subscribe/unsubscribe may have replaced this target's grades
     // while history was loading — only the latest subscription is owed resets.
@@ -461,7 +498,7 @@ export class SessionEventBroadcaster {
       // the journal cannot vouch for falls through to the ordinary reset.
       const since = transcriptSince?.[descriptor.agentId] ?? transcriptSince?.['*'];
       if (since !== undefined) {
-        const catchup = service.getOpsSince(state.sessionId, descriptor.agentId, since);
+        const catchup = service.getOpsSince(ref, descriptor.agentId, since);
         if (catchup !== undefined && catchup.complete) {
           this.replayTranscriptOps(state, target, descriptor.agentId, grade, catchup.batches);
           continue;
@@ -517,14 +554,15 @@ export class SessionEventBroadcaster {
   private ensureTranscriptStream(state: SessionState, store: TranscriptStore): void {
     if (state.transcriptStream?.store === store) return;
     const service = this.opts.transcriptService;
-    if (service === undefined) return;
+    const ref = state.ref;
+    if (service === undefined || ref === undefined) return;
     const stream: TranscriptStream = {
       store,
       knownAgents: new Set(store.agents().map((d) => d.agentId)),
     };
     state.transcriptStream = stream;
 
-    const opsDisposable = service.onSessionOps(state.sessionId, ({ agentId, ops }, seq) => {
+    const opsDisposable = service.onSessionOps(ref, ({ agentId, ops }, seq) => {
       for (const [target, sub] of state.targets) {
         // No ops before the baseline reset (see subscribe).
         if (!state.transcriptSeeded.has(target)) continue;
@@ -583,13 +621,17 @@ export class SessionEventBroadcaster {
       grade,
       transcript.snapshot({ tailTurns: TRANSCRIPT_RESET_TAIL_TURNS }),
     );
+    // Watermark: the snapshot includes every op batch dispatched so far.
+    const seq =
+      state.ref === undefined
+        ? 0
+        : this.opts.transcriptService?.getSeqWatermark(state.ref, transcript.agentId);
     target.send(
       this.buildTranscriptEnvelope(state, 'transcript.reset', {
         agent_id: transcript.agentId,
         snapshot,
         has_more_older: snapshot.hasMoreOlder ?? false,
-        // Watermark: the snapshot includes every op batch dispatched so far.
-        seq: this.opts.transcriptService?.getSeqWatermark(state.sessionId, transcript.agentId),
+        seq,
       }),
     );
   }
@@ -617,12 +659,12 @@ export class SessionEventBroadcaster {
   }
 
   async getBufferedSince(
-    sessionId: string,
+    ref: SessionRef,
     cursor: SessionCursor,
     filter?: AgentFilter,
     transcriptGrades?: TranscriptGradeSpec,
   ): Promise<BufferedSinceResult> {
-    const state = await this.ensureState(sessionId);
+    const state = await this.ensureState(ref);
     if (state === undefined) {
       return { events: [], resyncRequired: 'session_recreated', currentSeq: 0, epoch: '' };
     }
@@ -673,10 +715,10 @@ export class SessionEventBroadcaster {
     return { events: applyFilter(fromDisk), resyncRequired: false, currentSeq, epoch };
   }
 
-  async getCursor(sessionId: string): Promise<{ seq: number; epoch: string }> {
-    const state = await this.ensureState(sessionId);
+  async getCursor(ref: SessionRef): Promise<{ seq: number; epoch: string }> {
+    const state = await this.ensureState(ref);
     if (state === undefined) {
-      const cold = await this.readColdWatermark(sessionId);
+      const cold = await this.readColdWatermark(ref);
       return cold ?? { seq: 0, epoch: '' };
     }
     await state.queue;
@@ -684,10 +726,10 @@ export class SessionEventBroadcaster {
   }
 
   /** Atomic-at-queue watermark + in-flight turn, for the snapshot route. */
-  async getSnapshotState(sessionId: string): Promise<SessionSnapshotState> {
-    const state = await this.ensureState(sessionId);
+  async getSnapshotState(ref: SessionRef): Promise<SessionSnapshotState> {
+    const state = await this.ensureState(ref);
     if (state === undefined) {
-      const cold = await this.readColdWatermark(sessionId);
+      const cold = await this.readColdWatermark(ref);
       return cold !== undefined
         ? { ...cold, inFlightTurn: null, subagents: [] }
         : { seq: 0, epoch: '', inFlightTurn: null, subagents: [] };
@@ -696,8 +738,8 @@ export class SessionEventBroadcaster {
     return {
       seq: state.journal.seq,
       epoch: state.journal.epoch,
-      inFlightTurn: state.tracker.get(sessionId),
-      subagents: state.roster.get(sessionId),
+      inFlightTurn: state.tracker.get(state.key),
+      subagents: state.roster.get(state.key),
     };
   }
 
@@ -706,15 +748,14 @@ export class SessionEventBroadcaster {
    * (carried over from a prior process, or created by v1). Opens the journal
    * transiently — no agent/interaction listeners and not cached in
    * `this.sessions` — so a later live activation still attaches subscriptions.
-   * Returns `undefined` when the session is unknown to the index (truly absent).
+   * The caller resolved the ref (M6), so the session is known to exist; a
+   * missing journal file simply starts at `{seq: 0}`.
    */
   private async readColdWatermark(
-    sessionId: string,
+    ref: SessionRef,
   ): Promise<{ seq: number; epoch: string } | undefined> {
-    const summary = await this.opts.core.accessor.get(ISessionIndex).get(sessionId);
-    if (summary === undefined) return undefined;
     const journal = await SessionEventJournal.open(
-      sessionJournalPath(this.opts.eventsDir, sessionId),
+      sessionJournalPath(this.opts.eventsDir, ref),
       this.opts.logger,
     );
     const watermark = { seq: journal.seq, epoch: journal.epoch };
@@ -726,39 +767,44 @@ export class SessionEventBroadcaster {
     if (this.closed) return;
     this.closed = true;
     this.coreEventSubscription.dispose();
-    for (const [sessionId, state] of this.sessions) {
+    for (const state of this.sessions.values()) {
       await disposeSessionState(state);
       // Transcript bindings die with the session stream (its store
       // subscriptions were disposed above; the producer binding goes here).
-      this.opts.transcriptService?.dropSession(sessionId);
+      if (state.ref !== undefined) this.opts.transcriptService?.dropSession(state.ref);
     }
     this.sessions.clear();
   }
 
-  private ensureState(sessionId: string): Promise<SessionState | undefined> {
+  private ensureState(ref: SessionRef): Promise<SessionState | undefined> {
     if (this.closed) return Promise.resolve(undefined);
-    const existing = this.sessions.get(sessionId);
+    const key = sessionRefKey(ref);
+    const existing = this.sessions.get(key);
     if (existing !== undefined) return Promise.resolve(existing);
-    let pending = this.pendingStates.get(sessionId);
+    let pending = this.pendingStates.get(key);
     if (pending === undefined) {
-      pending = this.createSessionState(sessionId).finally(() => {
-        if (this.pendingStates.get(sessionId) === pending) {
-          this.pendingStates.delete(sessionId);
+      pending = this.createSessionState(ref).finally(() => {
+        if (this.pendingStates.get(key) === pending) {
+          this.pendingStates.delete(key);
         }
       });
-      this.pendingStates.set(sessionId, pending);
+      this.pendingStates.set(key, pending);
     }
     return pending;
   }
 
-  private async createSessionState(sessionId: string): Promise<SessionState | undefined> {
+  private async createSessionState(ref: SessionRef): Promise<SessionState | undefined> {
     if (this.closed) return undefined;
 
-    const session = this.opts.core.accessor.get(ISessionLifecycleService).get(sessionId);
+    // The process-wide live lookup, addressed by the FULL ref (M6): host
+    // sessions surface through their ref-keyed `trackActivated` entries and
+    // legacy-activated sessions through the lifecycle's own map.
+    const session = this.opts.core.accessor.get(ISessionLifecycleService).getByRef(ref);
     if (session === undefined) return undefined;
 
+    const key = sessionRefKey(ref);
     const journal = await SessionEventJournal.open(
-      sessionJournalPath(this.opts.eventsDir, sessionId),
+      sessionJournalPath(this.opts.eventsDir, ref),
       this.opts.logger,
     );
     if (this.closed) {
@@ -766,7 +812,9 @@ export class SessionEventBroadcaster {
       return undefined;
     }
     const state: SessionState = {
-      sessionId,
+      key,
+      ref,
+      sessionId: ref.sessionId,
       journal,
       tracker: new InFlightTurnTracker(),
       roster: new SubagentRosterTracker(),
@@ -779,13 +827,13 @@ export class SessionEventBroadcaster {
       transcriptSeeded: new Set(),
       deferredTranscriptSeeds: new Map(),
     };
-    this.sessions.set(sessionId, state);
+    this.sessions.set(key, state);
     try {
       this.attachWorkView(session, state);
-      this.attachAgents(sessionId, session, state);
-      this.attachInteractions(sessionId, session, state);
+      this.attachAgents(session, state);
+      this.attachInteractions(session, state);
     } catch (error) {
-      this.sessions.delete(sessionId);
+      this.sessions.delete(key);
       await disposeSessionState(state);
       if (error instanceof Error && error.message === 'InstantiationService has been disposed') return undefined;
       throw error;
@@ -810,10 +858,11 @@ export class SessionEventBroadcaster {
 
   private async createGlobalState(): Promise<SessionState> {
     const journal = await SessionEventJournal.open(
-      sessionJournalPath(this.opts.eventsDir, GLOBAL_SESSION_ID),
+      globalJournalPath(this.opts.eventsDir),
       this.opts.logger,
     );
     const state: SessionState = {
+      key: GLOBAL_SESSION_ID,
       sessionId: GLOBAL_SESSION_ID,
       journal,
       tracker: new InFlightTurnTracker(),
@@ -843,7 +892,7 @@ export class SessionEventBroadcaster {
       // `sessionStatusChanged` reducer is a no-op for the unknown session and
       // kimi-web's Stop button (gated on session.status === 'running') never
       // renders. Mirrors v1's `isGlobalSessionEvent` broadcast of creation.
-      void this.dispatchSessionEvent(payload.sessionId, {
+      void this.dispatchCoreSessionEvent(payload.sessionId, payload.runtimeId, {
         type: 'event.session.created',
         session: payload.session,
         agentId: 'main',
@@ -866,7 +915,7 @@ export class SessionEventBroadcaster {
       // exactly like v1.
       const sessionId = sessionMetaUpdatedSessionId(event.payload);
       if (sessionId === undefined) return;
-      void this.dispatchSessionEvent(sessionId, {
+      void this.dispatchCoreSessionEvent(sessionId, sessionMetaUpdatedRuntimeId(event.payload), {
         type: 'session.meta.updated',
         ...payload,
         agentId: 'main',
@@ -875,6 +924,45 @@ export class SessionEventBroadcaster {
         this.logDispatchError(sessionId, 'session.meta.updated', error),
       );
     }
+  }
+
+  /**
+   * Route a session-scoped core event to its owning session state (M6). The
+   * internal payload's `runtimeId` pins the exact `SessionRef`; a payload
+   * without one (a legacy-activated session's publisher) resolves the bare id
+   * through the v1 resolver. An id that does not resolve to exactly one
+   * runtime is DROPPED — never routed to an arbitrary candidate (plan §1.3
+   * rule 5; same-named sessions are indistinguishable on the v1 wire anyway).
+   */
+  private async dispatchCoreSessionEvent(
+    sessionId: string,
+    runtimeId: string | undefined,
+    wireEvent: Event,
+  ): Promise<void> {
+    const ref =
+      runtimeId !== undefined
+        ? { runtimeId, sessionId }
+        : await this.resolveCoreEventRef(sessionId, wireEvent.type);
+    if (ref === undefined) return;
+    await this.dispatchSessionEvent(ref, wireEvent);
+  }
+
+  /** Bare-id fallback for core events whose publisher carries no `runtimeId`. */
+  private async resolveCoreEventRef(
+    sessionId: string,
+    eventType: string,
+  ): Promise<SessionRef | undefined> {
+    const resolver = this.opts.resolver;
+    if (resolver === undefined) return undefined;
+    const resolved = await resolver.resolve(sessionId);
+    if (resolved.kind === 'resolved') return resolved.resolution.ref;
+    if (resolved.kind !== 'not_found') {
+      this.opts.logger?.warn(
+        { sessionId, eventType, kind: resolved.kind },
+        'session core event dropped: bare id did not resolve to exactly one runtime',
+      );
+    }
+    return undefined;
   }
 
   private async dispatchGlobal(event: Event): Promise<void> {
@@ -890,10 +978,27 @@ export class SessionEventBroadcaster {
    * session-scoped core events that must still fan out to every connection
    * (e.g. `session.meta.updated`); `isGlobalEvent` keeps the fan-out global.
    */
-  private async dispatchSessionEvent(sessionId: string, event: Event): Promise<void> {
+  /**
+   * Dispatch an event through a real session's state so the WS envelope carries
+   * the real `session_id` (not the global `'__global__'` watermark). Used for
+   * session-scoped core events that must still fan out to every connection
+   * (e.g. `session.meta.updated`); `isGlobalEvent` keeps the fan-out global.
+   *
+   * An ALREADY-ACTIVE state's queue is appended SYNCHRONOUSLY (no `ensureState`
+   * await): core events published back-to-back with agent-bus events (the
+   * first-prompt auto-title vs `turn.started`) must journal in publish order —
+   * every awaited hop in between lets a later agent event overtake the core
+   * event on the queue (the M6 black-box caught exactly that reorder).
+   */
+  private async dispatchSessionEvent(ref: SessionRef, event: Event): Promise<void> {
+    const existing = this.sessions.get(sessionRefKey(ref));
+    if (existing !== undefined) {
+      this.enqueueOnState(existing, event);
+      return;
+    }
     let state: SessionState | undefined;
     try {
-      state = await this.ensureState(sessionId);
+      state = await this.ensureState(ref);
     } catch (error) {
       // The session's core scope can be disposed mid-dispatch during shutdown;
       // the event is moot once its session is gone. Same guard as ensureState
@@ -904,6 +1009,11 @@ export class SessionEventBroadcaster {
       throw error;
     }
     if (state === undefined) return;
+    this.enqueueOnState(state, event);
+  }
+
+  /** Append one core-published event to the state's dispatch queue (volatile classification from the wire catalog). */
+  private enqueueOnState(state: SessionState, event: Event): void {
     state.queue = state.queue
       .then(() => this.dispatch(state, event, isVolatileEventType(event.type)))
       .catch((error: unknown) => this.logDispatchDropped(state.sessionId, event.type, error));
@@ -933,7 +1043,7 @@ export class SessionEventBroadcaster {
           state.deferredWork = work;
           queueMicrotask(() => {
             // The session may have been torn down meanwhile.
-            if (this.sessions.get(state.sessionId) !== state) return;
+            if (this.sessions.get(state.key) !== state) return;
             this.flushDeferredWork(state);
           });
           return;
@@ -951,11 +1061,12 @@ export class SessionEventBroadcaster {
     this.enqueueWorkChanged(state, deferred);
   }
 
-  private attachAgents(sessionId: string, session: ISessionScopeHandle, state: SessionState): void {
+  private attachAgents(session: ISessionScopeHandle, state: SessionState): void {
+    const sessionId = state.sessionId;
     const agents = session.accessor.get(IAgentLifecycleService);
     const subscribeAgent = (handle: IAgentScopeHandle): void => {
       if (state.agentDisposables.has(handle.id)) return;
-      state.agentDisposables.set(handle.id, this.attachAgent(sessionId, handle));
+      state.agentDisposables.set(handle.id, this.attachAgent(state, handle));
     };
     for (const handle of agents.list()) subscribeAgent(handle);
     state.lifecycleDisposables.push(
@@ -985,7 +1096,7 @@ export class SessionEventBroadcaster {
     );
   }
 
-  private attachAgent(sessionId: string, handle: IAgentScopeHandle): IDisposable {
+  private attachAgent(state: SessionState, handle: IAgentScopeHandle): IDisposable {
     const eventBus = handle.accessor.get(IEventBus);
     let lastLegacyStatus: string | undefined;
     const emitLegacyStatus = (): void => {
@@ -994,7 +1105,7 @@ export class SessionEventBroadcaster {
       const key = JSON.stringify(snapshot);
       if (key === lastLegacyStatus) return;
       lastLegacyStatus = key;
-      this.onAgentEvent(sessionId, MAIN_AGENT_ID, {
+      this.onAgentEvent(state, MAIN_AGENT_ID, {
         type: 'agent.status.updated',
         ...snapshot,
       });
@@ -1012,16 +1123,20 @@ export class SessionEventBroadcaster {
         if (handle.id === MAIN_AGENT_ID && event.type === 'context.spliced') {
           emitLegacyStatus();
         }
-        this.onAgentEvent(sessionId, handle.id, projected);
+        this.onAgentEvent(state, handle.id, projected);
       }),
     ];
 
     return { dispose: () => disposables.forEach((disposable) => disposable.dispose()) };
   }
 
-  private onAgentEvent(sessionId: string, agentId: string, event: DomainEvent): void {
-    const state = this.sessions.get(sessionId);
+  private onAgentEvent(attached: SessionState, agentId: string, event: DomainEvent): void {
+    // Re-fetch by the state's ref key: after a re-activation the closure's
+    // captured state is stale and the CURRENT state under the same key owns
+    // the stream (same discipline as the pre-M6 bare-id lookup).
+    const state = this.sessions.get(attached.key);
     if (state === undefined) return;
+    const sessionId = state.sessionId;
 
     // Map the native v2 activity state to the legacy v1 `agent.status.updated`
     // phase slice at the edge, so the v1 channel picks up the corrected
@@ -1081,11 +1196,8 @@ export class SessionEventBroadcaster {
    * (`onDidChangePending` / `onDidResolve`), so the v1 protocol events are
    * synthesized here.
    */
-  private attachInteractions(
-    sessionId: string,
-    session: ISessionScopeHandle,
-    state: SessionState,
-  ): void {
+  private attachInteractions(session: ISessionScopeHandle, state: SessionState): void {
+    const sessionId = state.sessionId;
     const interactions = session.accessor.get(ISessionInteractionService);
     // Seed silently: interactions already pending at activation are surfaced
     // by the snapshot route (`pending_questions` / `pending_approvals`).
@@ -1181,10 +1293,10 @@ export class SessionEventBroadcaster {
 
   private async dispatch(state: SessionState, event: Event, volatile: boolean): Promise<void> {
     const { journal, tracker, roster, tail, targets, sessionId } = state;
-    const annotation = tracker.apply(sessionId, event);
+    const annotation = tracker.apply(state.key, event);
     // Same queue-discipline as the in-flight tracker: snapshot rebuilds must
     // see exactly the roster as of the durable watermark.
-    roster.apply(sessionId, event);
+    roster.apply(state.key, event);
 
     let envelope: EventEnvelope;
     if (volatile) {
@@ -1555,6 +1667,18 @@ function sessionMetaUpdatedSessionId(payload: unknown): string | undefined {
 }
 
 /**
+ * Recover the internal `SessionRef`'s runtime half from a core payload (M6).
+ * Publishers that know the session's runtime stamp it on the INTERNAL payload
+ * (routes, runtime-activated agent services); legacy publishers omit it and
+ * the edge falls back to bare-id resolution. Never projected onto the wire.
+ */
+function sessionMetaUpdatedRuntimeId(payload: unknown): string | undefined {
+  if (typeof payload !== 'object' || payload === null) return undefined;
+  const runtimeId = (payload as { runtimeId?: unknown }).runtimeId;
+  return typeof runtimeId === 'string' && runtimeId.length > 0 ? runtimeId : undefined;
+}
+
+/**
  * Validate the `event.session.created` payload published on the core
  * `IEventService`. The create/fork/child routes publish
  * `{ agentId, sessionId, session }`; we unwrap the real session id and wire
@@ -1562,12 +1686,16 @@ function sessionMetaUpdatedSessionId(payload: unknown): string | undefined {
  */
 function sessionCreatedPayload(
   payload: unknown,
-): { sessionId: string; session: SessionCreatedEvent['session'] } | undefined {
+): { sessionId: string; runtimeId?: string; session: SessionCreatedEvent['session'] } | undefined {
   if (typeof payload !== 'object' || payload === null) return undefined;
-  const candidate = payload as { sessionId?: unknown; session?: unknown };
+  const candidate = payload as { sessionId?: unknown; runtimeId?: unknown; session?: unknown };
   const sessionId =
     typeof candidate.sessionId === 'string' && candidate.sessionId.length > 0
       ? candidate.sessionId
+      : undefined;
+  const runtimeId =
+    typeof candidate.runtimeId === 'string' && candidate.runtimeId.length > 0
+      ? candidate.runtimeId
       : undefined;
   const session =
     typeof candidate.session === 'object' &&
@@ -1576,5 +1704,5 @@ function sessionCreatedPayload(
       ? (candidate.session as SessionCreatedEvent['session'])
       : undefined;
   if (sessionId === undefined || session === undefined) return undefined;
-  return { sessionId, session };
+  return { sessionId, runtimeId, session };
 }

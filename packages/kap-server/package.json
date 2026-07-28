@@ -18,6 +18,7 @@
     "build": "tsdown",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
+    "blackbox:compare": "tsx --import ../../build/register-raw-text-loader.mjs test/blackbox/compare.mts",
     "clean": "rm -rf dist"
   },
   "dependencies": {

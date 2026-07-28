@@ -28,9 +28,12 @@ import {
   transcriptSubscribeV2PayloadSchema,
   type TranscriptGradeSpec,
 } from '@moonshot-ai/transcript';
+import { sessionRefKey, type SessionRef } from '@moonshot-ai/agent-core-v2';
 import { ulid } from 'ulid';
 import type { RawData, WebSocket } from 'ws';
 
+import type { IV1SessionRefResolver } from '../../../app/v1Compatibility/v1SessionRefResolver';
+import { ErrorCode } from '../../../protocol/error-codes';
 import type { CredentialValidator } from '../../../services/auth/credentials';
 import type { IConnectionRegistry } from '../connectionRegistry';
 import {
@@ -50,12 +53,19 @@ import {
   type SessionEventBroadcaster,
   type TargetSubscription,
 } from './sessionEventBroadcaster';
-import { FsWatchBridge } from './fsWatchBridge';
+import { FS_WATCH_CODE, FsWatchBridge } from './fsWatchBridge';
 
 const DEFAULT_MAX_BUFFER_SIZE = 1000;
 
-/** Per-session subscription state held by the connection (see `TargetSubscription`). */
-type SessionSubscription = TargetSubscription;
+/**
+ * Per-session subscription state held by the connection (see `TargetSubscription`).
+ * M6: the resolved `SessionRef` is pinned at attach time — every later
+ * broadcaster call (unsubscribe, replay, transcript detach) addresses the
+ * exact session even when the bare id's routing has since changed.
+ */
+interface SessionSubscription extends TargetSubscription {
+  readonly ref: SessionRef;
+}
 
 // Subscription-event send buffer — coalesces a burst of frames (notably
 // high-frequency volatile text deltas) within one render-frame-sized window.
@@ -78,6 +88,13 @@ export interface WsConnectionV1Options {
   readonly broadcaster: SessionEventBroadcaster;
   readonly fsWatchBridge?: FsWatchBridge;
   readonly connectionRegistry: IConnectionRegistry;
+  /**
+   * The single bare-id entry point (plan §1.3/§6.4): every inbound control
+   * frame's bare `session_id` resolves through it BEFORE any subscription
+   * state changes; an id that does not resolve to exactly one runtime is
+   * never attached to an arbitrary candidate.
+   */
+  readonly resolver: IV1SessionRefResolver;
   /**
    * Present-only credential check for the post-connect `client_hello`
    * handshake. The WebSocket upgrade handler (`start.ts`) is the real auth
@@ -107,6 +124,7 @@ export class WsConnectionV1 implements BroadcastTarget {
   private readonly socket: WebSocket;
   private readonly broadcaster: SessionEventBroadcaster;
   private readonly fsWatchBridge?: FsWatchBridge;
+  private readonly resolver: IV1SessionRefResolver;
   private readonly validateCredential?: CredentialValidator;
   private readonly maxBufferSize: number;
   private readonly flushIntervalMs: number;
@@ -142,6 +160,7 @@ export class WsConnectionV1 implements BroadcastTarget {
     this.socket = opts.socket;
     this.broadcaster = opts.broadcaster;
     this.fsWatchBridge = opts.fsWatchBridge;
+    this.resolver = opts.resolver;
     this.validateCredential = opts.validateCredential;
     this.logger = opts.logger;
     this.maxBufferSize = opts.maxBufferSize ?? DEFAULT_MAX_BUFFER_SIZE;
@@ -227,6 +246,32 @@ export class WsConnectionV1 implements BroadcastTarget {
     });
   }
 
+  /**
+   * The attach outcome's ack: the pre-M6 success shape when every id resolved,
+   * or the existing non-zero-code error channel (50001, frozen REST wording)
+   * when an id came back `ambiguous` / `unavailable` — the payload still
+   * reports every other id's accepted/not-found/cursor outcome.
+   */
+  private sendAttachAck(
+    frame: InboundFrame,
+    collectors: AttachCollectors,
+    payload: Record<string, unknown>,
+  ): void {
+    const failed = collectors.failed;
+    if (failed !== undefined) {
+      this.sendImmediateFrame(
+        buildAck(
+          frame.id ?? '',
+          ErrorCode.INTERNAL_ERROR,
+          resolveFailureMessage(failed.sid, failed.kind),
+          payload,
+        ),
+      );
+      return;
+    }
+    this.sendImmediateFrame(buildAck(frame.id ?? '', 0, 'success', payload));
+  }
+
   private async onClientHello(frame: InboundFrame): Promise<void> {
     if (!(await this.authorize(frame))) return;
     this.gotClientHello = true;
@@ -239,9 +284,7 @@ export class WsConnectionV1 implements BroadcastTarget {
     const cursors = payload['cursors'] as Record<string, SessionCursor> | undefined;
     const agentFilter = parseAgentFilter(payload['agent_filter']);
 
-    const accepted: string[] = [];
-    const resyncRequired: string[] = [];
-    const serverCursors: Record<string, { seq: number; epoch?: string }> = {};
+    const collectors: AttachCollectors = { accepted: [], resyncRequired: [], serverCursors: {} };
 
     for (const sid of subscriptions) {
       await this.attachSession(
@@ -252,17 +295,15 @@ export class WsConnectionV1 implements BroadcastTarget {
         // must not wipe grades this connection already holds.
         this.subscriptions.get(sid)?.transcriptGrades,
         undefined,
-        { accepted, resyncRequired, serverCursors },
+        collectors,
       );
     }
 
-    this.sendImmediateFrame(
-      buildAck(frame.id ?? '', 0, 'success', {
-        accepted_subscriptions: accepted,
-        resync_required: resyncRequired,
-        cursors: serverCursors,
-      }),
-    );
+    this.sendAttachAck(frame, collectors, {
+      accepted_subscriptions: collectors.accepted,
+      resync_required: collectors.resyncRequired,
+      cursors: collectors.serverCursors,
+    });
   }
 
   private async onSubscribe(frame: InboundFrame): Promise<void> {
@@ -271,10 +312,12 @@ export class WsConnectionV1 implements BroadcastTarget {
     const cursors = payload['cursors'] as Record<string, SessionCursor> | undefined;
     const agentFilter = parseAgentFilter(payload['agent_filter']);
 
-    const accepted: string[] = [];
-    const notFound: string[] = [];
-    const resyncRequired: string[] = [];
-    const serverCursors: Record<string, { seq: number; epoch?: string }> = {};
+    const collectors: AttachCollectors = {
+      accepted: [],
+      resyncRequired: [],
+      serverCursors: {},
+      notFound: [],
+    };
 
     for (const sid of sessionIds) {
       await this.attachSession(
@@ -285,18 +328,16 @@ export class WsConnectionV1 implements BroadcastTarget {
         // this connection already holds (the replay below filters through it).
         this.subscriptions.get(sid)?.transcriptGrades,
         undefined,
-        { accepted, resyncRequired, serverCursors, notFound },
+        collectors,
       );
     }
 
-    this.sendImmediateFrame(
-      buildAck(frame.id ?? '', 0, 'success', {
-        accepted,
-        not_found: notFound,
-        resync_required: resyncRequired,
-        cursors: serverCursors,
-      }),
-    );
+    this.sendAttachAck(frame, collectors, {
+      accepted: collectors.accepted,
+      not_found: collectors.notFound ?? [],
+      resync_required: collectors.resyncRequired,
+      cursors: collectors.serverCursors,
+    });
   }
 
   /**
@@ -315,10 +356,12 @@ export class WsConnectionV1 implements BroadcastTarget {
     }
     const sid = parsed.data.session_id;
 
-    const accepted: string[] = [];
-    const notFound: string[] = [];
-    const resyncRequired: string[] = [];
-    const serverCursors: Record<string, { seq: number; epoch?: string }> = {};
+    const collectors: AttachCollectors = {
+      accepted: [],
+      resyncRequired: [],
+      serverCursors: {},
+      notFound: [],
+    };
 
     await this.attachSession(
       sid,
@@ -326,17 +369,15 @@ export class WsConnectionV1 implements BroadcastTarget {
       this.subscriptions.get(sid)?.agentFilter,
       parsed.data.transcript,
       parsed.data.transcript_since,
-      { accepted, resyncRequired, serverCursors, notFound },
+      collectors,
     );
 
-    this.sendImmediateFrame(
-      buildAck(frame.id ?? '', 0, 'success', {
-        accepted,
-        not_found: notFound,
-        resync_required: resyncRequired,
-        cursors: serverCursors,
-      }),
-    );
+    this.sendAttachAck(frame, collectors, {
+      accepted: collectors.accepted,
+      not_found: collectors.notFound ?? [],
+      resync_required: collectors.resyncRequired,
+      cursors: collectors.serverCursors,
+    });
   }
 
   /**
@@ -358,8 +399,10 @@ export class WsConnectionV1 implements BroadcastTarget {
 
     const existing = this.subscriptions.get(sid);
     if (existing !== undefined) {
-      this.broadcaster.unsubscribeTranscript(sid, this, agentIds);
+      // Address the ref pinned at attach time (M6) — never re-resolve.
+      this.broadcaster.unsubscribeTranscript(existing.ref, this, agentIds);
       this.subscriptions.set(sid, {
+        ref: existing.ref,
         agentFilter: existing.agentFilter,
         transcriptGrades:
           agentIds === undefined ? undefined : detachGrades(existing.transcriptGrades, agentIds),
@@ -379,8 +422,11 @@ export class WsConnectionV1 implements BroadcastTarget {
     const payload = frame.payload ?? {};
     const sessionIds = asStringArray(payload['session_ids']);
     for (const sid of sessionIds) {
-      this.broadcaster.unsubscribe(sid, this);
-      this.subscriptions.delete(sid);
+      const existing = this.subscriptions.get(sid);
+      if (existing !== undefined) {
+        this.broadcaster.unsubscribe(existing.ref, this);
+        this.subscriptions.delete(sid);
+      }
     }
     this.sendImmediateFrame(
       buildAck(frame.id ?? '', 0, 'success', {
@@ -402,9 +448,24 @@ export class WsConnectionV1 implements BroadcastTarget {
     }
     let result;
     try {
-      result = isAdd
-        ? await bridge.addWatch(this, sessionId, paths)
-        : await bridge.removeWatch(this, sessionId, paths);
+      if (isAdd) {
+        // M6: the bare id resolves at the edge (plan §6.4); the bridge then
+        // addresses the live session by its exact ref.
+        const resolution = await this.resolver.resolve(sessionId);
+        if (resolution.kind !== 'resolved') {
+          result =
+            resolution.kind === 'not_found'
+              ? { code: FS_WATCH_CODE.SESSION_NOT_FOUND, msg: 'session not found' }
+              : {
+                  code: ErrorCode.INTERNAL_ERROR,
+                  msg: resolveFailureMessage(sessionId, resolution.kind),
+                };
+        } else {
+          result = await bridge.addWatch(this, resolution.resolution.ref, paths);
+        }
+      } else {
+        result = await bridge.removeWatch(this, sessionId, paths);
+      }
     } catch (error) {
       this.sendImmediateFrame(
         buildAck(frame.id ?? '', 1, 'internal error', {
@@ -423,13 +484,16 @@ export class WsConnectionV1 implements BroadcastTarget {
 
   /**
    * Shared attach path behind `client_hello` (legacy inline subscriptions)
-   * and `subscribe`. Subscribes the connection via the broadcaster, then
-   * either replays durable events since the client's cursor (with the
-   * transcript baseline deferred until after the replay — its seq must
-   * follow the replayed backlog, never precede it) or reports the server's
-   * current cursor. Unknown sessions land in `collectors.notFound` when the
+   * and `subscribe`. The bare wire id resolves through the v1 resolver FIRST
+   * (M6, plan §6.4): `not_found` lands in `collectors.notFound` when the
    * caller is `subscribe`, otherwise in `resyncRequired` (the hello ack has
-   * no `not_found` field).
+   * no `not_found` field) — the pre-M6 behavior; `ambiguous`/`unavailable`
+   * never attach any candidate and instead fail the frame's ack through the
+   * existing non-zero-code error channel (`sendAttachAck`). The resolved
+   * `SessionRef` is pinned into the connection's subscription record, and the
+   * connection is subscribed via the broadcaster — then either replayed from
+   * the client's cursor (transcript baseline deferred until after the replay)
+   * or answered with the server's current cursor.
    */
   private async attachSession(
     sid: string,
@@ -437,43 +501,59 @@ export class WsConnectionV1 implements BroadcastTarget {
     filter: AgentFilter | undefined,
     transcriptGrades: TranscriptGradeSpec | undefined,
     transcriptSince: Record<string, number> | undefined,
-    collectors: {
-      accepted: string[];
-      resyncRequired: string[];
-      serverCursors: Record<string, { seq: number; epoch?: string }>;
-      notFound?: string[];
-    },
+    collectors: AttachCollectors,
   ): Promise<void> {
     const { accepted, resyncRequired, serverCursors, notFound } = collectors;
-    const ok = await this.broadcaster.subscribe(sid, this, filter, transcriptGrades, {
+    const resolution = await this.resolver.resolve(sid);
+    if (resolution.kind !== 'resolved') {
+      if (resolution.kind === 'not_found') {
+        if (notFound !== undefined) notFound.push(sid);
+        else resyncRequired.push(sid);
+      } else {
+        collectors.failed ??= { sid, kind: resolution.kind };
+      }
+      return;
+    }
+    const ref = resolution.resolution.ref;
+    const previous = this.subscriptions.get(sid);
+    if (previous !== undefined && sessionRefKey(previous.ref) !== sessionRefKey(ref)) {
+      // The bare id now routes to a DIFFERENT runtime session than the one
+      // this connection attached earlier (its original owner went away and
+      // another runtime hosts the id): detach the stale ref first so no frame
+      // of the old session's stream reaches this connection.
+      this.broadcaster.unsubscribe(previous.ref, this);
+    }
+    const ok = await this.broadcaster.subscribe(ref, this, filter, transcriptGrades, {
       deferTranscriptReset: cursor !== undefined,
       transcriptSince,
     });
     if (!ok) {
+      // Resolved but not live in this process — the pre-M6 not-found channel.
       if (notFound !== undefined) notFound.push(sid);
       else resyncRequired.push(sid);
       return;
     }
-    this.subscriptions.set(sid, { agentFilter: filter, transcriptGrades });
+    this.subscriptions.set(sid, { ref, agentFilter: filter, transcriptGrades });
     accepted.push(sid);
     if (cursor !== undefined) {
-      await this.replay(sid, cursor, filter, transcriptGrades, resyncRequired, serverCursors);
-      await this.broadcaster.flushTranscriptSeed(sid, this);
+      await this.replay(sid, ref, cursor, filter, transcriptGrades, resyncRequired, serverCursors);
+      await this.broadcaster.flushTranscriptSeed(ref, this);
     } else {
-      const cur = await this.broadcaster.getCursor(sid);
+      const cur = await this.broadcaster.getCursor(ref);
       serverCursors[sid] = cur;
     }
   }
 
   private async replay(
     sid: string,
+    ref: SessionRef,
     cursor: SessionCursor,
     filter: AgentFilter | undefined,
     transcriptGrades: TranscriptGradeSpec | undefined,
     resyncRequired: string[],
     serverCursors: Record<string, { seq: number; epoch?: string }>,
   ): Promise<void> {
-    const result = await this.broadcaster.getBufferedSince(sid, cursor, filter, transcriptGrades);
+    const result = await this.broadcaster.getBufferedSince(ref, cursor, filter, transcriptGrades);
     if (result.resyncRequired !== false) {
       this.sendImmediateFrame(
         buildResyncRequired(sid, result.resyncRequired as ResyncReason, result.currentSeq, result.epoch),
@@ -612,10 +692,36 @@ export class WsConnectionV1 implements BroadcastTarget {
     if (this.backpressureRetryTimer !== undefined) clearTimeout(this.backpressureRetryTimer);
     this.outbound = [];
     this.broadcaster.removeGlobalTarget(this);
-    for (const sid of this.subscriptions.keys()) this.broadcaster.unsubscribe(sid, this);
+    for (const sub of this.subscriptions.values()) this.broadcaster.unsubscribe(sub.ref, this);
     this.fsWatchBridge?.detachConnection(this);
     // registry removal is handled by registerWsV1 on the socket 'close' event.
   }
+}
+
+/** Per-control-frame attach outcome collectors (see `attachSession`). */
+interface AttachCollectors {
+  accepted: string[];
+  resyncRequired: string[];
+  serverCursors: Record<string, { seq: number; epoch?: string }>;
+  notFound?: string[];
+  /**
+   * The first `ambiguous` / `unavailable` resolution failure (M6): the id was
+   * never attached to any candidate, and the frame's ack fails through the
+   * existing non-zero-code error channel (the payload still reports every
+   * other id's outcome).
+   */
+  failed?: { sid: string; kind: 'ambiguous' | 'unavailable' };
+}
+
+/**
+ * The frozen failure wording shared with the REST edge (`v1ResolveFailureEnvelope`):
+ * `ambiguous` / `unavailable` mean "the session EXISTS (or may) but cannot be
+ * routed right now" — the existing 50001 code, never a 404-shaped lie.
+ */
+function resolveFailureMessage(sid: string, kind: 'ambiguous' | 'unavailable'): string {
+  return kind === 'ambiguous'
+    ? `session ${sid} is ambiguous across runtimes`
+    : `session ${sid} is temporarily unavailable`;
 }
 
 function asStringArray(value: unknown): string[] {

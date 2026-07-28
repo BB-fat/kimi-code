@@ -37,6 +37,7 @@ import {
   ISessionHostRuntimeRegistry,
   IWorkspaceRuntimeManager,
   SessionHostRuntimeErrors,
+  type ISessionColdReader,
   type ISessionHostRuntime,
   type Scope,
   type SessionDescriptor,
@@ -76,6 +77,15 @@ export interface IV1SessionRefResolver {
    * skipped — a list is best-effort enumeration, never an identity verdict.
    */
   listAll(): Promise<readonly V1SessionRefResolution[]>;
+
+  /**
+   * Ref-addressed cold read (M6) — internal routing, NOT bare-id resolution:
+   * the caller already holds the exact `SessionRef` (a live entry's identity,
+   * a prior `resolve`), so no probe fan-out runs. Returns `undefined` when
+   * the runtime is no longer registered; runtime errors (offline, a corrupt
+   * bucket) propagate so callers distinguish "gone" from "unreadable".
+   */
+  coldRead(ref: SessionRef): Promise<ISessionColdReader | undefined>;
 }
 
 export interface V1SessionRefResolverDeps {
@@ -215,6 +225,12 @@ export class V1SessionRefResolver implements IV1SessionRefResolver {
       }),
     );
     return pages.flat();
+  }
+
+  async coldRead(ref: SessionRef): Promise<ISessionColdReader | undefined> {
+    const runtime = this.deps.registry.get(ref.runtimeId);
+    if (runtime === undefined) return undefined;
+    return runtime.sessions.coldRead(ref.sessionId);
   }
 
   /**

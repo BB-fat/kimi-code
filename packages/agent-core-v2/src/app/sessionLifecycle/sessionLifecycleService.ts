@@ -63,6 +63,10 @@ import {
   PARENT_SESSION_ID_KEY,
 } from '#/app/sessionIndex/sessionIndex';
 import { IProjectLocalConfigService } from '#/app/projectLocalConfig/projectLocalConfig';
+import {
+  sessionRefKey,
+  type SessionRef,
+} from '#/app/sessionHostRuntime/sessionRef';
 import { IWorkspaceService } from '#/app/workspace/workspace';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { ErrorCodes, Error2, isError2 } from '#/errors';
@@ -111,8 +115,12 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
   private readonly sessions = new Map<string, ISessionScopeHandle>();
   /**
    * Sessions activated outside this service and published through
-   * `trackActivated` (the runtime session host). Lookup-only: every lifecycle
-   * decision stays with the registrar, which detaches on close/archive.
+   * `trackActivated` (the runtime session host), keyed by the FULL
+   * `SessionRef` (`sessionRefKey`) — M6: two same-named sessions hosted by
+   * different runtimes coexist here; the bare-id `get`/`resume` projections
+   * only answer when the tracked match is UNIQUE. Lookup-only: every
+   * lifecycle decision stays with the registrar, which detaches on
+   * close/archive.
    */
   private readonly tracked = new Map<string, ISessionScopeHandle>();
   private readonly _onDidCreateSession = this._register(new Emitter<SessionCreatedEvent>());
@@ -265,13 +273,36 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
 
   get(sessionId: string): ISessionScopeHandle | undefined {
     if (this.resuming.has(sessionId)) return undefined;
-    return this.sessions.get(sessionId) ?? this.tracked.get(sessionId);
+    return this.sessions.get(sessionId) ?? this.uniqueTrackedMatch(sessionId);
+  }
+
+  getByRef(ref: SessionRef): ISessionScopeHandle | undefined {
+    if (this.resuming.has(ref.sessionId)) return undefined;
+    // The exact tracked entry wins; legacy-activated sessions (this service's
+    // own map) carry no ref, so the bare sessionId is their only key.
+    return this.tracked.get(sessionRefKey(ref)) ?? this.sessions.get(ref.sessionId);
+  }
+
+  /**
+   * The bare-id projection over the ref-keyed tracked map: the single tracked
+   * entry with this session id, or `undefined` when there is none — OR when
+   * two runtimes host a same-named live pair (answering either would silently
+   * route to the wrong session; plan §1.3 rule 5).
+   */
+  private uniqueTrackedMatch(sessionId: string): ISessionScopeHandle | undefined {
+    let match: ISessionScopeHandle | undefined;
+    for (const handle of this.tracked.values()) {
+      if (handle.id !== sessionId) continue;
+      if (match !== undefined) return undefined;
+      match = handle;
+    }
+    return match;
   }
 
   resume(sessionId: string): Promise<ISessionScopeHandle | undefined> {
     const inflight = this.resuming.get(sessionId);
     if (inflight !== undefined) return inflight;
-    const live = this.sessions.get(sessionId) ?? this.tracked.get(sessionId);
+    const live = this.sessions.get(sessionId) ?? this.uniqueTrackedMatch(sessionId);
     if (live !== undefined) return Promise.resolve(live);
     const promise = this.doResume(sessionId)
       .catch((error: unknown) => {
@@ -316,21 +347,21 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
     for (const [id, handle] of this.sessions) {
       if (!this.resuming.has(id)) ready.push(handle);
     }
-    for (const [id, handle] of this.tracked) {
-      if (!this.sessions.has(id) && !this.resuming.has(id)) ready.push(handle);
+    for (const handle of this.tracked.values()) {
+      if (!this.sessions.has(handle.id) && !this.resuming.has(handle.id)) ready.push(handle);
     }
     return ready;
   }
 
-  trackActivated(sessionId: string, handle: ISessionScopeHandle): IDisposable {
-    // Keyed by the bare sessionId: two same-named sessions live at once (on
-    // different runtimes) would overwrite each other here. Unreachable on the
-    // v1 surface (the resolver rejects ambiguous ids, create uses UUIDs);
-    // M6 re-keys internal maps by full SessionRef.
-    this.tracked.set(sessionId, handle);
+  trackActivated(ref: SessionRef, handle: ISessionScopeHandle): IDisposable {
+    // Keyed by the full SessionRef (M6): two same-named sessions live at once
+    // on different runtimes coexist here; the bare-id `get` projection only
+    // answers unique matches (see `uniqueTrackedMatch`).
+    const key = sessionRefKey(ref);
+    this.tracked.set(key, handle);
     return {
       dispose: () => {
-        if (this.tracked.get(sessionId) === handle) this.tracked.delete(sessionId);
+        if (this.tracked.get(key) === handle) this.tracked.delete(key);
       },
     };
   }

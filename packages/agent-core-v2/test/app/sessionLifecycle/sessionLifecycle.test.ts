@@ -515,10 +515,13 @@ describe('SessionLifecycleService', () => {
     } as unknown as ISessionScopeHandle;
 
     expect(svc.get('ext-1')).toBeUndefined();
-    const tracking = svc.trackActivated('ext-1', external);
-    // get / list / resume all observe the tracked session — a resume NEVER
-    // re-materializes it through the legacy path.
+    const ref = { runtimeId: 'rt-ext', sessionId: 'ext-1' };
+    const tracking = svc.trackActivated(ref, external);
+    // get / getByRef / list / resume all observe the tracked session — a
+    // resume NEVER re-materializes it through the legacy path.
     expect(svc.get('ext-1')).toBe(external);
+    expect(svc.getByRef(ref)).toBe(external);
+    expect(svc.getByRef({ runtimeId: 'rt-other', sessionId: 'ext-1' })).toBeUndefined();
     expect(svc.list()).toEqual([external]);
     await expect(svc.resume('ext-1')).resolves.toBe(external);
 
@@ -533,6 +536,42 @@ describe('SessionLifecycleService', () => {
     tracking.dispose();
     tracking.dispose();
     expect(svc.get('ext-1')).toBeUndefined();
+    expect(svc.list()).toEqual([]);
+  });
+
+  it('keeps two same-named tracked sessions apart by SessionRef (M6)', async () => {
+    const svc = build();
+    const handleOf = (id: string): ISessionScopeHandle =>
+      ({
+        id,
+        kind: LifecycleScope.Session,
+        accessor: { get: () => undefined },
+        dispose: () => undefined,
+      }) as unknown as ISessionScopeHandle;
+    // Two runtimes hosting a live session with the SAME bare id: both fit in
+    // the ref-keyed tracked map (M5c's bare-keyed map would overwrite one).
+    const refA = { runtimeId: 'rt-a', sessionId: 'same-id' };
+    const refB = { runtimeId: 'rt-b', sessionId: 'same-id' };
+    const a = handleOf('same-id');
+    const b = handleOf('same-id');
+    const trackingA = svc.trackActivated(refA, a);
+    const trackingB = svc.trackActivated(refB, b);
+
+    // The ref-addressed lookup is exact…
+    expect(svc.getByRef(refA)).toBe(a);
+    expect(svc.getByRef(refB)).toBe(b);
+    // …while the bare-id projection refuses to guess (plan §1.3 rule 5)…
+    expect(svc.get('same-id')).toBeUndefined();
+    // …and list still surfaces both.
+    expect(svc.list()).toEqual([a, b]);
+
+    // Detaching one leaves the other's ref lookup intact; the bare projection
+    // becomes unique again and answers.
+    trackingA.dispose();
+    expect(svc.getByRef(refA)).toBeUndefined();
+    expect(svc.getByRef(refB)).toBe(b);
+    expect(svc.get('same-id')).toBe(b);
+    trackingB.dispose();
     expect(svc.list()).toEqual([]);
   });
 

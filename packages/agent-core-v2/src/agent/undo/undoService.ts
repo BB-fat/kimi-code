@@ -233,6 +233,7 @@ export class AgentConversationUndoService
       payload: {
         agentId: MAIN_AGENT_ID,
         sessionId: this.session.sessionId,
+        runtimeId: this.session.runtimeId,
         patch: { lastPrompt },
       },
     });

@@ -306,6 +306,10 @@ export function registerPromptsRoutes(app: PromptRouteHost, core: Scope): void {
           metadata: session.accessor.get(ISessionMetadata),
           eventService: core.accessor.get(IEventService),
           sessionId: session_id,
+          // M6: pin the internal event to the resolved runtime so the WS edge
+          // routes it by exact SessionRef (no bare-id fallback probe, which
+          // reordered this event behind the turn's own frames).
+          runtimeId: live.resolution.ref.runtimeId,
         }, promptMetadataTextFromContentParts(parts));
         const handle = await resolved.prompt.enqueue({ message: {
           role: 'user',

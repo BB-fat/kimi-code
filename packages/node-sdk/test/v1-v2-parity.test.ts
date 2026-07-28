@@ -1833,6 +1833,9 @@ describe('v1↔v2 agent interaction parity', () => {
       // Plan content round-trips through the plan file on both engines.
       expect(v1Plan).not.toBeNull();
       expect(v2Plan).not.toBeNull();
+      if (v1Plan!.path === null || v2Plan!.path === null) {
+        throw new Error('expected plan paths on both engines');
+      }
       await writeFile(v1Plan!.path, '# Parity plan', 'utf-8');
       await writeFile(v2Plan!.path, '# Parity plan', 'utf-8');
       const [v1Filled, v2Filled] = await Promise.all([

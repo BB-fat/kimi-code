@@ -6,7 +6,12 @@
  * down by {@link dropSession} (wired to the broadcaster's close path). A
  * session that is not live in this process yields `undefined` — transcript WS
  * streaming only covers live sessions, while cold reads go through
- * {@link readColdSnapshot}.
+ * {@link readColdSnapshot}. M6: every live map (store / ops listeners / op
+ * journals / heal timers) is keyed by the full `SessionRef` (`sessionRefKey`)
+ * and every live-entry method takes the ref — two same-named sessions hosted
+ * by different runtimes get fully independent stores, op seqs and heals. The
+ * backfill/heal cold reads go through the owner runtime addressed BY REF
+ * (`resolver.coldRead`), never by re-resolving the bare id.
  *
  * Backfill: a freshly created live store starts empty — the binding only
  * projects events from attach time on. To make full reads (REST pages, WS
@@ -51,8 +56,11 @@ import {
   ISessionMetadata,
   IAgentLoopService,
   reduceContextTranscript,
+  sessionRefKey,
   type IDisposable,
+  type ISessionColdReader,
   type Scope,
+  type SessionRef,
 } from '@moonshot-ai/agent-core-v2';
 import {
   TranscriptStore,
@@ -90,6 +98,8 @@ export interface TranscriptServiceDeps {
 }
 
 interface LiveEntry {
+  /** The live session's full identity — every live map is keyed by its refKey (M6). */
+  readonly ref: SessionRef;
   readonly store: TranscriptStore;
   readonly binding: TranscriptBinding;
   /** Resolves when the initial main-agent history backfill has landed. */
@@ -123,48 +133,51 @@ export interface TranscriptOpsCatchup {
 }
 
 export class TranscriptService {
+  /** Live stores, keyed by the full `SessionRef` (`sessionRefKey`) — M6: two same-named sessions hosted by different runtimes never share an entry. */
   private readonly live = new Map<string, LiveEntry>();
   private readonly opsListeners = new Map<
     string,
     Set<(event: TranscriptChangeEvent, seq: number) => void>
   >();
-  /** Debounced post-turn heals: `${sessionId}:${agentId}` → pending ordinals + timer. */
+  /** Debounced post-turn heals: `${sessionRefKey}:${agentId}` → pending ordinals + timer. */
   private readonly healTimers = new Map<string, { ordinals: Set<number>; timer: NodeJS.Timeout }>();
 
   constructor(private readonly deps: TranscriptServiceDeps) {
     // Live entries must not outlive their session: once it closes or archives,
     // reads should fall through to the cold rebuild from disk. M5c: sessions
     // are activated through the runtime session host, so the eager cleanup
-    // rides the HOST's lifecycle events; the `forSessionLive` re-check (via
-    // the process-wide live lookup, which also observes legacy-activated
-    // sessions) remains the safety net for any other activation path.
+    // rides the HOST's lifecycle events (which carry the full SessionRef —
+    // M6); the `forSessionLive` re-check (via the process-wide live lookup,
+    // which also observes legacy-activated sessions) remains the safety net
+    // for any other activation path.
     const host = deps.core.accessor.get(IRuntimeSessionHostService);
-    host.onDidCloseSession(({ ref }) => this.dropSession(ref.sessionId));
-    host.onDidArchiveSession(({ ref }) => this.dropSession(ref.sessionId));
+    host.onDidCloseSession(({ ref }) => this.dropSession(ref));
+    host.onDidArchiveSession(({ ref }) => this.dropSession(ref));
   }
 
   /**
    * Get (or create + bind) the transcript store for a session that is live in
    * this process. Returns `undefined` when the session is not in memory.
    */
-  forSessionLive(sessionId: string): TranscriptStore | undefined {
-    const existing = this.live.get(sessionId);
+  forSessionLive(ref: SessionRef): TranscriptStore | undefined {
+    const key = sessionRefKey(ref);
+    const existing = this.live.get(key);
     if (existing !== undefined) {
-      if (this.deps.core.accessor.get(ISessionLifecycleService).get(sessionId) !== undefined) {
+      if (this.deps.core.accessor.get(ISessionLifecycleService).getByRef(ref) !== undefined) {
         return existing.store;
       }
       // Stale entry for a session already closed/archived (the drop event may
       // not have fired on every teardown path) — do not serve it.
-      this.dropSession(sessionId);
+      this.dropSession(ref);
       return undefined;
     }
-    const session = this.deps.core.accessor.get(ISessionLifecycleService).get(sessionId);
+    const session = this.deps.core.accessor.get(ISessionLifecycleService).getByRef(ref);
     if (session === undefined) return undefined;
-    const store = new TranscriptStore(sessionId);
+    const store = new TranscriptStore(ref.sessionId);
     let binding: TranscriptBinding;
     try {
       binding = bindSessionTranscript(store, session, this.deps.logger, (event) =>
-        this.handleLiveOps(sessionId, event),
+        this.handleLiveOps(key, event),
       );
     } catch (error) {
       // The session's core scope can be disposed mid-bind during shutdown
@@ -174,17 +187,18 @@ export class TranscriptService {
       }
       throw error;
     }
-    this.live.set(sessionId, {
+    this.live.set(key, {
+      ref,
       store,
       binding,
       ready: (async () => {
-        await this.backfillMain(sessionId, store);
+        await this.backfillMain(ref, store);
         // Pending interactions announce only after the initial backfill, so
         // the persisted tool-call frames are present for the resolve-time
         // approvalId back-link (see TranscriptBinding).
         // Scoped to the main agent here — other agents seed after their own
         // on-demand backfill (ensureAgentHistory).
-        if (this.live.get(sessionId)?.store === store) {
+        if (this.live.get(key)?.store === store) {
           binding.seedPendingInteractions(MAIN_AGENT_ID);
         }
       })(),
@@ -200,8 +214,8 @@ export class TranscriptService {
    * (REST route, WS subscribe) await this so the first answer carries the
    * established main-agent transcript.
    */
-  async whenReady(sessionId: string): Promise<void> {
-    await this.live.get(sessionId)?.ready;
+  async whenReady(ref: SessionRef): Promise<void> {
+    await this.live.get(sessionRefKey(ref))?.ready;
   }
 
   /**
@@ -211,33 +225,34 @@ export class TranscriptService {
    * so any agent's transcript — including subagents that are not
    * materialized in this process — comes back established.
    */
-  async ensureAgentHistory(sessionId: string, agentId: string): Promise<void> {
-    if (agentId === MAIN_AGENT_ID) return this.whenReady(sessionId);
-    const entry = this.live.get(sessionId);
+  async ensureAgentHistory(ref: SessionRef, agentId: string): Promise<void> {
+    if (agentId === MAIN_AGENT_ID) return this.whenReady(ref);
+    const key = sessionRefKey(ref);
+    const entry = this.live.get(key);
     if (entry === undefined) return;
     await entry.ready;
     let backfill = entry.agentBackfills.get(agentId);
     if (backfill === undefined) {
-      backfill = this.backfillAgent(sessionId, entry.store, agentId);
+      backfill = this.backfillAgent(ref, entry.store, agentId);
       entry.agentBackfills.set(agentId, backfill);
     }
     await backfill;
     // The agent's persisted tool frames are in place now — its pending
     // interactions can be announced with resolve-time back-links intact.
-    if (this.live.get(sessionId)?.store === entry.store) {
+    if (this.live.get(key)?.store === entry.store) {
       entry.binding.seedPendingInteractions(agentId);
     }
   }
 
   /** Initial backfill: main-agent history + the full roster from session metadata. */
-  private async backfillMain(sessionId: string, store: TranscriptStore): Promise<void> {
-    await this.backfillAgent(sessionId, store, MAIN_AGENT_ID);
-    if (this.live.get(sessionId)?.store !== store) return;
+  private async backfillMain(ref: SessionRef, store: TranscriptStore): Promise<void> {
+    await this.backfillAgent(ref, store, MAIN_AGENT_ID);
+    if (this.live.get(sessionRefKey(ref))?.store !== store) return;
     // Seed the roster from the session's persisted agent registry, so full
     // reads (and agent pickers) see the complete historical roster —
     // including subagents not materialized in this process.
     try {
-      const session = this.deps.core.accessor.get(ISessionLifecycleService).get(sessionId);
+      const session = this.deps.core.accessor.get(ISessionLifecycleService).getByRef(ref);
       const meta = await session?.accessor.get(ISessionMetadata).read();
       for (const [agentId, agentMeta] of Object.entries(meta?.agents ?? {})) {
         store.describeAgent(descriptorFromMeta(agentId, agentMeta));
@@ -254,10 +269,12 @@ export class TranscriptService {
    * the rebuild are 0-based like the engine's, so future live turns continue
    * without colliding.
    */
-  private async backfillAgent(sessionId: string, store: TranscriptStore, agentId: string): Promise<void> {
+  private async backfillAgent(ref: SessionRef, store: TranscriptStore, agentId: string): Promise<void> {
+    const key = sessionRefKey(ref);
+    const sessionId = ref.sessionId;
     let snapshot: AgentTranscriptSnapshot | undefined;
     try {
-      snapshot = await this.readColdSnapshot(sessionId, agentId);
+      snapshot = await this.readLiveSnapshot(ref, agentId);
     } catch (error) {
       this.deps.logger?.warn(
         { sessionId, agentId, err: error instanceof Error ? error.message : error },
@@ -265,7 +282,7 @@ export class TranscriptService {
       );
     }
     // The entry may have been dropped (session closed) while reading from disk.
-    if (this.live.get(sessionId)?.store !== store) return;
+    if (this.live.get(key)?.store !== store) return;
     const transcript = store.ensureAgent(agentId);
     if (snapshot !== undefined) {
       // Turns merge live-first (`healTurnOps`): ops the projector landed
@@ -275,7 +292,7 @@ export class TranscriptService {
       const ops = snapshotToOps(snapshot, (turn) =>
         healTurnOps(turn, transcript.getTurn(turn.turnId)),
       );
-      const overlay = this.liveTurnOverlay(sessionId, agentId, transcript, snapshot);
+      const overlay = this.liveTurnOverlay(ref, agentId, transcript, snapshot);
       if (overlay !== undefined) ops.push(overlay);
       const result = transcript.apply(ops);
       if (result.gap !== undefined) {
@@ -283,7 +300,7 @@ export class TranscriptService {
       }
       // Fan the backfill out like any mapped-op batch so attached subscribers
       // converge; later resets carry it wholesale anyway.
-      this.dispatchOps(sessionId, { agentId, ops });
+      this.dispatchOps(key, { agentId, ops });
     }
     // Land the roster entry last, so roster-driven resets already see the
     // backfilled content. Preserve a richer descriptor already seeded from
@@ -314,29 +331,30 @@ export class TranscriptService {
    * is not live (caller skips streaming for cold sessions).
    */
   onSessionOps(
-    sessionId: string,
+    ref: SessionRef,
     listener: (event: TranscriptChangeEvent, seq: number) => void,
   ): IDisposable | undefined {
-    if (this.forSessionLive(sessionId) === undefined) return undefined;
-    let listeners = this.opsListeners.get(sessionId);
+    if (this.forSessionLive(ref) === undefined) return undefined;
+    const key = sessionRefKey(ref);
+    let listeners = this.opsListeners.get(key);
     if (listeners === undefined) {
       listeners = new Set();
-      this.opsListeners.set(sessionId, listeners);
+      this.opsListeners.set(key, listeners);
     }
     listeners.add(listener);
     return {
       dispose: () => {
-        const entry = this.opsListeners.get(sessionId);
+        const entry = this.opsListeners.get(key);
         if (entry === undefined) return;
         entry.delete(listener);
-        if (entry.size === 0) this.opsListeners.delete(sessionId);
+        if (entry.size === 0) this.opsListeners.delete(key);
       },
     };
   }
 
-  private dispatchOps(sessionId: string, event: TranscriptChangeEvent): void {
-    const seq = this.journalOps(sessionId, event);
-    const listeners = this.opsListeners.get(sessionId);
+  private dispatchOps(key: string, event: TranscriptChangeEvent): void {
+    const seq = this.journalOps(key, event);
+    const listeners = this.opsListeners.get(key);
     if (listeners === undefined) return;
     for (const listener of listeners) {
       try {
@@ -353,8 +371,8 @@ export class TranscriptService {
    * listeners), so the watermark always covers every dispatched batch. Returns
    * 0 when the session has no live entry — the journal dies with the store.
    */
-  private journalOps(sessionId: string, event: TranscriptChangeEvent): number {
-    const entry = this.live.get(sessionId);
+  private journalOps(key: string, event: TranscriptChangeEvent): number {
+    const entry = this.live.get(key);
     if (entry === undefined) return 0;
     let journal = entry.opsJournals.get(event.agentId);
     if (journal === undefined) {
@@ -372,8 +390,8 @@ export class TranscriptService {
    * nothing was dispatched — or the session is not live, cold sessions having
    * no journal).
    */
-  getSeqWatermark(sessionId: string, agentId: string): number {
-    const journal = this.live.get(sessionId)?.opsJournals.get(agentId);
+  getSeqWatermark(ref: SessionRef, agentId: string): number {
+    const journal = this.live.get(sessionRefKey(ref))?.opsJournals.get(agentId);
     return journal === undefined ? 0 : journal.nextSeq - 1;
   }
 
@@ -387,12 +405,12 @@ export class TranscriptService {
    * (cold sessions have no journal).
    */
   getOpsSince(
-    sessionId: string,
+    ref: SessionRef,
     agentId: string,
     sinceSeq: number,
   ): TranscriptOpsCatchup | undefined {
-    if (this.forSessionLive(sessionId) === undefined) return undefined;
-    const journal = this.live.get(sessionId)?.opsJournals.get(agentId);
+    if (this.forSessionLive(ref) === undefined) return undefined;
+    const journal = this.live.get(sessionRefKey(ref))?.opsJournals.get(agentId);
     const latestSeq = journal === undefined ? 0 : journal.nextSeq - 1;
     if (sinceSeq > latestSeq) return { batches: [], latestSeq, complete: false };
     const batches = journal?.batches.filter((batch) => batch.seq > sinceSeq) ?? [];
@@ -407,18 +425,18 @@ export class TranscriptService {
    * turns to heal. Backfill batches go through `dispatchOps` directly so a
    * replayed history cannot retrigger heals.
    */
-  private handleLiveOps(sessionId: string, event: TranscriptChangeEvent): void {
-    this.dispatchOps(sessionId, event);
+  private handleLiveOps(key: string, event: TranscriptChangeEvent): void {
+    this.dispatchOps(key, event);
     for (const op of event.ops) {
       if (op.op === 'turn.upsert' && TERMINAL_TURN_STATES.has(op.turn.state)) {
-        this.scheduleTurnHeal(sessionId, event.agentId, op.turn.ordinal);
+        this.scheduleTurnHeal(key, event.agentId, op.turn.ordinal);
       }
     }
   }
 
-  private scheduleTurnHeal(sessionId: string, agentId: string, ordinal: number): void {
-    const key = `${sessionId}:${agentId}`;
-    const existing = this.healTimers.get(key);
+  private scheduleTurnHeal(key: string, agentId: string, ordinal: number): void {
+    const timerKey = `${key}:${agentId}`;
+    const existing = this.healTimers.get(timerKey);
     if (existing !== undefined) {
       existing.ordinals.add(ordinal);
       existing.timer.refresh();
@@ -426,11 +444,12 @@ export class TranscriptService {
     }
     const ordinals = new Set([ordinal]);
     const timer = setTimeout(() => {
-      this.healTimers.delete(key);
-      void this.healEndedTurns(sessionId, agentId, ordinals);
+      this.healTimers.delete(timerKey);
+      const entry = this.live.get(key);
+      if (entry !== undefined) void this.healEndedTurns(entry.ref, agentId, ordinals);
     }, TURN_HEAL_DEBOUNCE_MS);
     timer.unref();
-    this.healTimers.set(key, { ordinals, timer });
+    this.healTimers.set(timerKey, { ordinals, timer });
   }
 
   /**
@@ -442,12 +461,12 @@ export class TranscriptService {
    * snapshot's. Returns `undefined` only when the loop is idle.
    */
   private liveTurnOverlay(
-    sessionId: string,
+    ref: SessionRef,
     agentId: string,
     transcript: AgentTranscript,
     snapshot: AgentTranscriptSnapshot,
   ): TranscriptOperation | undefined {
-    const session = this.deps.core.accessor.get(ISessionLifecycleService).get(sessionId);
+    const session = this.deps.core.accessor.get(ISessionLifecycleService).getByRef(ref);
     const agent = session?.accessor.get(IAgentLifecycleService).get(agentId);
     const status = agent?.accessor.get(IAgentLoopService).status();
     if (status?.state !== 'running' || status.activeTurnId === undefined) return undefined;
@@ -480,24 +499,25 @@ export class TranscriptService {
    * except the one regression being healed — truncated text/thinking frames.
    */
   private async healEndedTurns(
-    sessionId: string,
+    ref: SessionRef,
     agentId: string,
     ordinals: ReadonlySet<number>,
   ): Promise<void> {
-    const entry = this.live.get(sessionId);
+    const key = sessionRefKey(ref);
+    const entry = this.live.get(key);
     if (entry === undefined) return;
     let snapshot: AgentTranscriptSnapshot | undefined;
     try {
-      snapshot = await this.readColdSnapshot(sessionId, agentId);
+      snapshot = await this.readLiveSnapshot(ref, agentId);
     } catch (error) {
       this.deps.logger?.warn(
-        { sessionId, agentId, err: error instanceof Error ? error.message : error },
+        { sessionId: ref.sessionId, agentId, err: error instanceof Error ? error.message : error },
         'transcript: post-turn heal failed, continuing without it',
       );
       return;
     }
     // The entry may have been dropped (session closed) while reading from disk.
-    if (snapshot === undefined || this.live.get(sessionId)?.store !== entry.store) return;
+    if (snapshot === undefined || this.live.get(key)?.store !== entry.store) return;
     const transcript = entry.store.getAgent(agentId);
     if (transcript === undefined) return;
     const ops: TranscriptOperation[] = [];
@@ -509,7 +529,7 @@ export class TranscriptService {
     transcript.apply(ops);
     // Fan the heal out like any mapped-op batch so attached subscribers
     // converge; all ops are state-style upserts.
-    this.dispatchOps(sessionId, { agentId, ops });
+    this.dispatchOps(key, { agentId, ops });
   }
 
   /**
@@ -573,6 +593,34 @@ export class TranscriptService {
       return groupMessagesIntoSnapshot([]);
     }
     const coldReader = await resolution.runtime.sessions.coldRead(sessionId);
+    return this.snapshotFromColdReader(coldReader, agentId);
+  }
+
+  /**
+   * The live-entry half of the cold read (M6): the backfill/heal paths hold
+   * the session's exact `SessionRef`, so they read through the owner runtime
+   * addressed BY REF (`resolver.coldRead`) — never by re-resolving the bare
+   * id, which a same-named pair on another runtime would make ambiguous.
+   * Returns `undefined` when the runtime is gone (the store is about to be
+   * dropped anyway).
+   */
+  private async readLiveSnapshot(
+    ref: SessionRef,
+    agentId: string,
+  ): Promise<AgentTranscriptSnapshot | undefined> {
+    if (!isPlainAgentId(agentId)) {
+      return groupMessagesIntoSnapshot([]);
+    }
+    const coldReader = await this.deps.resolver.coldRead(ref);
+    if (coldReader === undefined) return undefined;
+    return this.snapshotFromColdReader(coldReader, agentId);
+  }
+
+  /** Fold one agent's persisted wire records (cold-reader stream) into a snapshot. */
+  private async snapshotFromColdReader(
+    coldReader: ISessionColdReader,
+    agentId: string,
+  ): Promise<AgentTranscriptSnapshot> {
     const records: WireJournalRecord[] = [];
     for await (const record of coldReader.readRecords({ agentId })) {
       records.push(record.data as WireJournalRecord);
@@ -585,17 +633,18 @@ export class TranscriptService {
   }
 
   /** Dispose the live store + binding for a session (session closed / server shutdown). */
-  dropSession(sessionId: string): void {
-    this.opsListeners.delete(sessionId);
-    for (const [key, pending] of this.healTimers) {
-      if (key.startsWith(`${sessionId}:`)) {
+  dropSession(ref: SessionRef): void {
+    const key = sessionRefKey(ref);
+    this.opsListeners.delete(key);
+    for (const [timerKey, pending] of this.healTimers) {
+      if (timerKey.startsWith(`${key}:`)) {
         clearTimeout(pending.timer);
-        this.healTimers.delete(key);
+        this.healTimers.delete(timerKey);
       }
     }
-    const entry = this.live.get(sessionId);
+    const entry = this.live.get(key);
     if (entry === undefined) return;
-    this.live.delete(sessionId);
+    this.live.delete(key);
     entry.binding.dispose();
   }
 }

@@ -306,7 +306,12 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
         );
         core.accessor.get(IEventService).publish({
           type: 'event.session.created',
-          payload: { agentId: 'main', sessionId: session.id, session },
+          payload: {
+            agentId: 'main',
+            sessionId: session.id,
+            runtimeId: outcome.ref.runtimeId,
+            session,
+          },
         });
         reply.send(okEnvelope(session, req.id));
       } catch (error) {
@@ -568,6 +573,7 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
             payload: {
               agentId: 'main',
               sessionId: session_id,
+              runtimeId: live.resolution.ref.runtimeId,
               title: session.title,
               patch: { title: session.title, isCustomTitle: true },
             },
@@ -654,7 +660,12 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
           );
           core.accessor.get(IEventService).publish({
             type: 'event.session.created',
-            payload: { agentId: 'main', sessionId: session.id, session },
+            payload: {
+              agentId: 'main',
+              sessionId: session.id,
+              runtimeId: forked.ref.runtimeId,
+              session,
+            },
           });
           requestLog(req)?.info(
             { session_id: parsed.id, action: 'fork', new_session_id: session.id },
@@ -967,7 +978,12 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
         );
         core.accessor.get(IEventService).publish({
           type: 'event.session.created',
-          payload: { agentId: 'main', sessionId: session.id, session },
+          payload: {
+            agentId: 'main',
+            sessionId: session.id,
+            runtimeId: forked.ref.runtimeId,
+            session,
+          },
         });
         reply.send(okEnvelope(session, req.id));
       } catch (error) {

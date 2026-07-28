@@ -22,6 +22,13 @@ export interface ISessionContext {
   readonly _serviceBrand: undefined;
 
   readonly sessionId: string;
+  /**
+   * The owning runtime's id when the session was activated through a runtime
+   * lease (multi-runtime refactor M6) — the internal `SessionRef`'s other
+   * half. Absent for legacy-activated sessions; internal identity only,
+   * never projected onto the v1 wire.
+   */
+  readonly runtimeId?: string;
   readonly workspaceId: string;
   readonly sessionDir: string;
   readonly metaScope: string;
@@ -43,11 +50,13 @@ export function makeSessionContext(input: {
   readonly sessionScope: string;
   readonly cwd: string;
   readonly metaScope?: string;
+  readonly runtimeId?: string;
 }): ISessionContext {
   const { sessionScope } = input;
   return {
     _serviceBrand: undefined,
     sessionId: input.sessionId,
+    runtimeId: input.runtimeId,
     workspaceId: input.workspaceId,
     sessionDir: input.sessionDir,
     metaScope: input.metaScope ?? sessionScope,

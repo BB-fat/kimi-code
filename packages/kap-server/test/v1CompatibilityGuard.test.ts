@@ -75,13 +75,14 @@ const LAYOUT_BANS: { pattern: RegExp; label: string }[] = [
 ];
 
 /**
- * Rule 2 exemptions: files still allowed to import `ISessionIndex` (the LIVE
- * WS surface M6 migrates). Anything not listed here must be clean. The list
- * may only shrink; every entry states its reason.
+ * Rule 2 exemptions: files still allowed to import `ISessionIndex`. M6
+ * migrated the LAST consumer (the WebSocket broadcaster's cold-watermark
+ * existence check now rides the caller-resolved `SessionRef`), so the list is
+ * EMPTY — anything not listed here (i.e. any file at all) must be clean. The
+ * mechanism stays: a future bare-id live lookup belongs behind
+ * `IV1SessionRefResolver`, never behind a new exemption.
  */
-const SESSION_INDEX_EXEMPTIONS: Record<string, string> = {
-  'transport/ws/v1/sessionEventBroadcaster.ts': 'WebSocket live surface — M6',
-};
+const SESSION_INDEX_EXEMPTIONS: Record<string, string> = {};
 
 /** Rule 3: runtime registry/manager imports are v1Compatibility-only. */
 const RUNTIME_IMPORT_BAN = /ISessionHostRuntimeRegistry|IWorkspaceRuntimeManager/;

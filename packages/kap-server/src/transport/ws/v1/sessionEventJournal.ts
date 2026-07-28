@@ -3,7 +3,10 @@
  * watermark (`{seq, epoch}`) and replay.
  *
  * Ported from v1 (`packages/server/src/services/gateway/sessionEventJournal.ts`).
- * One JSONL file per session under `<eventsDir>/<sessionId>.jsonl`:
+ * One JSONL file per session under `<eventsDir>/<enc(runtimeId)>/<enc(sessionId)>.jsonl`
+ * (M6 — keyed by the full `SessionRef`; pre-M6 flat `<sessionId>.jsonl` files
+ * are abandoned, so pre-upgrade cursors trip the designed `epoch_changed`
+ * resync once):
  *
  *   line 1   {"kind":"journal_header","version":1,"epoch":"ep_<ulid>","created_at":...}
  *   line 2+  {"kind":"event","seq":N,"envelope":{...wire envelope...}}
@@ -27,6 +30,8 @@ import { createReadStream } from 'node:fs';
 import { appendFile, mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { ulid } from 'ulid';
+
+import type { SessionRef } from '@moonshot-ai/agent-core-v2';
 
 const JOURNAL_VERSION = 1;
 
@@ -223,9 +228,23 @@ export class SessionEventJournal {
   }
 }
 
-/** Default per-session journal path under `<eventsDir>/<sessionId>.jsonl`. */
-export function sessionJournalPath(eventsDir: string, sessionId: string): string {
-  return join(eventsDir, `${sessionId}.jsonl`);
+/**
+ * Default per-session journal path (M6): `<eventsDir>/<enc(runtimeId)>/<enc(sessionId)>.jsonl`.
+ * Keyed by the full `SessionRef` — two same-named sessions hosted by
+ * different runtimes never share a journal file; `encodeURIComponent` keeps
+ * every id spelling inside its own path segment.
+ */
+export function sessionJournalPath(eventsDir: string, ref: SessionRef): string {
+  return join(
+    eventsDir,
+    encodeURIComponent(ref.runtimeId),
+    `${encodeURIComponent(ref.sessionId)}.jsonl`,
+  );
+}
+
+/** The global pseudo-session's journal path (unchanged since v1: no ref). */
+export function globalJournalPath(eventsDir: string): string {
+  return join(eventsDir, '__global__.jsonl');
 }
 
 function parseJournalLine(raw: string): JournalHeaderLine | JournalEventLine | undefined {

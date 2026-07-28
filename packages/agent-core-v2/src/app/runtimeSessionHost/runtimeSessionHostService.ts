@@ -351,10 +351,7 @@ export class RuntimeSessionHostService extends Disposable implements IRuntimeSes
    * projection — already observes the session as live.
    */
   private trackLive(ref: SessionRef, scope: IRuntimeSessionScope): void {
-    this.trackings.set(
-      sessionRefKey(ref),
-      this.lifecycle.trackActivated(ref.sessionId, scope.handle),
-    );
+    this.trackings.set(sessionRefKey(ref), this.lifecycle.trackActivated(ref, scope.handle));
   }
 
   /** Detach the live-lookup registration (idempotent per ref). */

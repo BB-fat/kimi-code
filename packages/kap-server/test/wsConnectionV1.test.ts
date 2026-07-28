@@ -6,6 +6,9 @@
 import type { WebSocket } from 'ws';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { SessionRef } from '@moonshot-ai/agent-core-v2';
+
+import type { IV1SessionRefResolver } from '../src/app/v1Compatibility/v1SessionRefResolver';
 import type { IConnectionRegistry } from '../src/transport/ws/connectionRegistry';
 import type { SessionEventBroadcaster } from '../src/transport/ws/v1/sessionEventBroadcaster';
 import {
@@ -85,11 +88,28 @@ function makeRegistry(): IConnectionRegistry {
   };
 }
 
+/** Every bare id resolves onto the default test runtime (unknown-session cases stay on the broadcaster fake). */
+const ref = (sessionId: string): SessionRef => ({ runtimeId: 'test-runtime', sessionId });
+
+const fakeResolver: IV1SessionRefResolver = {
+  resolve: async (sid: string) => ({
+    kind: 'resolved',
+    resolution: {
+      ref: ref(sid),
+      runtime: undefined as never,
+      descriptor: undefined as never,
+    },
+  }),
+  listAll: async () => [],
+  coldRead: async () => undefined,
+};
+
 function makeConn(socket: FakeSocket, opts: Partial<WsConnectionV1Options> = {}): WsConnectionV1 {
   return new WsConnectionV1({
     socket: socket as unknown as WebSocket,
     broadcaster: makeBroadcaster(),
     connectionRegistry: makeRegistry(),
+    resolver: fakeResolver,
     remoteAddress: null,
     userAgent: null,
     ...opts,
@@ -212,7 +232,7 @@ describe('coalesceFrames', () => {
 
 describe('WsConnectionV1 transcript subscriptions (subscribe_v2)', () => {
   interface SubscribeCall {
-    sessionId: string;
+    ref: SessionRef;
     filter: unknown;
     grades: unknown;
     opts?: { deferTranscriptReset?: boolean; transcriptSince?: Record<string, number> };
@@ -221,24 +241,24 @@ describe('WsConnectionV1 transcript subscriptions (subscribe_v2)', () => {
   function makeCapturingBroadcaster(): {
     broadcaster: SessionEventBroadcaster;
     calls: SubscribeCall[];
-    detaches: { sessionId: string; agentIds?: readonly string[] }[];
+    detaches: { ref: SessionRef; agentIds?: readonly string[] }[];
   } {
     const calls: SubscribeCall[] = [];
-    const detaches: { sessionId: string; agentIds?: readonly string[] }[] = [];
+    const detaches: { ref: SessionRef; agentIds?: readonly string[] }[] = [];
     const broadcaster = {
       subscribe: async (
-        sessionId: string,
+        ref: SessionRef,
         _target: unknown,
         filter: unknown,
         grades: unknown,
         opts?: { deferTranscriptReset?: boolean; transcriptSince?: Record<string, number> },
       ) => {
-        calls.push({ sessionId, filter, grades, opts });
+        calls.push({ ref, filter, grades, opts });
         return true;
       },
       unsubscribe: () => {},
-      unsubscribeTranscript: (sessionId: string, _target: unknown, agentIds?: readonly string[]) => {
-        detaches.push({ sessionId, agentIds });
+      unsubscribeTranscript: (ref: SessionRef, _target: unknown, agentIds?: readonly string[]) => {
+        detaches.push({ ref, agentIds });
       },
       addGlobalTarget: () => {},
       removeGlobalTarget: () => {},
@@ -273,11 +293,12 @@ describe('WsConnectionV1 transcript subscriptions (subscribe_v2)', () => {
     await vi.waitFor(() => expect(calls).toHaveLength(1));
 
     expect(calls[0]).toMatchObject({
-      sessionId: 's1',
+      ref: ref('s1'),
       grades: { '*': 'delta' },
       opts: { transcriptSince: { main: 7, '*': 3 } },
     });
     expect(conn.subscriptions.get('s1')).toEqual({
+      ref: ref('s1'),
       agentFilter: undefined,
       transcriptGrades: { '*': 'delta' },
     });
@@ -304,9 +325,10 @@ describe('WsConnectionV1 transcript subscriptions (subscribe_v2)', () => {
       }),
     );
     await vi.waitFor(() => expect(calls).toHaveLength(1));
-    expect(calls[0]).toMatchObject({ sessionId: 's1', grades: undefined });
+    expect(calls[0]).toMatchObject({ ref: ref('s1'), grades: undefined });
     expect(calls[0]!.opts?.transcriptSince).toBeUndefined();
     expect(conn.subscriptions.get('s1')).toEqual({
+      ref: ref('s1'),
       agentFilter: undefined,
       transcriptGrades: undefined,
     });
@@ -319,8 +341,9 @@ describe('WsConnectionV1 transcript subscriptions (subscribe_v2)', () => {
       }),
     );
     await vi.waitFor(() => expect(calls).toHaveLength(2));
-    expect(calls[1]).toMatchObject({ sessionId: 's2', grades: undefined });
+    expect(calls[1]).toMatchObject({ ref: ref('s2'), grades: undefined });
     expect(conn.subscriptions.get('s2')).toEqual({
+      ref: ref('s2'),
       agentFilter: undefined,
       transcriptGrades: undefined,
     });
@@ -367,9 +390,10 @@ describe('WsConnectionV1 transcript subscriptions (subscribe_v2)', () => {
     );
     await vi.waitFor(() => expect(calls).toHaveLength(2));
 
-    expect(calls[1]).toMatchObject({ sessionId: 's1', grades: { main: 'block' } });
+    expect(calls[1]).toMatchObject({ ref: ref('s1'), grades: { main: 'block' } });
     expect(calls[1]!.filter).toEqual(new Set(['main']));
     expect(conn.subscriptions.get('s1')).toEqual({
+      ref: ref('s1'),
       agentFilter: new Set(['main']),
       transcriptGrades: { main: 'block' },
     });
@@ -502,9 +526,10 @@ describe('WsConnectionV1 transcript subscriptions (subscribe_v2)', () => {
     );
     await vi.waitFor(() => expect(detaches).toHaveLength(1));
 
-    expect(detaches[0]).toEqual({ sessionId: 's1', agentIds: ['main'] });
+    expect(detaches[0]).toEqual({ ref: ref('s1'), agentIds: ['main'] });
     // An explicit 'off' — deleting the key would fall back to the '*' default.
     expect(conn.subscriptions.get('s1')).toEqual({
+      ref: ref('s1'),
       agentFilter: new Set(['main']),
       transcriptGrades: { '*': 'delta', main: 'off' },
     });
@@ -529,8 +554,9 @@ describe('WsConnectionV1 transcript subscriptions (subscribe_v2)', () => {
     socket.emit('message', controlFrame('unsubscribe_v2', { session_id: 's1' }));
     await vi.waitFor(() => expect(detaches).toHaveLength(1));
 
-    expect(detaches[0]).toEqual({ sessionId: 's1', agentIds: undefined });
+    expect(detaches[0]).toEqual({ ref: ref('s1'), agentIds: undefined });
     expect(conn.subscriptions.get('s1')).toEqual({
+      ref: ref('s1'),
       agentFilter: undefined,
       transcriptGrades: undefined,
     });
@@ -592,6 +618,7 @@ describe('WsConnectionV1 transcript subscriptions (subscribe_v2)', () => {
     await vi.waitFor(() => expect(calls).toHaveLength(2));
 
     expect(conn.subscriptions.get('s1')).toEqual({
+      ref: ref('s1'),
       agentFilter: new Set(['main']),
       transcriptGrades: { '*': 'delta' },
     });
@@ -618,7 +645,7 @@ describe('WsConnectionV1 transcript subscriptions (subscribe_v2)', () => {
     );
     await vi.waitFor(() => expect(calls).toHaveLength(2));
 
-    expect(calls[1]).toMatchObject({ sessionId: 's1', grades: { main: 'turn' } });
+    expect(calls[1]).toMatchObject({ ref: ref('s1'), grades: { main: 'turn' } });
     expect(conn.subscriptions.get('s1')?.transcriptGrades).toEqual({ main: 'turn' });
     conn.close();
   });

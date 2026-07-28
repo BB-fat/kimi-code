@@ -44,7 +44,7 @@
  * the `plan.revision` reference records carry no tool-call linkage.
  */
 
-import { MAIN_AGENT_ID, type Scope } from '@moonshot-ai/agent-core-v2';
+import { MAIN_AGENT_ID, type Scope, type SessionRef } from '@moonshot-ai/agent-core-v2';
 import {
   isPlainAgentId,
   paginateTurns,
@@ -61,6 +61,7 @@ import {
 } from '@moonshot-ai/transcript';
 import { z } from 'zod';
 
+import type { IV1SessionRefResolver } from '../app/v1Compatibility/v1SessionRefResolver';
 import { errEnvelope, okEnvelope } from '../envelope';
 import { ErrorCode } from '../protocol/error-codes';
 import { defineRoute } from '../middleware/defineRoute';
@@ -182,10 +183,36 @@ const planQueryCoercion = z
 export interface TranscriptRouteDeps {
   readonly core: Scope;
   readonly transcriptService: TranscriptService;
+  /** The single bare-id entry point (plan §1.3) every handler resolves through FIRST (M6). */
+  readonly resolver: IV1SessionRefResolver;
+}
+
+/**
+ * Resolve the bare `{session_id}` once per request (M6): the live transcript
+ * paths below are addressed by the returned full `SessionRef`, so a session
+ * hosted beside a same-named one on another runtime is never cross-wired.
+ * Failure parity with the pre-M6 flow (which resolved inside
+ * `TranscriptService.resolveColdSession`): `not_found` comes back for the
+ * handler's 40401 mapping, while `ambiguous` / `unavailable` THROW the same
+ * messages the cold resolver threw — the global error handler emits the
+ * identical 50001 envelope (msg + stack details) as before.
+ */
+async function resolveTranscriptRef(
+  resolver: IV1SessionRefResolver,
+  sessionId: string,
+): Promise<SessionRef | undefined> {
+  const resolved = await resolver.resolve(sessionId);
+  if (resolved.kind === 'resolved') return resolved.resolution.ref;
+  if (resolved.kind === 'not_found') return undefined;
+  throw new Error(
+    resolved.kind === 'ambiguous'
+      ? `session ${sessionId} is ambiguous across runtimes`
+      : `session ${sessionId} is temporarily unavailable`,
+  );
 }
 
 export function registerTranscriptRoutes(app: TranscriptRouteHost, deps: TranscriptRouteDeps): void {
-  const { transcriptService } = deps;
+  const { transcriptService, resolver } = deps;
 
   const route = defineRoute(
     {
@@ -211,13 +238,21 @@ export function registerTranscriptRoutes(app: TranscriptRouteHost, deps: Transcr
         pageSize: query.page_size ?? DEFAULT_PAGE_SIZE,
       };
 
+      // M6: resolve the bare id FIRST — the live store is addressed by the
+      // full SessionRef from here on.
+      const ref = await resolveTranscriptRef(resolver, session_id);
+      if (ref === undefined) {
+        sendSessionNotFound(reply, req.id, session_id);
+        return;
+      }
+
       // Live session — answer from the bound store, after the requested
       // agent's history backfill has landed (full reads always see the
       // established transcript, for any agent id).
-      const store = transcriptService.forSessionLive(session_id);
+      const store = transcriptService.forSessionLive(ref);
       if (store !== undefined) {
-        await transcriptService.whenReady(session_id);
-        await transcriptService.ensureAgentHistory(session_id, query.agent_id);
+        await transcriptService.whenReady(ref);
+        await transcriptService.ensureAgentHistory(ref, query.agent_id);
         const transcript = store.ensureAgent(query.agent_id);
         const page = paginateTurns(transcript.getItems(), pageQuery);
         reply.send(
@@ -234,7 +269,7 @@ export function registerTranscriptRoutes(app: TranscriptRouteHost, deps: Transcr
               agents: store.agents(),
               pending_interactions: transcript.listPendingInteractions(),
               // Watermark: this state includes every op batch with seq <= N.
-              seq: transcriptService.getSeqWatermark(session_id, query.agent_id),
+              seq: transcriptService.getSeqWatermark(ref, query.agent_id),
             },
             req.id,
           ),
@@ -302,16 +337,18 @@ export function registerTranscriptRoutes(app: TranscriptRouteHost, deps: Transcr
       const { session_id } = req.params;
       const query = req.query;
 
-      const catchup = transcriptService.getOpsSince(session_id, query.agent_id, query.since_seq);
+      // M6: resolve the bare id FIRST — the live journal is ref-addressed.
+      const ref = await resolveTranscriptRef(resolver, session_id);
+      if (ref === undefined) {
+        sendSessionNotFound(reply, req.id, session_id);
+        return;
+      }
+
+      const catchup = transcriptService.getOpsSince(ref, query.agent_id, query.since_seq);
       if (catchup === undefined) {
-        // Not live in this process: a truly unknown session is a 40401 (same
-        // mapping as the transcript route); a known-but-cold session has no
-        // journal, so the catch-up is incomplete by definition.
-        const roster = await transcriptService.readColdRoster(session_id);
-        if (roster === undefined) {
-          sendSessionNotFound(reply, req.id, session_id);
-          return;
-        }
+        // Not live in this process: a known-but-cold session has no journal,
+        // so the catch-up is incomplete by definition (the caller falls back
+        // to a full transcript refresh).
         reply.send(
           okEnvelope(
             { agent_id: query.agent_id, batches: [], latest_seq: 0, complete: false },
@@ -354,17 +391,24 @@ export function registerTranscriptRoutes(app: TranscriptRouteHost, deps: Transcr
       const { session_id } = req.params;
       const { agent_id } = req.query;
 
+      // M6: resolve the bare id FIRST — the live store is ref-addressed.
+      const ref = await resolveTranscriptRef(resolver, session_id);
+      if (ref === undefined) {
+        sendSessionNotFound(reply, req.id, session_id);
+        return;
+      }
+
       // Live session — the store already holds the full timeline; the roster
       // was seeded from session metadata on bind, so an agent_id-less read
       // covers every agent (each backfilled on demand, like the paged route).
-      const store = transcriptService.forSessionLive(session_id);
+      const store = transcriptService.forSessionLive(ref);
       if (store !== undefined) {
-        await transcriptService.whenReady(session_id);
+        await transcriptService.whenReady(ref);
         const agentIds =
           agent_id !== undefined ? [agent_id] : store.agents().map((d) => d.agentId);
         const agents = [];
         for (const agentId of agentIds) {
-          await transcriptService.ensureAgentHistory(session_id, agentId);
+          await transcriptService.ensureAgentHistory(ref, agentId);
           const transcript = store.ensureAgent(agentId);
           const attachments = transcript.getAttachments();
           agents.push({
@@ -431,11 +475,18 @@ export function registerTranscriptRoutes(app: TranscriptRouteHost, deps: Transcr
       const { session_id } = req.params;
       const { agent_id, tool_call_id } = req.query;
 
+      // M6: resolve the bare id FIRST — the live store is ref-addressed.
+      const ref = await resolveTranscriptRef(resolver, session_id);
+      if (ref === undefined) {
+        sendSessionNotFound(reply, req.id, session_id);
+        return;
+      }
+
       // Live session — same read path as the paged route.
-      const store = transcriptService.forSessionLive(session_id);
+      const store = transcriptService.forSessionLive(ref);
       if (store !== undefined) {
-        await transcriptService.whenReady(session_id);
-        await transcriptService.ensureAgentHistory(session_id, agent_id);
+        await transcriptService.whenReady(ref);
+        await transcriptService.ensureAgentHistory(ref, agent_id);
         const transcript = store.ensureAgent(agent_id);
         const plans = projectPlans(
           transcript.getItems(),

@@ -914,6 +914,7 @@ function registerSessionExportServices(
       throw new Error('create should not be called by session export');
     },
     get: () => options.lifecycleHandle,
+    getByRef: () => options.lifecycleHandle,
     list: () => (options.lifecycleHandle === undefined ? [] : [options.lifecycleHandle]),
     resume: async () => options.lifecycleHandle,
     trackActivated: () => ({ dispose: () => undefined }),

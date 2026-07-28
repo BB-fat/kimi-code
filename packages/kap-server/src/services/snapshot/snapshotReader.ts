@@ -33,6 +33,7 @@ import {
   ISessionLifecycleService,
   IWorkspaceService,
   reduceContextTranscript,
+  sessionRefKey,
   toProtocolMessage,
   type ContextMessage,
   type ISessionColdReader,
@@ -100,7 +101,7 @@ export class SnapshotReader implements ISnapshotReader {
     const located = await this.locateSession(sid);
 
     const [snapState, transcript] = await Promise.all([
-      broadcaster.getSnapshotState(sid),
+      broadcaster.getSnapshotState(located.ref),
       this.readTranscriptCached(sid, located),
     ]);
 
@@ -199,17 +200,20 @@ export class SnapshotReader implements ISnapshotReader {
     tag: 'hit' | 'miss' | 'uncached';
     wireBytes: number;
   }> {
-    // The cache key is the runtime's opaque revision token for the wire
-    // journal (locally `(size, mtimeMs)` of the file — derived, never stored).
-    // A runtime without a revision source (or a session with no journal yet)
-    // reads uncached.
+    // The cache key is the full SessionRef (M6) — two same-named sessions on
+    // different runtimes never share an entry; the stored VALUE is the
+    // runtime's opaque revision token for the wire journal (locally
+    // `(size, mtimeMs)` of the file — derived, never stored). A runtime
+    // without a revision source (or a session with no journal yet) reads
+    // uncached.
+    const cacheKey = sessionRefKey(located.ref);
     const revision = await located.coldReader.recordsRevision?.(MAIN_AGENT_ID);
     if (revision !== undefined) {
-      const cached = this.transcriptCache.get(sid);
+      const cached = this.transcriptCache.get(cacheKey);
       if (cached !== undefined && cached.revision === revision) {
         // LRU touch.
-        this.transcriptCache.delete(sid);
-        this.transcriptCache.set(sid, cached);
+        this.transcriptCache.delete(cacheKey);
+        this.transcriptCache.set(cacheKey, cached);
         return { messages: cached.messages, times: cached.times, tag: 'hit', wireBytes: 0 };
       }
     }
@@ -224,11 +228,11 @@ export class SnapshotReader implements ISnapshotReader {
     const messages = [...entries];
 
     if (revision === undefined) {
-      this.transcriptCache.delete(sid);
+      this.transcriptCache.delete(cacheKey);
       return { messages, times, tag: 'uncached', wireBytes };
     }
-    if (this.transcriptCache.has(sid)) this.transcriptCache.delete(sid);
-    this.transcriptCache.set(sid, { revision, messages, times });
+    if (this.transcriptCache.has(cacheKey)) this.transcriptCache.delete(cacheKey);
+    this.transcriptCache.set(cacheKey, { revision, messages, times });
     while (this.transcriptCache.size > this.deps.config.cacheLimit) {
       const oldest = this.transcriptCache.keys().next().value;
       if (oldest === undefined) break;

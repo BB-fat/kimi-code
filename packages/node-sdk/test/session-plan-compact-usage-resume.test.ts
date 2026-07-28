@@ -71,6 +71,7 @@ describe('Session plan, compact, usage, and resume APIs', () => {
       await session.setPlanMode(true);
       const firstPlan = await session.getPlan();
       if (firstPlan === null) throw new Error('expected first plan');
+      if (firstPlan.path === null) throw new Error('expected first plan path');
       const plansDir = dirname(firstPlan.path);
       await expect(markdownFiles(plansDir)).resolves.toEqual([]);
 
@@ -78,6 +79,7 @@ describe('Session plan, compact, usage, and resume APIs', () => {
       await session.setPlanMode(true);
       const secondPlan = await session.getPlan();
       if (secondPlan === null) throw new Error('expected second plan');
+      if (secondPlan.path === null) throw new Error('expected second plan path');
 
       expect(secondPlan.path).not.toBe(firstPlan.path);
       expect(dirname(secondPlan.path)).toBe(plansDir);
@@ -222,6 +224,7 @@ describe('Session plan, compact, usage, and resume APIs', () => {
       await source.setPlanMode(true);
       const sourcePlan = await source.getPlan();
       if (sourcePlan === null) throw new Error('expected source plan');
+      if (sourcePlan.path === null) throw new Error('expected source plan path');
       await mkdir(dirname(sourcePlan.path), { recursive: true });
       await writeFile(sourcePlan.path, 'source plan', 'utf-8');
 

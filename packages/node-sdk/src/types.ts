@@ -217,7 +217,8 @@ export interface ReloadSessionOptions {
 export interface PlanInfo {
   readonly id: string;
   readonly content: string;
-  readonly path: string;
+  /** Plan working document path; `null` on sessions without a host directory. */
+  readonly path: string | null;
 }
 
 export type SessionPlan = PlanInfo | null;
