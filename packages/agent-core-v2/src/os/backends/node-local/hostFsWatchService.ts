@@ -38,17 +38,21 @@ class HostFsWatchHandle implements IHostFsWatchHandle {
     this.watcher = new FSWatcher({
       ignoreInitial: true,
       persistent: false,
-      followSymlinks: false,
+      followSymlinks: options?.followSymlinks ?? false,
       depth: options?.recursive === false ? 0 : options?.depth,
       usePolling: options?.pollingIntervalMs !== undefined,
-      interval: options?.pollingIntervalMs,
+      interval: options?.pollingIntervalMs ?? 100,
       ignored: options?.ignored ?? DEFAULT_IGNORED,
     });
     this.ready = new Promise((resolve) => {
       this.readyResolver = resolve;
     });
-    this.watcher.once('ready', () => this.markReady());
-    this.watcher.once('error', () => this.markReady());
+    this.watcher.once('ready', () => {
+      this.markReady();
+    });
+    this.watcher.once('error', () => {
+      this.markReady();
+    });
     this.watcher.on('all', (eventName: string, absPath: string) => {
       const mapped = mapChokidarEvent(eventName, absPath);
       if (mapped !== undefined) this.emitter.fire(mapped);

@@ -3,7 +3,7 @@
  *
  * Exercises the real provider through the harness injector against a fake
  * host fs whose AGENTS.md files the test edits and deletes, with a stub
- * `IHostFsWatchService` driving change events: baselines come from the last
+ * `IFileSourceMonitor` driving change events: baselines come from the last
  * reminder in history, then the fenced AGENTS.md block of the system prompt,
  * then a silent adoption for blockless prompts. Edits, creations, and
  * removals all announce. Run: `pnpm --filter @moonshot-ai/agent-core-v2 exec
@@ -17,10 +17,13 @@ import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory'
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { loadAgentsMd } from '#/agent/profile/context';
 import { IAgentProfileService } from '#/agent/profile/profile';
-import { IHostFsWatchService } from '#/os/interface/hostFsWatch';
+import {
+  IFileSourceMonitor,
+  type FileSourceWatchOptions,
+  type IFileSourceWatch,
+} from '#/app/fileSourceMonitor/fileSourceMonitor';
 import type { HostFileStat, IHostFileSystem } from '#/os/interface/hostFileSystem';
 
-import { stubHostFsWatch, type StubHostFsWatch } from '../../os/stubs';
 import { createFakeHostFs } from '../../tools/fixtures/fake-exec';
 import { appService, createTestAgent, execEnvServices, type TestAgentContext } from '../../harness';
 
@@ -30,7 +33,41 @@ type InjectableDynamicInjector = {
 
 const TEST_HOME_DIR = '/home/test';
 const BRAND_HOME_DIR = '/tmp/kimi-code-agent-app-v2-test';
-const WATCH_DEBOUNCE_MS = 300;
+
+interface StubFileSourceMonitor extends IFileSourceMonitor {
+  fire(path: string): void;
+}
+
+function stubFileSourceMonitor(): StubFileSourceMonitor {
+  const watches: Array<{
+    paths: readonly string[];
+    readonly onDidChange: () => void;
+  }> = [];
+  return {
+    _serviceBrand: undefined,
+    createWatch(
+      _options: FileSourceWatchOptions,
+      onDidChange: () => void,
+    ): IFileSourceWatch {
+      const watch = { paths: [] as readonly string[], onDidChange };
+      watches.push(watch);
+      return {
+        setPaths: async (paths) => {
+          watch.paths = [...paths];
+        },
+        dispose: () => {
+          const index = watches.indexOf(watch);
+          if (index >= 0) watches.splice(index, 1);
+        },
+      };
+    },
+    fire(path: string): void {
+      for (const watch of watches) {
+        if (watch.paths.includes(path)) watch.onDidChange();
+      }
+    },
+  };
+}
 
 function systemPromptWithAgentsMd(content: string): string {
   return [
@@ -73,7 +110,7 @@ describe('AgentAgentsMdReminderService', () => {
   let files: Map<string, string>;
   let dirs: Set<string>;
   let hostFs: IHostFileSystem;
-  let watch: StubHostFsWatch;
+  let watch: StubFileSourceMonitor;
   let ctx: TestAgentContext;
   let context: IAgentContextMemoryService;
   let injector: InjectableDynamicInjector;
@@ -86,10 +123,6 @@ describe('AgentAgentsMdReminderService', () => {
 
   async function currentAgentsMd(): Promise<string> {
     return loadAgentsMd({ fs: hostFs, homeDir: TEST_HOME_DIR }, cwd, BRAND_HOME_DIR);
-  }
-
-  async function settleWatchDebounce(): Promise<void> {
-    await new Promise((resolve) => setTimeout(resolve, WATCH_DEBOUNCE_MS + 150));
   }
 
   beforeEach(() => {
@@ -118,10 +151,10 @@ describe('AgentAgentsMdReminderService', () => {
       readdir: async () => [],
       realpath: async (path: string) => path,
     });
-    watch = stubHostFsWatch();
+    watch = stubFileSourceMonitor();
     ctx = createTestAgent(
       execEnvServices({ hostFs }),
-      appService(IHostFsWatchService, watch),
+      appService(IFileSourceMonitor, watch),
     );
     context = ctx.get(IAgentContextMemoryService);
     injector = ctx.get(IAgentContextInjectorService) as unknown as InjectableDynamicInjector;
@@ -158,8 +191,7 @@ describe('AgentAgentsMdReminderService', () => {
     await injector.inject();
 
     files.set(agentsMdPath, 'rule two');
-    watch.fire(agentsMdPath, { action: 'modified' });
-    await settleWatchDebounce();
+    watch.fire(agentsMdPath);
     await injector.inject();
 
     const reminders = agentsMdReminders(context);
@@ -181,8 +213,7 @@ describe('AgentAgentsMdReminderService', () => {
     await injector.inject();
 
     files.set(agentsMdPath, 'rule two');
-    watch.fire(agentsMdPath, { action: 'modified' });
-    await settleWatchDebounce();
+    watch.fire(agentsMdPath);
 
     const readStarted = deferred<void>();
     const releaseRead = deferred<void>();
@@ -201,8 +232,7 @@ describe('AgentAgentsMdReminderService', () => {
     const firstInjection = injector.inject();
     await readStarted.promise;
     files.set(agentsMdPath, 'rule three');
-    watch.fire(agentsMdPath, { action: 'modified' });
-    await settleWatchDebounce();
+    watch.fire(agentsMdPath);
     releaseRead.resolve(undefined);
     await firstInjection;
 
@@ -220,8 +250,7 @@ describe('AgentAgentsMdReminderService', () => {
     await injector.inject();
 
     files.clear();
-    watch.fire(agentsMdPath, { action: 'deleted' });
-    await settleWatchDebounce();
+    watch.fire(agentsMdPath);
     await injector.inject();
 
     const reminders = agentsMdReminders(context);
@@ -231,9 +260,12 @@ describe('AgentAgentsMdReminderService', () => {
     expect(messageText(first as ContextMessage)).toContain('removed');
   });
 
-  it('announces a file created while the prompt shows an empty block', async () => {
+  it('announces a file created after the empty candidate chain is armed', async () => {
     profile.update({ systemPrompt: systemPromptWithAgentsMd('') });
+    await injector.inject();
+
     files.set(agentsMdPath, 'fresh rule');
+    watch.fire(agentsMdPath);
 
     await injector.inject();
 

@@ -104,6 +104,7 @@ describe('file source monitor (shared handles and path state)', () => {
 
     const target = raw.watchedEntries().find((entry) => entry.path === '/workspace/skills');
     expect(target?.options?.depth).toBe(10);
+    expect(target?.options?.followSymlinks).toBe(true);
     expect(target?.options?.ignored?.('/workspace/skills/node_modules/pkg/SKILL.md')).toBe(true);
     expect(target?.options?.ignored?.('/workspace/skills/.cache/SKILL.md')).toBe(true);
     expect(target?.options?.ignored?.('/workspace/skills/.cache.md/SKILL.md')).toBe(true);
@@ -281,6 +282,35 @@ describe('file source monitor (node-local integration)', () => {
       await watch.setPaths([lexical]);
 
       await writeFile(join(target, 'review', 'SKILL.md'), 'updated', 'utf8');
+
+      await vi.waitFor(() => {
+        expect(changes).toBeGreaterThan(0);
+      }, { timeout: 3_000 });
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'detects content changes inside a symlinked bundle under a watched root',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'file-source-monitor-nested-symlink-'));
+      roots.push(root);
+      const skillRoot = join(root, 'skills');
+      const bundleTarget = join(root, 'bundle-target');
+      const skillMd = join(bundleTarget, 'SKILL.md');
+      await Promise.all([mkdir(skillRoot), mkdir(bundleTarget)]);
+      await writeFile(skillMd, 'initial', 'utf8');
+      await symlink(bundleTarget, join(skillRoot, 'review'), 'dir');
+      const monitor = build();
+      let changes = 0;
+      const watch = monitor.createWatch(
+        { ...SKILL_ROOT_WATCH_OPTIONS, debounceMs: 0, pollingIntervalMs: 25 },
+        () => {
+          changes += 1;
+        },
+      );
+      await watch.setPaths([skillRoot]);
+
+      await writeFile(skillMd, 'updated', 'utf8');
 
       await vi.waitFor(() => {
         expect(changes).toBeGreaterThan(0);

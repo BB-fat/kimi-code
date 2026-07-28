@@ -45,7 +45,11 @@ export class AgentSkillDisclosureService implements IAgentSkillDisclosureService
 
   legacyNames(systemPrompt: string): readonly string[] | undefined {
     if (!systemPrompt.includes('## Available skills')) return undefined;
-    const lines = systemPrompt.split(/\r?\n/);
+    return this.listedNames(systemPrompt);
+  }
+
+  listedNames(listing: string): readonly string[] {
+    const lines = listing.split(/\r?\n/);
     const names = this.skillCatalog.catalog
       .getModelSkillDisclosure()
       .names.filter((name) => lines.some((line) => line.startsWith(`- ${name}: `)));

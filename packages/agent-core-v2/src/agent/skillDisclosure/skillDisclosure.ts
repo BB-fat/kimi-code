@@ -18,6 +18,7 @@ export interface IAgentSkillDisclosureService {
   resolve(skillActive: boolean): Promise<SkillDisclosureSnapshot>;
   disclosedNames(): readonly string[] | undefined;
   legacyNames(systemPrompt: string): readonly string[] | undefined;
+  listedNames(listing: string): readonly string[];
   markDisclosed(names: readonly string[]): void;
 }
 

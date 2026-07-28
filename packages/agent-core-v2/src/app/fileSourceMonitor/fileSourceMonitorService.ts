@@ -31,6 +31,7 @@ interface NormalizedWatchOptions {
   readonly target: 'file' | 'directory';
   readonly recursive: boolean;
   readonly depth: number | undefined;
+  readonly followSymlinks: boolean;
   readonly pollingIntervalMs: number | undefined;
   readonly ignoredPathNames: readonly string[];
   readonly ignoreDotDirectories: boolean;
@@ -41,6 +42,7 @@ interface RawWatchSpec {
   readonly path: string;
   readonly recursive: boolean;
   readonly depth: number | undefined;
+  readonly followSymlinks: boolean;
   readonly pollingIntervalMs: number | undefined;
   readonly ignoredPathNames: readonly string[];
   readonly ignoreDotDirectories: boolean;
@@ -402,6 +404,7 @@ export class FileSourceMonitorService extends Disposable implements IFileSourceM
       const options: HostFsWatchOptions = {
         recursive: spec.recursive,
         depth: spec.depth,
+        followSymlinks: spec.followSymlinks,
         pollingIntervalMs: spec.pollingIntervalMs,
         ignored: createIgnoredPredicate(spec),
       };
@@ -497,6 +500,7 @@ function normalizeOptions(options: FileSourceWatchOptions): NormalizedWatchOptio
     target: options.target,
     recursive: options.recursive ?? false,
     depth: options.depth,
+    followSymlinks: options.followSymlinks ?? false,
     pollingIntervalMs: options.pollingIntervalMs,
     ignoredPathNames: [...new Set(options.ignoredPathNames ?? [])].toSorted(),
     ignoreDotDirectories: options.ignoreDotDirectories ?? false,
@@ -510,6 +514,7 @@ function pathStateKey(path: string, options: NormalizedWatchOptions): string {
     options.target,
     options.recursive,
     options.depth,
+    options.followSymlinks,
     options.pollingIntervalMs,
     options.ignoredPathNames,
     options.ignoreDotDirectories,
@@ -521,6 +526,7 @@ function targetWatchSpec(path: string, options: NormalizedWatchOptions): RawWatc
     path,
     recursive: options.recursive,
     depth: options.depth,
+    followSymlinks: options.followSymlinks,
     pollingIntervalMs: options.pollingIntervalMs,
     ignoredPathNames: options.ignoredPathNames,
     ignoreDotDirectories: options.ignoreDotDirectories,
@@ -535,6 +541,7 @@ function shallowWatchSpec(
     path,
     recursive: false,
     depth: undefined,
+    followSymlinks: false,
     pollingIntervalMs,
     ignoredPathNames: [],
     ignoreDotDirectories: false,
@@ -546,6 +553,7 @@ function rawWatchKey(spec: RawWatchSpec): string {
     spec.path,
     spec.recursive,
     spec.depth,
+    spec.followSymlinks,
     spec.pollingIntervalMs,
     spec.ignoredPathNames,
     spec.ignoreDotDirectories,

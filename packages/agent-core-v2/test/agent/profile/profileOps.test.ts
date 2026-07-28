@@ -234,6 +234,7 @@ function buildHost(key: string): {
     resolve: async () => ({ names: [], listing: '' }),
     disclosedNames: () => undefined,
     legacyNames: () => undefined,
+    listedNames: () => [],
     markDisclosed: () => {},
   });
   host.stub(ISessionToolPolicy, {

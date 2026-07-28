@@ -25,6 +25,7 @@ export interface HostFsChange {
 export interface HostFsWatchOptions {
   readonly recursive?: boolean;
   readonly depth?: number;
+  readonly followSymlinks?: boolean;
   readonly pollingIntervalMs?: number;
   readonly ignored?: (path: string) => boolean;
 }

@@ -202,10 +202,11 @@ describe('AgentProfileService.bind', () => {
     const { profile: svc } = buildContext();
     await svc.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: MOCK_MODEL, cwd: homeDir });
     const before = svc.getSystemPrompt();
+    const refresh = vi.spyOn(svc, 'refreshSystemPrompt');
 
     svc.update({ cwd: homeDir });
-    await new Promise((resolve) => setTimeout(resolve, 50));
 
+    expect(refresh).not.toHaveBeenCalled();
     expect(svc.getSystemPrompt()).toBe(before);
   });
 

@@ -15,6 +15,7 @@ export interface FileSourceWatchOptions {
   readonly target: FileSourceTargetKind;
   readonly recursive?: boolean;
   readonly depth?: number;
+  readonly followSymlinks?: boolean;
   readonly pollingIntervalMs?: number;
   readonly ignoredPathNames?: readonly string[];
   readonly ignoreDotDirectories?: boolean;

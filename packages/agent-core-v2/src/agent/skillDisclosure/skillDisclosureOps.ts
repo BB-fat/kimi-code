@@ -2,7 +2,7 @@
  * `skillDisclosure` domain (L4) — persistent disclosed-skill names model.
  *
  * Defines the Agent wire model and whole-set replacement operation used to
- * restore the model-visible skill baseline across replay and forks.
+ * restore the system-prompt skill baseline across replay and forks.
  */
 
 import { z } from 'zod';

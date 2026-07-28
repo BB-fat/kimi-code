@@ -957,14 +957,82 @@ describe('SessionSkillCatalogService', () => {
     }
   });
 
+  it('reloads the explicit source after an fs event under an explicit root', async () => {
+    const store = new InMemorySkillDiscovery();
+    store.setUserSkills([stubSkill('initial')]);
+    const { stub: ws } = workspaceStub('/work');
+    const root = tmpdir();
+    const { host, session, watch } = makeHost(store, ws, [], [root]);
+
+    try {
+      const catalog = session.accessor.get(ISessionSkillCatalog);
+      await catalog.load();
+      expect(catalog.catalog.getSkill('initial')).toBeDefined();
+      expect(watch.watchedPaths()).toContain(root);
+
+      store.setUserSkills([stubSkill('initial'), stubSkill('explicit-added')]);
+      const refreshed = new Promise<string>((resolve) => {
+        const subscription = catalog.onDidChange((sourceId) => {
+          if (sourceId !== 'explicit') return;
+          subscription.dispose();
+          resolve(sourceId);
+        });
+      });
+      watch.fire(join(root, 'explicit-added', 'SKILL.md'), { action: 'created' });
+
+      await expect(refreshed).resolves.toBe('explicit');
+      expect(catalog.catalog.getSkill('explicit-added')).toBeDefined();
+    } finally {
+      host.dispose();
+    }
+  });
+
+  it('reloads the extra source after an fs event under an extra root', async () => {
+    const store = new InMemorySkillDiscovery();
+    store.setExtraSkills([stubSkill('initial-extra', { source: 'extra' })]);
+    const { stub: ws } = workspaceStub('/work');
+    const { host, session, config, watch } = makeHost(store, ws);
+    const root = tmpdir();
+    config.setExtraSkillDirs([root]);
+
+    try {
+      const catalog = session.accessor.get(ISessionSkillCatalog);
+      await catalog.load();
+      expect(catalog.catalog.getSkill('initial-extra')).toBeDefined();
+      expect(watch.watchedPaths()).toContain(root);
+
+      store.setExtraSkills([
+        stubSkill('initial-extra', { source: 'extra' }),
+        stubSkill('extra-added', { source: 'extra' }),
+      ]);
+      const refreshed = new Promise<string>((resolve) => {
+        const subscription = catalog.onDidChange((sourceId) => {
+          if (sourceId !== 'extra') return;
+          subscription.dispose();
+          resolve(sourceId);
+        });
+      });
+      watch.fire(join(root, 'extra-added', 'SKILL.md'), { action: 'created' });
+
+      await expect(refreshed).resolves.toBe('extra');
+      expect(catalog.catalog.getSkill('extra-added')).toBeDefined();
+    } finally {
+      host.dispose();
+    }
+  });
+
   it('keeps the previous contribution when a watch-triggered reload fails', async () => {
     const store = new InMemorySkillDiscovery();
     store.setUserSkills([stubSkill('initial')]);
     let failDiscovery = false;
+    const reloadAttempted = deferred<void>();
     const discovery: ISkillDiscovery = {
       _serviceBrand: undefined,
       discover: async (roots) => {
-        if (failDiscovery) throw new Error('scan failed');
+        if (failDiscovery) {
+          reloadAttempted.resolve(undefined);
+          throw new Error('scan failed');
+        }
         return store.discover(roots);
       },
     };
@@ -978,7 +1046,7 @@ describe('SessionSkillCatalogService', () => {
 
       failDiscovery = true;
       watch.fire('/home/test/.agents/skills/added/SKILL.md', { action: 'created' });
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await reloadAttempted.promise;
 
       expect(catalog.catalog.getSkill('initial')).toBeDefined();
     } finally {

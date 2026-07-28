@@ -74,7 +74,7 @@ describe('skill disclosure (structured projection and reminder)', () => {
     expect(snapshot.listing).toContain('- Review:Deep:');
   });
 
-  it('announces a structured addition containing a colon, then advances the baseline', async () => {
+  it('uses the surviving reminder as the baseline for a structured addition', async () => {
     catalog.registerBuiltinSkill(stubSkill('skill-a', { source: 'builtin' }));
     disclosure.markDisclosed((await disclosure.resolve(true)).names);
     catalog.registerBuiltinSkill(stubSkill('namespace:skill-b', { source: 'builtin' }));
@@ -84,7 +84,7 @@ describe('skill disclosure (structured projection and reminder)', () => {
     const reminders = skillListReminders(context);
     expect(reminders).toHaveLength(1);
     expect(messageText(reminders[0] as ContextMessage)).toContain('- namespace:skill-b:');
-    expect(disclosure.disclosedNames()).toEqual(['namespace:skill-b', 'skill-a']);
+    expect(disclosure.disclosedNames()).toEqual(['skill-a']);
 
     await injector.inject();
     expect(skillListReminders(context)).toHaveLength(1);
@@ -100,7 +100,43 @@ describe('skill disclosure (structured projection and reminder)', () => {
     const reminders = skillListReminders(context);
     expect(reminders).toHaveLength(1);
     expect(messageText(reminders[0] as ContextMessage)).toContain('- skill-b:');
-    expect(disclosure.disclosedNames()).toEqual(['namespace:skill-a', 'skill-b']);
+    expect(disclosure.disclosedNames()).toEqual(['namespace:skill-a']);
+  });
+
+  it('reannounces an addition after context clear removes its reminder', async () => {
+    catalog.registerBuiltinSkill(stubSkill('skill-a', { source: 'builtin' }));
+    disclosure.markDisclosed((await disclosure.resolve(true)).names);
+    catalog.registerBuiltinSkill(stubSkill('skill-b', { source: 'builtin' }));
+    await injector.inject();
+
+    context.clear();
+    await injector.inject();
+
+    const reminders = skillListReminders(context);
+    expect(reminders).toHaveLength(1);
+    expect(messageText(reminders[0] as ContextMessage)).toContain('- skill-b:');
+    expect(disclosure.disclosedNames()).toEqual(['skill-a']);
+  });
+
+  it('reannounces an addition after undo removes its reminder', async () => {
+    catalog.registerBuiltinSkill(stubSkill('skill-a', { source: 'builtin' }));
+    disclosure.markDisclosed((await disclosure.resolve(true)).names);
+    context.append({
+      role: 'user',
+      content: [{ type: 'text', text: 'turn' }],
+      toolCalls: [],
+      origin: { kind: 'user' },
+    });
+    catalog.registerBuiltinSkill(stubSkill('skill-b', { source: 'builtin' }));
+    await injector.inject();
+
+    context.undo(1);
+    await injector.inject();
+
+    const reminders = skillListReminders(context);
+    expect(reminders).toHaveLength(1);
+    expect(messageText(reminders[0] as ContextMessage)).toContain('- skill-b:');
+    expect(disclosure.disclosedNames()).toEqual(['skill-a']);
   });
 
   it('adopts the current names silently when no disclosure baseline exists', async () => {

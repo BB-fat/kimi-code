@@ -103,6 +103,29 @@ describe('AgentDateChangeService', () => {
     expect(dateReminders(context)).toHaveLength(1);
   });
 
+  it('announces each date crossed by a long-lived session', async () => {
+    profile.update({ systemPrompt: systemPromptWithDate(new Date().toISOString()) });
+    await injector.inject();
+
+    vi.setSystemTime(new Date(2026, 6, 30, 12));
+    await injector.inject();
+
+    let reminders = dateReminders(context);
+    expect(reminders).toHaveLength(1);
+    expect(messageText(reminders[0] as ContextMessage)).toContain(
+      "Today's date is now 2026-07-30",
+    );
+
+    vi.setSystemTime(new Date(2026, 6, 31, 12));
+    await injector.inject();
+
+    reminders = dateReminders(context);
+    expect(reminders).toHaveLength(2);
+    expect(messageText(reminders[1] as ContextMessage)).toContain(
+      "Today's date is now 2026-07-31",
+    );
+  });
+
   it('adopts today silently when the system prompt carries no date line', async () => {
     // The harness default system prompt has no date line.
     await injector.inject();

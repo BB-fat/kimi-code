@@ -15,6 +15,7 @@ export const SKILL_ROOT_WATCH_OPTIONS: FileSourceWatchOptions = {
   target: 'directory',
   recursive: true,
   depth: SKILL_WATCH_MAX_DEPTH,
+  followSymlinks: true,
   ignoredPathNames: ['node_modules'],
   ignoreDotDirectories: true,
 };
