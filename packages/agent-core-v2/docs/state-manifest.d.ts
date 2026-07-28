@@ -104,7 +104,7 @@
 //     profile.emittedToolPatternWarnings              src/agent/profile/profileService.ts
 //     prompt.launching                                src/agent/prompt/promptService.ts
 //     shellCommand.tasks                              src/agent/shellCommand/shellCommandService.ts
-//     skillList.seededNames                           src/agent/skill/skillListReminderService.ts
+//     skillList.seededNames                           src/agent/skillListReminder/skillListReminderService.ts
 //     stepRetry.failedAttempts                        src/agent/stepRetry/stepRetryService.ts
 //     stepRetry.lastFailedDriverId                    src/agent/stepRetry/stepRetryService.ts
 //     task.activeTaskReminderPending                  src/agent/task/taskService.ts
@@ -1015,7 +1015,7 @@ export interface AgentStateSnapshot {
   'llmRequester.lastConfigLogSignature': string | undefined;
   'llmRequester.mediaDegradedTurns': Set<number>;
   'llmRequester.mediaStrippedTurns': Map<number, /* MediaStripSnapshot — packages/agent-core-v2/src/agent/contextProjector/contextProjector.ts */ {
-    readonly "__@mediaStripSnapshotBrand@2731": undefined;
+    readonly "__@mediaStripSnapshotBrand@2732": undefined;
   }>;
   'llmRequester.turnConfigs': Map<number, /* TurnRequestConfig — packages/agent-core-v2/src/agent/llmRequester/llmRequesterService.ts */ {
     readonly resolved: /* ProfileModelContext — packages/agent-core-v2/src/agent/profile/profile.ts */ {
@@ -1102,7 +1102,7 @@ export interface AgentStateSnapshot {
   'prompt.launching': boolean;
   // src/agent/shellCommand/shellCommandService.ts
   'shellCommand.tasks': Map<string, string>;
-  // src/agent/skill/skillListReminderService.ts
+  // src/agent/skillListReminder/skillListReminderService.ts
   'skillList.seededNames': ReadonlySet<string> | undefined;
   // src/agent/stepRetry/stepRetryService.ts
   'stepRetry.failedAttempts': number;

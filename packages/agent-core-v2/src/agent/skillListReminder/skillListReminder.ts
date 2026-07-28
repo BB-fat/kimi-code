@@ -1,5 +1,5 @@
 /**
- * `skill` domain (L3) — `IAgentSkillListReminderService` contract.
+ * `skillListReminder` domain (L4) — skill-list freshness reminder contract.
  *
  * Defines the Agent-scope marker service that announces skill-list additions
  * through a `skill_list` context-injection reminder when the session catalog

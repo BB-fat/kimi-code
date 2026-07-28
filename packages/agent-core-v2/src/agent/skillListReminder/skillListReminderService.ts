@@ -1,18 +1,10 @@
 /**
- * `skill` domain (L3) — `IAgentSkillListReminderService` implementation.
+ * `skillListReminder` domain (L4) — skill-list freshness reminder provider.
  *
- * Owns the `skill_list` context-injection provider. The system prompt's skill
- * listing is only re-rendered at profile (re)bind and after compaction, so a
- * skill added mid-session is invisible to the model; this provider announces
- * additions with the full fresh listing (which is supersede-worded) at the
- * next step boundary. Only additions trigger a reminder — removals and text
- * changes are ignored, since a removed skill fails naturally on invocation.
- * The baseline is history-derived: the last `skill_list` reminder in context,
- * else the `## Available skills` section of the current system prompt, else
- * the volatile `seededNames` adopted at first evaluation (profiles without a
- * skills section). The plain-data state (`seededNames`) is registered into
- * `agentState` (`IAgentStateService`) and read/written through it. Bound at
- * Agent scope.
+ * Registers through `contextInjector`, compares the session catalog with the
+ * last listing visible through `contextMemory` or `profile`, and gates model
+ * disclosure through `toolPolicy`. Keeps its per-agent fallback baseline in
+ * `agentState`. Bound at Agent scope.
  */
 
 import { Disposable } from '#/_base/di/lifecycle';
@@ -26,6 +18,7 @@ import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory'
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentStateService } from '#/agent/state/agentState';
+import { IAgentToolPolicyService } from '#/agent/toolPolicy/toolPolicy';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
 
 import { IAgentSkillListReminderService } from './skillListReminder';
@@ -48,6 +41,7 @@ export class AgentSkillListReminderService extends Disposable implements IAgentS
     @IAgentContextInjectorService dynamicInjector: IAgentContextInjectorService,
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
     @IAgentProfileService private readonly profile: IAgentProfileService,
+    @IAgentToolPolicyService private readonly toolPolicy: IAgentToolPolicyService,
     @ISessionSkillCatalog private readonly skillCatalog: ISessionSkillCatalog,
     @IAgentStateService private readonly states: IAgentStateService,
   ) {
@@ -68,6 +62,7 @@ export class AgentSkillListReminderService extends Disposable implements IAgentS
 
   private async reminder({ lastInjectedAt }: ContextInjectionContext): Promise<string | undefined> {
     try {
+      if (!this.toolPolicy.isToolActive('Skill')) return undefined;
       await this.skillCatalog.ready;
       const listing = this.skillCatalog.catalog.getModelSkillListing();
       const currentNames = extractSkillNames(listing);
@@ -78,7 +73,6 @@ export class AgentSkillListReminderService extends Disposable implements IAgentS
       }
       return undefined;
     } catch {
-      // A broken catalog must never break the step loop.
       return undefined;
     }
   }
@@ -133,5 +127,5 @@ registerScopedService(
   IAgentSkillListReminderService,
   AgentSkillListReminderService,
   ScopeActivation.OnScopeCreated,
-  'skill',
+  'skillListReminder',
 );

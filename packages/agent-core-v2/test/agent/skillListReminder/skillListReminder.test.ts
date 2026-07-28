@@ -4,9 +4,10 @@
  * Exercises the real provider through the harness injector against a mutable
  * in-memory catalog: baselines come from the last reminder in history, then
  * the system prompt's `## Available skills` section, then a silent adoption
- * for sectionless prompts. Only additions announce — removals and text-only
- * changes stay quiet. Run: `pnpm --filter @moonshot-ai/agent-core-v2 exec
- * vitest run test/agent/skill/skillListReminder.test.ts`.
+ * for sectionless prompts. Only additions announce; inactive tool policy,
+ * removals, and text-only changes stay quiet. Run: `pnpm --filter
+ * @moonshot-ai/agent-core-v2 exec vitest run
+ * test/agent/skillListReminder/skillListReminder.test.ts`.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -107,6 +108,19 @@ describe('AgentSkillListReminderService', () => {
 
     await injector.inject();
     expect(skillListReminders(context)).toHaveLength(1);
+  });
+
+  it('stays quiet when the active tool policy disables Skill', async () => {
+    catalog.registerBuiltinSkill(stubSkill('skill-a', { source: 'builtin' }));
+    profile.update({
+      systemPrompt: systemPromptWithSkills(catalog.getModelSkillListing()),
+      disallowedTools: ['Skill'],
+    });
+
+    catalog.registerBuiltinSkill(stubSkill('skill-b', { source: 'builtin' }));
+    await injector.inject();
+
+    expect(skillListReminders(context)).toHaveLength(0);
   });
 
   it('ignores removals and text-only changes', async () => {
