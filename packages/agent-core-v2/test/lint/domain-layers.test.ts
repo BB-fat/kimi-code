@@ -133,3 +133,54 @@ describe('check-domain-layers', () => {
     expect(violations).toHaveLength(0);
   });
 });
+
+
+describe('check-domain-layers target-side allowlist (plan §10.1, M2)', () => {
+  it('flags non-Local domains importing the localWorkspaceRuntime domain', () => {
+    const violations = checkSource(
+      `import { LocalWorkspaceRuntime } from '#/app/localWorkspaceRuntime/localWorkspaceRuntime';`,
+      at('sessionLifecycle', 'sessionLifecycleService.ts'),
+    );
+    expect(violations).toHaveLength(1);
+    expect(violations[0]?.message).toMatch(
+      /sessionLifecycle.*must not import domain 'localWorkspaceRuntime'/,
+    );
+
+    const viaBarrel = checkSource(
+      `import { LocalWorkspaceProvider } from '#/app/localWorkspaceRuntime';`,
+      at('sessionExport', 'sessionExportService.ts'),
+    );
+    expect(viaBarrel).toHaveLength(1);
+
+    const dynamic = checkSource(
+      `const m = await import('#/app/localWorkspaceRuntime/localWorkspaceProvider');`,
+      at('bootstrap', 'bootstrapService.ts'),
+    );
+    expect(dynamic).toHaveLength(1);
+  });
+
+  it('allows localWorkspaceRuntime to import itself and its legal dependencies', () => {
+    const violations = checkSource(
+      [
+        `import { sessionScopeOf } from '#/app/localWorkspaceRuntime/localWorkspaceLayout';`,
+        `import { AppendLogStore } from '#/persistence/backends/node-fs/appendLogStore';`,
+        `import type { IWorkspaceRuntime } from '#/app/workspace/workspaceRuntime';`,
+        `import type { ISessionManager } from '#/app/sessionHostRuntime/sessionManager';`,
+        `import { CRON_SESSION_TAG } from '#/app/cron/cronTask';`,
+        `import { SESSION_META_VERSION } from '#/session/sessionMetadata/sessionMetadata';`,
+        `import { AGENT_WIRE_RECORD_KEY } from '#/wire/record';`,
+        `import { readFile } from 'node:fs/promises';`,
+      ].join('\n'),
+      at('localWorkspaceRuntime', 'localWorkspaceRuntime.ts'),
+    );
+    expect(violations).toHaveLength(0);
+  });
+
+  it('flags sessionHostRuntime importing localWorkspaceRuntime (layer + allowlist)', () => {
+    const violations = checkSource(
+      `import { LocalWorkspaceRuntime } from '#/app/localWorkspaceRuntime/localWorkspaceRuntime';`,
+      at('sessionHostRuntime', 'sessionService.ts'),
+    );
+    expect(violations.length).toBeGreaterThan(0);
+  });
+});

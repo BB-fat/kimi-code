@@ -33,6 +33,10 @@
  *     and the host-runtime base domain) must stay pathless and
  *     workspace-free: no Workspace domain, no node builtins, no Local
  *     layout/index and no persistence/OS backends.
+ *  5. **Target-side import allowlists** — `TARGET_IMPORT_ALLOWLIST` keys on
+ *     the TARGET domain: only the listed source domains may import it. The
+ *     `localWorkspaceRuntime` domain owns the legacy session layout
+ *     (plan §4.3/§7.9), so nothing outside the domain may import it yet.
  *
  * Intra-package relative imports and `#/`-alias imports are resolved to a
  * domain by the first path segment under `src/`. Sibling packages
@@ -249,6 +253,16 @@ const DOMAIN_LAYER = new Map([
   ['externalHooks', 6],
   ['externalHooksRunner', 6],
   ['sessionExport', 6],
+  // `localWorkspaceRuntime` is the local co-located `IWorkspaceRuntime`
+  // implementation (plan §4.3): one instance per opened workspace (`wd_id`
+  // bucket), hosting any number of sessions on the EXISTING legacy layout
+  // (`state.json`, `wire.jsonl`, `session_index.jsonl`, cron documents). It
+  // builds on the L2 host-runtime contracts and workspace runtime contract,
+  // the L4 node-fs persistence backends, the L5 cron record shape and the
+  // L6 session-metadata format owner, so it sits at L6 beside the other
+  // coordination domains. It is also guarded target-side: only the domain
+  // itself may import it (TARGET_IMPORT_ALLOWLIST, plan §10.1).
+  ['localWorkspaceRuntime', 6],
   ['interaction', 6],
   ['sessionMetadata', 6],
   // `undo` owns the undo pipeline (quiesce → context.undo → reconcile): it
@@ -373,6 +387,15 @@ const DOMAIN_IMPORT_BANS = new Map([
   // once their workspace coupling is removed, and M8 should cover every
   // remaining Session Core domain. Do not leave this skeleton guarding only
   // the M0 contracts.
+  //
+  // TODO(multi-runtime M8): the legacy layout helpers (`sessionLifecycle`'s
+  // directory copy/wire rewrite/index append paths, `FileSessionIndex`'s
+  // layout reads and the bootstrap scope builders) are still imported by the
+  // old domains, so the plan §10.1 "layout helper only the Local adapter may
+  // import" rule cannot be enabled globally yet — it would turn the old
+  // domains red. M2 guards the NEW side instead (see
+  // TARGET_IMPORT_ALLOWLIST below); once M8 deletes the old domains, extend
+  // the ban so no domain outside the Local adapter imports those helpers.
   [
     'sessionHostRuntime',
     {
@@ -403,6 +426,25 @@ const DOMAIN_IMPORT_BANS = new Map([
       reason:
         'the standalone memory runtime is headless and purely in-memory (plan §4.5): no Workspace domain, no Local layout/index, no OS backends, no filesystem I/O',
     },
+  ],
+]);
+
+/**
+ * Rule 5 — target-side import allowlists (multi-runtime refactor guards,
+ * plan §10.1). `DOMAIN_IMPORT_BANS` keys on the SOURCE domain; this table
+ * keys on the TARGET domain: only the listed source domains may import it.
+ *
+ * `localWorkspaceRuntime` owns the entire legacy session layout (the plan's
+ * `LegacyLayoutFileSessionRepository` role, §4.3/§7.9): no other runtime,
+ * business domain or edge route may import it — the workspace/session core
+ * talks to the generic contracts, and only Workspace registration/runtime
+ * management (M3) and the composition root may open the Local provider.
+ * The allowlist grows deliberately as those milestones land.
+ */
+const TARGET_IMPORT_ALLOWLIST = new Map([
+  [
+    'localWorkspaceRuntime',
+    new Set(['localWorkspaceRuntime']),
   ],
 ]);
 
@@ -708,6 +750,22 @@ export function checkSource(source, absFile) {
             file: absFile,
             line,
             message: `'${sourceDomain}' must not import domain '${bannedTarget}' via '${specifier}' — ${importBan.reason}`,
+          });
+          continue;
+        }
+      }
+    }
+
+    // Rule 5: target-side import allowlists (plan §10.1).
+    if (targetAbs !== undefined) {
+      const allowTarget = targetDomainOf(targetAbs);
+      if (allowTarget !== undefined) {
+        const allowlist = TARGET_IMPORT_ALLOWLIST.get(allowTarget);
+        if (allowlist !== undefined && !allowlist.has(sourceDomain)) {
+          violations.push({
+            file: absFile,
+            line,
+            message: `'${sourceDomain}' must not import domain '${allowTarget}' via '${specifier}' — only [${[...allowlist].join(', ')}] may import it (plan §10.1: the legacy layout is owned by the Local workspace runtime alone)`,
           });
           continue;
         }

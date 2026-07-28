@@ -1,0 +1,370 @@
+/**
+ * `localWorkspaceRuntime` domain (L6) — the logical export/import data plane
+ * of the local workspace runtime (plan §3.5, §5.10, §7.9).
+ *
+ * Export streams the session's full logical inventory as
+ * `SessionExportEntry` items carrying only logical kind/owner/name/content/
+ * checksum/schema version — NEVER the host root, physical paths, workspace
+ * ids or `wd_id` layout facts. Entry content is the raw stored bytes
+ * (byte-passthrough): `state.json` travels as a `document`, each agent's
+ * `wire.jsonl` as `records` (the JSONL per-line framing every runtime in
+ * this repo shares), and the remaining files (plans, tasks, blobs, logs,
+ * media) as `blob` entries whose names are stable logical paths relative to
+ * their owner root — `plans/x.md`, `blobs/<sha>`, `logs/kimi-code.log`.
+ *
+ * Import is staged (plan §3.5): entries are parsed and validated (kind,
+ * schema version, checksum, record framing, name safety) into local buffers
+ * first, then committed in one pass — payload files first, `state.json`
+ * LAST, since a session becomes visible to the index only once its
+ * `state.json` exists. A failing stream writes nothing visible; a failed
+ * commit removes the partially written session directory. Session-tagged
+ * cron tasks live outside the session directory and join the transfer
+ * inventory with the cross-runtime milestone (M7).
+ */
+
+import { SessionHostRuntimeError, SessionHostRuntimeErrors } from '#/app/sessionHostRuntime/errors';
+import type { SessionExportEntry } from '#/app/sessionHostRuntime/sessionManager';
+import type {
+  ArtifactOwner,
+  SessionMetadata,
+  SessionStoredStatus,
+} from '#/app/sessionHostRuntime/sessionRuntimeContext';
+import { jsonDocumentCodec } from '#/persistence/backends/node-fs/atomicDocumentStore';
+import type { IFileSystemStorageService } from '#/persistence/interface/storage';
+import {
+  SESSION_META_VERSION,
+  type SessionMeta,
+} from '#/session/sessionMetadata/sessionMetadata';
+
+import {
+  agentScopeOf,
+  applyMetadataPatch,
+  fnv1aHex,
+  metadataOfMeta,
+  sessionScopeOf,
+  SESSION_META_KEY,
+} from './localWorkspaceLayout';
+
+const textDecoder = new TextDecoder();
+const textEncoder = new TextEncoder();
+
+const EXPORT_SCHEMA_VERSION = 1;
+
+/* ------------------------------------------------------------------------ */
+/* Export                                                                   */
+/* ------------------------------------------------------------------------ */
+
+/** One file found while walking the session directory. */
+export interface SessionDirFile {
+  /** Path relative to the session directory, `/`-joined. */
+  readonly rel: string;
+  readonly bytes: Uint8Array;
+}
+
+function entry(
+  kind: SessionExportEntry['kind'],
+  owner: ArtifactOwner,
+  name: string,
+  bytes: Uint8Array,
+): SessionExportEntry {
+  return {
+    kind,
+    owner,
+    name,
+    schemaVersion: EXPORT_SCHEMA_VERSION,
+    checksum: fnv1aHex(bytes),
+    content: once(bytes),
+  };
+}
+
+async function* once(bytes: Uint8Array): AsyncIterable<Uint8Array> {
+  yield bytes;
+}
+
+export interface ExportLocalSessionInput {
+  readonly runtimeId: string;
+  readonly sessionId: string;
+  readonly meta: SessionMeta;
+  readonly stateBytes: Uint8Array;
+  /** Every regular file under the session directory (symlinks excluded). */
+  readonly files: readonly SessionDirFile[];
+}
+
+/**
+ * Build the logical export stream for one session. The descriptor entry
+ * leads (same shape as the standalone memory runtime's, so cross-runtime
+ * imports share one staging path); the stored `state.json` bytes follow as a
+ * `document`; everything else classifies by its position in the layout.
+ */
+export async function* exportLocalSession(
+  input: ExportLocalSessionInput,
+): AsyncIterable<SessionExportEntry> {
+  const { meta } = input;
+  yield entry(
+    'descriptor',
+    { kind: 'session' },
+    'descriptor',
+    textEncoder.encode(
+      JSON.stringify({
+        createdAt: new Date(meta.createdAt).toISOString(),
+        updatedAt: new Date(meta.updatedAt).toISOString(),
+        status: meta.archived ? 'archived' : 'active',
+        metadata: metadataOfMeta(meta),
+      }),
+    ),
+  );
+  yield entry('document', { kind: 'session' }, SESSION_META_KEY, input.stateBytes);
+  const agentsPrefix = 'agents/';
+  for (const file of input.files) {
+    if (file.rel === SESSION_META_KEY) continue; // already emitted as a document
+    if (file.rel.startsWith(agentsPrefix)) {
+      const rest = file.rel.slice(agentsPrefix.length);
+      const slash = rest.indexOf('/');
+      if (slash <= 0) continue; // not a file inside an agent directory
+      const agentId = rest.slice(0, slash);
+      const name = rest.slice(slash + 1);
+      const owner: ArtifactOwner = { kind: 'agent', agentId };
+      yield entry(name === 'wire.jsonl' ? 'records' : 'blob', owner, name, file.bytes);
+      continue;
+    }
+    yield entry('blob', { kind: 'session' }, file.rel, file.bytes);
+  }
+}
+
+/* ------------------------------------------------------------------------ */
+/* Import staging                                                           */
+/* ------------------------------------------------------------------------ */
+
+export interface StagedDescriptor {
+  readonly createdAt?: string;
+  readonly status?: SessionStoredStatus;
+  readonly metadata?: SessionMetadata;
+}
+
+interface StagedFile {
+  readonly owner: ArtifactOwner;
+  readonly name: string;
+  readonly bytes: Uint8Array;
+}
+
+export interface StagedImport {
+  readonly descriptor: StagedDescriptor;
+  /** The parsed source `state.json` document entry, when the stream had one. */
+  readonly stateDocument?: SessionMeta;
+  /** Payload files: documents (other than state.json), records, blobs. */
+  readonly files: readonly StagedFile[];
+}
+
+function transferFailed(message: string, cause?: unknown): SessionHostRuntimeError {
+  return new SessionHostRuntimeError(
+    SessionHostRuntimeErrors.codes.SESSION_TRANSFER_FAILED,
+    message,
+    { cause },
+  );
+}
+
+/**
+ * An entry name must be a relative, `/`-joined logical path: no empty
+ * segments, no `.`/`..`, no backslashes, no leading separator. Names failing
+ * this never reach the filesystem.
+ */
+function isValidEntryName(name: string): boolean {
+  if (name.length === 0 || name.startsWith('/') || name.includes('\\')) return false;
+  return name.split('/').every((segment) => segment.length > 0 && segment !== '.' && segment !== '..');
+}
+
+function assertValidOwner(owner: ArtifactOwner): void {
+  if (owner.kind !== 'agent') {
+    if (owner.kind === 'session') return;
+    throw transferFailed('export entry has an unknown owner kind');
+  }
+  if (
+    owner.agentId.length === 0 ||
+    owner.agentId === '.' ||
+    owner.agentId === '..' ||
+    owner.agentId.includes('/') ||
+    owner.agentId.includes('\\')
+  ) {
+    throw transferFailed('export entry has an agent owner with an invalid agentId');
+  }
+}
+
+export async function stageLocalImport(
+  entries: AsyncIterable<SessionExportEntry>,
+): Promise<StagedImport> {
+  let descriptor: StagedDescriptor = {};
+  let stateDocument: SessionMeta | undefined;
+  const files: StagedFile[] = [];
+  for await (const item of entries) {
+    if (item.schemaVersion !== EXPORT_SCHEMA_VERSION) {
+      throw transferFailed(`unsupported export schema version ${item.schemaVersion}`);
+    }
+    if (item.kind !== 'descriptor' && !isValidEntryName(item.name)) {
+      throw transferFailed(`export entry has an unsafe name '${item.name}'`);
+    }
+    assertValidOwner(item.owner);
+    const bytes = await concatChunks(item.content);
+    if (item.checksum !== undefined && fnv1aHex(bytes) !== item.checksum) {
+      throw transferFailed(`checksum mismatch on export entry '${item.name}'`);
+    }
+    switch (item.kind) {
+      case 'descriptor': {
+        try {
+          descriptor = parseDescriptor(JSON.parse(textDecoder.decode(bytes)));
+        } catch (error) {
+          throw transferFailed('failed to parse the descriptor export entry', error);
+        }
+        break;
+      }
+      case 'document': {
+        if (item.owner.kind === 'session' && item.name === SESSION_META_KEY) {
+          try {
+            stateDocument = JSON.parse(textDecoder.decode(bytes)) as SessionMeta;
+          } catch (error) {
+            throw transferFailed('failed to parse the state.json document entry', error);
+          }
+          break;
+        }
+        files.push({ owner: item.owner, name: item.name, bytes });
+        break;
+      }
+      case 'records': {
+        assertRecordFraming(item.name, bytes);
+        files.push({ owner: item.owner, name: item.name, bytes });
+        break;
+      }
+      case 'blob':
+        files.push({ owner: item.owner, name: item.name, bytes });
+        break;
+    }
+  }
+  return stateDocument === undefined
+    ? { descriptor, files }
+    : { descriptor, stateDocument, files };
+}
+
+function parseDescriptor(value: unknown): StagedDescriptor {
+  if (value === null || typeof value !== 'object') {
+    throw transferFailed('descriptor export entry is not an object');
+  }
+  const raw = value as {
+    readonly createdAt?: unknown;
+    readonly status?: unknown;
+    readonly metadata?: unknown;
+  };
+  const staged: {
+    createdAt?: string;
+    status?: SessionStoredStatus;
+    metadata?: SessionMetadata;
+  } = {};
+  if (typeof raw.createdAt === 'string' && !Number.isNaN(Date.parse(raw.createdAt))) {
+    staged.createdAt = raw.createdAt;
+  }
+  if (raw.status === 'active' || raw.status === 'archived') staged.status = raw.status;
+  if (raw.metadata !== null && typeof raw.metadata === 'object' && !Array.isArray(raw.metadata)) {
+    staged.metadata = raw.metadata as SessionMetadata;
+  }
+  return staged;
+}
+
+/**
+ * Validate the JSONL record framing: records are separated by `\n`; a single
+ * trailing separator is framing, while empty lines anywhere else mean the
+ * stream is not what it claims. The bytes themselves travel verbatim.
+ */
+function assertRecordFraming(name: string, bytes: Uint8Array): void {
+  if (bytes.byteLength === 0) return;
+  let start = 0;
+  for (let index = 0; index < bytes.byteLength; index++) {
+    if (bytes[index] !== 0x0a) continue;
+    if (index === start && index !== bytes.byteLength - 1) {
+      throw transferFailed(`records export entry '${name}' contains an empty record line`);
+    }
+    start = index + 1;
+  }
+}
+
+async function concatChunks(source: AsyncIterable<Uint8Array>): Promise<Uint8Array> {
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for await (const chunk of source) {
+    chunks.push(chunk);
+    total += chunk.byteLength;
+  }
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return merged;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Import commit                                                            */
+/* ------------------------------------------------------------------------ */
+
+export interface CommitLocalImportInput {
+  readonly workspaceId: string;
+  readonly sessionId: string;
+  readonly cwd: string;
+  readonly staged: StagedImport;
+  readonly metadata?: SessionMetadata;
+  readonly now: number;
+}
+
+/**
+ * The final `state.json` of an imported session: the source document's
+ * fields where the stream carried them, the descriptor entry's logical
+ * values as overrides, the caller's metadata patch last — and identity
+ * (id/cwd/timestamps) always re-anchored to the target runtime.
+ */
+export function importedStateDocument(input: CommitLocalImportInput): SessionMeta {
+  const { staged } = input;
+  const base: SessionMeta = {
+    ...staged.stateDocument,
+    id: input.sessionId,
+    version: SESSION_META_VERSION,
+    cwd: input.cwd,
+    createdAt:
+      staged.descriptor.createdAt !== undefined
+        ? Date.parse(staged.descriptor.createdAt)
+        : (staged.stateDocument?.createdAt ?? input.now),
+    updatedAt: input.now,
+    archived: staged.descriptor.status === 'archived' || staged.stateDocument?.archived === true,
+    agents: staged.stateDocument?.agents ?? {},
+    custom: staged.stateDocument?.custom ?? {},
+  };
+  const withDescriptor =
+    staged.descriptor.metadata === undefined
+      ? base
+      : applyMetadataPatch(base, staged.descriptor.metadata);
+  return input.metadata === undefined ? withDescriptor : applyMetadataPatch(withDescriptor, input.metadata);
+}
+
+/** Scope + key a staged payload file commits to, within the target session. */
+export function stagedFileTarget(
+  workspaceId: string,
+  sessionId: string,
+  file: StagedFile,
+): { readonly scope: string; readonly key: string } {
+  const root =
+    file.owner.kind === 'session'
+      ? sessionScopeOf(workspaceId, sessionId)
+      : agentScopeOf(workspaceId, sessionId, file.owner.agentId);
+  return { scope: root, key: file.name };
+}
+
+export async function writeStagedFile(
+  storage: IFileSystemStorageService,
+  workspaceId: string,
+  sessionId: string,
+  file: StagedFile,
+): Promise<void> {
+  const { scope, key } = stagedFileTarget(workspaceId, sessionId, file);
+  await storage.write(scope, key, file.bytes, { atomic: true });
+}
+
+export function encodeStateDocument(meta: SessionMeta): Uint8Array {
+  return jsonDocumentCodec.encode(meta);
+}
