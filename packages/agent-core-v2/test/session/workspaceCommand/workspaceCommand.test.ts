@@ -208,7 +208,6 @@ function sessionContext(workDir = WORK_DIR): ISessionContext {
   return makeSessionContext({
     sessionId: 'ses',
     workspaceId: 'ws',
-    sessionDir: '/tmp/sessions/ws/ses',
     sessionScope: 'sessions/ws/ses',
     cwd: workDir,
   });

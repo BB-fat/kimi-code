@@ -6,20 +6,18 @@
  *
  *  - `ISessionContext` is seeded pathless by default (plan §7.2): identity
  *    and the persistence scope come from the lease (`ref`, session
- *    namespace), `cwd` from the lease's OS capability when present.
- *    `workspaceId`/`sessionDir` do not exist on that seed — but a runtime
- *    that genuinely owns a per-session host directory (the Local workspace
- *    runtime) projects the transitional `session.host_files` capability and
- *    REPLACES this seed through the contribution channel with one carrying
- *    the legacy facts, so the transitional host-files consumers (sessionLog,
- *    the plan-mode tools and their working documents, MCP media originals,
- *    task output display paths, `agents.<id>.homedir` metadata, cron
- *    addressing) behave exactly like the legacy path on local leases. A
- *    lease without the capability keeps the pathless seed, and those
- *    consumers stay gated off (plan §7.4); the empty-`sessionDir` readers
- *    that remain reachable there (MCP `originalsDir`, the plan service's
- *    file path) degrade to the no-host-file fallbacks instead of resolving
- *    relative paths against the host process cwd.
+ *    namespace), `cwd` from the lease's OS capability when present, and
+ *    `workspaceId` from the lease's typed host-files capability when the
+ *    runtime owns a session bucket. Physical host paths never land on the
+ *    context (plan §1.4): a runtime that genuinely owns a per-session host
+ *    directory (the Local workspace runtime) carries them on the lease's
+ *    `ISessionHostFiles` capability object, seeded here under its DI token —
+ *    so the host-files consumers (sessionLog, the plan-mode tools and their
+ *    working documents, MCP media originals, task output display paths,
+ *    `agents.<id>.homedir` metadata, cron addressing) behave exactly like
+ *    the legacy path on local leases, while a lease without the capability
+ *    seeds the absent `NO_SESSION_HOST_FILES` view and those consumers
+ *    degrade or stay gated off (plan §7.4).
  *  - The typed Stores (`IAtomicDocumentStore` / `IAppendLogStore` /
  *    `IBlobStore`) and the byte-store façade (`IFileSystemStorageService`)
  *    are bound to the lease's persistence context — the Session scope never
@@ -78,6 +76,10 @@ import { ISessionMcpService } from '#/session/mcp/sessionMcp';
 import { ISessionCapabilities } from '#/session/sessionCapabilities/sessionCapabilities';
 import { LeaseSessionCapabilities } from '#/session/sessionCapabilities/sessionCapabilitiesService';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import {
+  ISessionHostFiles,
+  NO_SESSION_HOST_FILES,
+} from '#/session/sessionHostFiles/sessionHostFiles';
 import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
@@ -118,7 +120,10 @@ export const sessionJsonDocumentCodec: DocumentCodec = {
  * The pathless `ISessionContext` of a runtime-backed session (plan §7.2).
  * `scope()` composes sub-scopes off the lease's session namespace — for the
  * local runtime that IS the legacy `sessions/<wd_id>/<sessionId>` scope, so
- * every scope-addressed write lands exactly where the old path puts it.
+ * every scope-addressed write lands exactly where the old path puts it. The
+ * `workspaceId` bucket fact comes from the lease's typed host-files
+ * capability (the Local runtime's `wd_id`); a runtime without a session
+ * bucket leaves it empty.
  */
 export function makeLeaseSessionContext(
   lease: ISessionRuntimeContext,
@@ -129,9 +134,7 @@ export function makeLeaseSessionContext(
     _serviceBrand: undefined,
     sessionId: lease.ref.sessionId,
     runtimeId: lease.ref.runtimeId,
-    workspaceId: '',
-    sessionDir: '',
-    metaScope: scope,
+    workspaceId: lease.hostFiles?.workspaceId ?? '',
     cwd: lease.os?.cwd ?? '',
     scope: (subKey?: string): string =>
       subKey === undefined || subKey === '' ? scope : `${scope}/${subKey}`,
@@ -214,6 +217,7 @@ export class RuntimeSessionActivationService
       [ISessionContext, makeLeaseSessionContext(lease, sessionNamespace)],
       [ISessionRuntimeLease, lease],
       [ISessionCapabilities, new LeaseSessionCapabilities(lease)],
+      [ISessionHostFiles, lease.hostFiles ?? NO_SESSION_HOST_FILES],
       [IAtomicDocumentStore, lease.persistence.documents(sessionNamespace, sessionJsonDocumentCodec)],
       [IAppendLogStore, lease.persistence.logs(sessionNamespace, sessionJsonDocumentCodec)],
       [IBlobStore, lease.persistence.blobs(sessionNamespace)],

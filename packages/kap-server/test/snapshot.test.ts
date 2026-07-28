@@ -397,7 +397,7 @@ describe('server-v2 GET /api/v1/sessions/:id/snapshot', () => {
     const sid = await createSession();
     const live = server!.core.accessor.get(ISessionLifecycleService).get(sid);
     if (live === undefined) throw new Error(`session ${sid} not found`);
-    const metaScope = live.accessor.get(ISessionContext).metaScope;
+    const metaScope = live.accessor.get(ISessionContext).scope();
 
     const wireDir = join(home as string, metaScope, 'agents', 'main');
     await mkdir(wireDir, { recursive: true });
@@ -450,7 +450,7 @@ describe('server-v2 GET /api/v1/sessions/:id/snapshot', () => {
     const sid = await createSession();
     const session = server!.core.accessor.get(ISessionLifecycleService).get(sid);
     if (session === undefined) throw new Error(`session ${sid} not found`);
-    const metaScope = session.accessor.get(ISessionContext).metaScope;
+    const metaScope = session.accessor.get(ISessionContext).scope();
 
     // Shut down, then rewrite state.json in the v1 layout (ISO-string
     // timestamps, no `id`) so the next boot reads a cold legacy session.

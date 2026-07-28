@@ -63,6 +63,10 @@ import type {
 } from '#/persistence/interface/atomicDocumentStore';
 import type { IBlobStore } from '#/persistence/interface/blobStore';
 import type { IFileSystemStorageService } from '#/persistence/interface/storage';
+import {
+  makeSessionHostFiles,
+  type ISessionHostFiles,
+} from '#/session/sessionHostFiles/sessionHostFiles';
 import { AGENT_WIRE_RECORD_KEY, type WireRecord } from '#/wire/record';
 
 import {
@@ -461,6 +465,7 @@ export class LocalSessionLease implements ISessionRuntimeContext, LocalLeaseHand
   readonly capabilities: ReadonlySet<SessionRuntimeCapability>;
   readonly contributions: SessionRuntimeContributions;
   readonly os?: ISessionOsCapabilities;
+  readonly hostFiles: ISessionHostFiles;
 
   private readonly logStores: IAppendLogStore[] = [];
   private closed = false;
@@ -474,7 +479,7 @@ export class LocalSessionLease implements ISessionRuntimeContext, LocalLeaseHand
     capabilities: ReadonlySet<SessionRuntimeCapability>,
     contributions: SessionRuntimeContributions,
     osHandles: Omit<ISessionOsCapabilities, 'cwd'>,
-    homeDir: string | undefined,
+    homeDir: string,
     private readonly onClosed: (lease: LocalSessionLease) => void,
   ) {
     this.ref = { runtimeId, sessionId: state.meta.id };
@@ -495,6 +500,14 @@ export class LocalSessionLease implements ISessionRuntimeContext, LocalLeaseHand
     // (plan §7.4): runtime-level resources, shared by every session lease and
     // never disposed per session.
     this.os = { cwd, ...osHandles };
+    // The typed host-files capability (plan §7.2): the local runtime genuinely
+    // owns this session's legacy host directory, so the lease carries the real
+    // paths for the file-bound consumers (session log, plan working documents,
+    // media originals, task display paths, the `homedir` metadata field).
+    this.hostFiles = makeSessionHostFiles({
+      workspaceId,
+      sessionDir: join(homeDir, sessionScopeOf(workspaceId, this.ref.sessionId)),
+    });
   }
 
   get closedLease(): boolean {

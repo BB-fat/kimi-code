@@ -85,17 +85,17 @@ import {
   LocalSessionLease,
   type LocalLeaseHandle,
 } from './localSessionContext';
-import { localSessionContextContribution } from './localSessionContextSeed';
 import {
   exportLocalSession,
   collectSessionCronTasks,
+  hashLocalSessionFile,
   importedStateDocument,
   revisionOfLocalSession,
   stageLocalImport,
   writeStagedCronTask,
   writeStagedFile,
   encodeStateDocument,
-  type SessionDirFile,
+  type SessionExportSourceFile,
 } from './localSessionTransfer';
 import {
   agentScopeOf,
@@ -120,13 +120,11 @@ const DEFAULT_CAPABILITIES: ReadonlySet<SessionRuntimeCapability> = new Set([
   'os.process',
   'os.terminal',
   'os.watch',
-  'os.stdio',
   // The local runtime genuinely owns the legacy per-session host directory;
-  // it also contributes the `ISessionContext` replacement that backs it
-  // (`localSessionContextSeed.ts`), so the transitional host-files consumers
-  // (session logs, plan files, media originals, cron addressing, the
-  // `agents.<id>.homedir` metadata) behave exactly like the legacy path.
-  'session.host_files',
+  // its leases carry the typed `ISessionHostFiles` capability object backing
+  // the file-bound consumers (session logs, plan files, media originals,
+  // task display paths, the `agents.<id>.homedir` metadata, cron addressing).
+  'session.host_dir',
   'artifact.model_read',
   'session.cold_read',
   'session.export',
@@ -478,7 +476,7 @@ export class LocalWorkspaceSessionManager implements ISessionManager {
 
   /**
    * Whole-inventory revision token for the transfer coordinator (plan §3.5):
-   * derived from the stored bytes of every file the export stream could
+   * derived from the stored content of every file the export stream could
    * carry (session directory + session-tagged cron tasks) — no watermark
    * file anywhere (plan §9.5). Flushes a live lease first so the token and
    * the export stream share one cut; `undefined` when the session is absent.
@@ -572,22 +570,6 @@ export class LocalWorkspaceSessionManager implements ISessionManager {
         { details: { runtimeId: this.runtimeId, sessionId } },
       );
     }
-    // Per-lease contributions: the caller's set plus the `ISessionContext`
-    // replacement seeding this session's local host facts (gated on the
-    // projected `session.host_files` capability by its own `requires`).
-    const contributions: SessionRuntimeContributions = {
-      ...this.contributions,
-      sessionServices: [
-        ...this.contributions.sessionServices,
-        localSessionContextContribution(
-          this.workspaceId,
-          sessionId,
-          this.homeDir,
-          this.cwd,
-          this.runtimeId,
-        ),
-      ],
-    };
     const lease = new LocalSessionLease(
       this.storage,
       this.workspaceId,
@@ -595,7 +577,7 @@ export class LocalWorkspaceSessionManager implements ISessionManager {
       state,
       this.runtimeId,
       this.caps,
-      contributions,
+      this.contributions,
       this.osHandles,
       this.homeDir,
       (closed) => {
@@ -791,14 +773,14 @@ export class LocalWorkspaceSessionManager implements ISessionManager {
     }
   }
 
-  /** Collect every regular file under the session directory (symlinks excluded). */
-  private async walkSessionDir(sessionDir: string): Promise<readonly SessionDirFile[]> {
-    // TODO(M8): this pre-reads every file's bytes up front (the export entry
-    // stream then carries them in memory). The pre-migration zip pipeline
-    // streamed from disk; when the export data plane is revisited, switch the
-    // `blob` entries to lazy byte sources so a large session export no longer
-    // buffers the whole directory.
-    const files: SessionDirFile[] = [];
+  /**
+   * Collect every regular file under the session directory (symlinks
+   * excluded) and hash its content in a streaming pass — entry bytes are
+   * never held in memory: the export stream reads each file lazily off disk
+   * (`streamFileBytes`), so a large session export stays bounded (M8b).
+   */
+  private async walkSessionDir(sessionDir: string): Promise<readonly SessionExportSourceFile[]> {
+    const paths: { readonly rel: string; readonly abs: string }[] = [];
     const walk = async (dir: string, relBase: string): Promise<void> => {
       let entries;
       try {
@@ -814,12 +796,16 @@ export class LocalWorkspaceSessionManager implements ISessionManager {
         if (entry.isDirectory()) {
           await walk(abs, rel);
         } else if (entry.isFile()) {
-          files.push({ rel, bytes: new Uint8Array(await readFile(abs)) });
+          paths.push({ rel, abs });
         }
       }
     };
     await walk(sessionDir, '');
-    files.sort((a, b) => a.rel.localeCompare(b.rel));
+    paths.sort((a, b) => a.rel.localeCompare(b.rel));
+    const files: SessionExportSourceFile[] = [];
+    for (const path of paths) {
+      files.push({ ...path, contentHash: await hashLocalSessionFile(path.abs) });
+    }
     return files;
   }
 }

@@ -87,9 +87,7 @@ function stubSessionContext(sessionId = 's1'): ISessionContext {
   return makeSessionContext({
     sessionId,
     workspaceId: 'w1',
-    sessionDir: '/ws/.session',
     sessionScope: `session:${sessionId}`,
-    metaScope: `session:${sessionId}`,
     cwd: '/ws',
   });
 }

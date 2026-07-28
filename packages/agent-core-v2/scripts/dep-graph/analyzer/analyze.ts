@@ -58,6 +58,7 @@ const FRAMEWORK_BINDINGS: readonly { token: string; scope: ServiceScope; impl: s
   { token: 'ILogOptions', scope: 'App', impl: 'LogOptions' },
   { token: 'IBootstrapOptions', scope: 'App', impl: 'BootstrapOptions' },
   { token: 'ISessionContext', scope: 'Session', impl: 'SessionContext' },
+  { token: 'ISessionHostFiles', scope: 'Session', impl: 'SessionHostFiles' },
   { token: 'IAgentScopeContext', scope: 'Agent', impl: 'AgentScopeContext' },
 ];
 

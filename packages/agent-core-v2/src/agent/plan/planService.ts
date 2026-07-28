@@ -23,7 +23,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { dirname, join } from 'pathe';
+import { dirname } from 'pathe';
 
 import { Disposable, type IDisposable } from '#/_base/di/lifecycle';
 import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
@@ -47,7 +47,7 @@ import { IAgentTelemetryContextService } from '#/app/telemetry/agentTelemetryCon
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IBlobStore } from '#/persistence/interface/blobStore';
-import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import { ISessionHostFiles } from '#/session/sessionHostFiles/sessionHostFiles';
 import { IWireService } from '#/wire/wire';
 import type { ToolFileAccess } from '#/tool/toolContract';
 import {
@@ -77,7 +77,7 @@ export class AgentPlanService extends Disposable implements IAgentPlanService {
     @IAgentTelemetryContextService private readonly telemetryContext: IAgentTelemetryContextService,
     @IEventBus eventBus: IEventBus,
     @IWireService private readonly wire: IWireService,
-    @ISessionContext private readonly sessionCtx: ISessionContext,
+    @ISessionHostFiles private readonly hostFiles: ISessionHostFiles,
     @IAgentScopeContext private readonly agentCtx: IAgentScopeContext,
     @IAgentToolExecutorService toolExecutor: IAgentToolExecutorService,
     @IAgentToolApprovalService private readonly toolApproval: IAgentToolApprovalService,
@@ -267,10 +267,10 @@ export class AgentPlanService extends Disposable implements IAgentPlanService {
 
   private planFilePathFor(id: string): PlanFilePath {
     // A session without a host directory (headless runtime lease) has no plan
-    // file location: plan mode stays file-less (`path: null`), and joining
-    // onto the empty sessionDir would resolve RELATIVE to the host cwd.
-    if (this.sessionCtx.sessionDir === '') return null;
-    return join(this.sessionCtx.sessionDir, 'agents', this.agentCtx.agentId, 'plans', `${id}.md`);
+    // file location: plan mode stays file-less (`path: null`). The path
+    // itself is composed by the lease's typed host-files capability — Session
+    // Core never joins a host path itself (plan §7.2).
+    return this.hostFiles.planFilePath(this.agentCtx.agentId, id);
   }
 
   private async writeEmptyPlanFile(path: string): Promise<void> {

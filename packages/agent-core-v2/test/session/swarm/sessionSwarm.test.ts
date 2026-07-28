@@ -876,7 +876,6 @@ describe('SessionSwarmService metadata compatibility', () => {
       makeSessionContext({
         sessionId: 's1',
         workspaceId: 'w1',
-        sessionDir: '/tmp/kimi/s1',
         sessionScope: 'sessions/w1/s1',
         cwd: '/repo',
       }),

@@ -15,6 +15,7 @@ import {
   IAgentTaskService,
   type AgentTaskInfo,
 } from '#/agent/task/task';
+import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 import {
   SubagentTask,
   type SubagentHandle,
@@ -1276,7 +1277,11 @@ describe('AgentTaskService', () => {
   it('getTask on an unknown id does not create persisted state', async () => {
     const sessionDir = await mkdtemp(join(tmpdir(), 'kimi-bg-mgr-missing-'));
     try {
-      const { manager, persistence } = createAgentTaskService({ sessionDir });
+      const { ctx, manager, persistence } = createAgentTaskService({ sessionDir });
+      // Let the session's own startup writes (the initial metadata document)
+      // settle before the home dir is removed below — otherwise the
+      // fire-and-forget write races the `rm` and rejects unhandled.
+      await ctx.get(ISessionMetadata).ready;
 
       expect(manager.getTask('bash-bogusss0')).toBeUndefined();
 

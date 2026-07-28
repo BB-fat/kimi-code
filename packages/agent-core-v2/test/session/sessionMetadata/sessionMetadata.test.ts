@@ -21,7 +21,7 @@ import { stubFlag } from '../../app/flag/stubs';
 import { stubLog } from '../../_base/log/stubs';
 import { stubQueryStore } from '../../persistence/interface/stubs';
 
-const META_SCOPE = 'sessions/wd_test/s1/session-meta';
+const META_SCOPE = 'sessions/wd_test/s1';
 
 // A re-constructed SessionMetadata stands for a new session lifetime: it gets
 // its own state registry, so the shared `sessionMetadata.data` key registers
@@ -36,9 +36,7 @@ function makeContext(): ISessionContext {
   return makeSessionContext({
     sessionId: 's1',
     workspaceId: 'wd_test',
-    sessionDir: '/tmp/sessions/wd_test/s1',
-    sessionScope: 'sessions/wd_test/s1',
-    metaScope: META_SCOPE,
+    sessionScope: META_SCOPE,
     cwd: '/tmp/sessions/wd_test/s1',
   });
 }

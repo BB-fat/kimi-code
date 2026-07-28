@@ -179,9 +179,9 @@ export class ExitPlanModeTool implements IExitPlanModeTool {
 registerAgentToolService(IExitPlanModeTool, ExitPlanModeTool, {
   name: 'ExitPlanMode',
   domain: 'plan',
-  // See EnterPlanMode: the plan working document is a legacy host file, so
-  // these tools only activate where the runtime owns that directory.
-  requires: ['session.host_files'],
+  // See EnterPlanMode: the plan working document is a host file, so these
+  // tools only activate where the runtime owns that directory.
+  requires: ['session.host_dir'],
 });
 
 function formatAutoApprovedPlanForOutput(plan: string, path: string | undefined): string {

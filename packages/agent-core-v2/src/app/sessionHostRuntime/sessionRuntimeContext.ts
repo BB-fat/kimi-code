@@ -32,6 +32,7 @@ import type { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import type { IHostFsWatchService } from '#/os/interface/hostFsWatch';
 import type { IHostProcessService } from '#/os/interface/hostProcess';
 import type { IHostTerminalService } from '#/os/interface/terminal';
+import type { ISessionHostFiles } from '#/session/sessionHostFiles/sessionHostFiles';
 
 import type { SessionRuntimeCapability } from './sessionHostRuntime';
 import type { SessionRef } from './sessionRef';
@@ -335,6 +336,17 @@ export interface ISessionRuntimeContext {
   readonly capabilities: ReadonlySet<SessionRuntimeCapability>;
   readonly contributions: SessionRuntimeContributions;
   readonly os?: ISessionOsCapabilities;
+  /**
+   * The typed host-files capability (plan §7.2: physical paths live only on
+   * the lease's concrete capability objects). Present only when the runtime
+   * owns a per-session host directory — the Local workspace runtime, which
+   * also projects the `session.host_dir` capability string gating the
+   * file-bound service/tool registrations; headless runtimes leave it
+   * undefined and the activation seeds the absent `NO_SESSION_HOST_FILES`
+   * view instead. Projecting the capability string WITHOUT this object is a
+   * runtime bug.
+   */
+  readonly hostFiles?: ISessionHostFiles;
 
   flush(): Promise<void>;
   close(reason: SessionCloseReason): Promise<void>;

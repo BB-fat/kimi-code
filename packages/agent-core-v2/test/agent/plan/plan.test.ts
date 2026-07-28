@@ -20,7 +20,7 @@ import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import type { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IBlobStore } from '#/persistence/interface/blobStore';
-import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import { ISessionHostFiles } from '#/session/sessionHostFiles/sessionHostFiles';
 import type { ISessionProcessRunner } from '#/session/process/processRunner';
 import { createFakeHostFs, createFakeProcessRunner } from '../../tools/fixtures/fake-exec';
 import {
@@ -166,9 +166,11 @@ describe('Plan service', () => {
   }
 
   function expectedPlanPath(id: string): string {
-    const session = ctx.get(ISessionContext);
+    const hostFiles = ctx.get(ISessionHostFiles);
     const agent = ctx.get(IAgentScopeContext);
-    return join(session.sessionDir, 'agents', agent.agentId, 'plans', `${id}.md`);
+    const path = hostFiles.planFilePath(agent.agentId, id);
+    if (path === null) throw new Error('expected host files');
+    return path;
   }
 
   async function expectPlanActive(active: boolean): Promise<void> {

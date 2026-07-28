@@ -63,7 +63,6 @@ describe('SessionProcessRunner', () => {
           makeSessionContext({
             sessionId: 's',
             workspaceId: 'w',
-            sessionDir: dir,
             sessionScope: 'sessions/w/s',
             cwd: dir,
           }),

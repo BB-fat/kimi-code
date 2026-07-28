@@ -26,12 +26,11 @@ import { abortable } from '#/_base/utils/abort';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { IEventBus } from '#/app/event/eventBus';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
-import { sessionMediaOriginalsDir } from '#/agent/media/image-originals';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { createMcpAuthTool } from '#/agent/mcp/tools/auth';
 import { createMcpTool } from '#/agent/mcp/tools/mcp';
-import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import { ISessionHostFiles } from '#/session/sessionHostFiles/sessionHostFiles';
 import { ISessionMcpService } from '#/session/mcp/sessionMcp';
 import type { McpServerEntry } from './connection-manager';
 import { IAgentMcpService } from './mcp';
@@ -98,7 +97,7 @@ export class AgentMcpService extends Disposable implements IAgentMcpService {
 
   constructor(
     @ISessionMcpService private readonly sessionMcp: ISessionMcpService,
-    @ISessionContext private readonly sessionContext: ISessionContext,
+    @ISessionHostFiles private readonly hostFiles: ISessionHostFiles,
     @IAgentToolRegistryService private readonly registry: IAgentToolRegistryService,
     @IEventBus private readonly eventBus: IEventBus,
     @IAgentToolExecutorService toolExecutor: IAgentToolExecutorService,
@@ -321,12 +320,9 @@ export class AgentMcpService extends Disposable implements IAgentMcpService {
           createMcpTool(qualified, tool, client, {
             // A session without a host directory (headless runtime lease)
             // leaves `originalsDir` undefined: originals then fall back to the
-            // shared tmp cache — joining 'media-originals' onto the empty
-            // sessionDir would resolve RELATIVE to the host process cwd.
-            originalsDir:
-              this.sessionContext.sessionDir === ''
-                ? undefined
-                : sessionMediaOriginalsDir(this.sessionContext.sessionDir),
+            // shared tmp cache. The directory itself comes from the lease's
+            // typed host-files capability (plan §7.2).
+            originalsDir: this.hostFiles.mediaOriginalsDir ?? undefined,
             telemetry: this.telemetry,
             reconnect: (signal) => this.reconnectForToolCall(serverName, client, signal),
           }),

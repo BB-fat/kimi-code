@@ -1,24 +1,26 @@
 /**
  * `sessionLog` domain — Session-scope `ILogService` implementation.
  *
- * Binds `sessionId` to every entry and writes to a rotating file under
- * `<sessionDir>/logs` (the `sessionId` key is omitted from each line since the
- * path already identifies the session). Registered to the single `ILogService`
- * token at Session scope, so every Session/Agent consumer injecting
- * `@ILogService` lands here (Agent has no own binding and falls back to this).
- * Flushes synchronously when the Session scope is disposed. The plain-data
- * state (`rootLevel`) is registered into `sessionState`
- * (`ISessionStateService`) and read/written through it.
+ * Binds `sessionId` to every entry and writes to a rotating file under the
+ * session's host directory (`logs/`, resolved through the lease's typed
+ * `ISessionHostFiles` capability — the `sessionId` key is omitted from each
+ * line since the path already identifies the session). Registered to the
+ * single `ILogService` token at Session scope, so every Session/Agent
+ * consumer injecting `@ILogService` lands here (Agent has no own binding and
+ * falls back to this). Flushes synchronously when the Session scope is
+ * disposed. The plain-data state (`rootLevel`) is registered into
+ * `sessionState` (`ISessionStateService`) and read/written through it.
  */
 
 import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { defineState } from '#/_base/state/stateRegistry';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import { ISessionHostFiles } from '#/session/sessionHostFiles/sessionHostFiles';
 import { ISessionStateService } from '#/session/state/sessionState';
 
 import { ILogService, type LogLevel } from '#/_base/log/log';
 import { createFileLogWriter, type FileLogWriter } from '#/_base/log/fileLog';
-import { ILogOptions, resolveSessionLogPath } from '#/_base/log/logConfig';
+import { ILogOptions } from '#/_base/log/logConfig';
 import { BoundLogger, type LogLevelState } from '#/_base/log/logService';
 
 export const sessionLogRootLevelKey = defineState<LogLevelState>('sessionLog.rootLevel', () => ({
@@ -44,9 +46,19 @@ export class SessionLogService extends BoundLogger implements ILogService {
     @ISessionStateService private readonly states: ISessionStateService,
     @ILogOptions options: ILogOptions,
     @ISessionContext session: ISessionContext,
+    @ISessionHostFiles hostFiles: ISessionHostFiles,
   ) {
+    // The registration's `session.host_dir` gate guarantees the lease carries
+    // the host-files capability object; a runtime projecting the string
+    // without it is a runtime bug, not a degrade-to-app-log case.
+    const sessionLogPath = hostFiles.sessionLogPath;
+    if (sessionLogPath === null) {
+      throw new Error(
+        'SessionLogService requires the session.host_dir capability but the lease carries no host files',
+      );
+    }
     const sink = createFileLogWriter({
-      path: resolveSessionLogPath(session.sessionDir),
+      path: sessionLogPath,
       maxBytes: options.sessionMaxBytes,
       files: options.sessionFiles,
       format: { omitContextKeys: ['sessionId'] },
@@ -88,10 +100,10 @@ registerScopedService(
   SessionLogService,
   ScopeActivation.OnScopeCreated,
   'log',
-  // The per-session log file lives in the legacy session directory; only
+  // The per-session log file lives in the session's host directory; only
   // runtimes that own one (the Local workspace runtime) project the
-  // transitional `session.host_files` capability. Headless runtime-driven
-  // sessions keep the pathless context seed and fall back to the App log
-  // service until M8 re-roots session logs in the lease.
-  ['session.host_files'],
+  // `session.host_dir` capability and carry the typed `ISessionHostFiles`
+  // object on their leases. Host-files-less (headless) runtime-driven
+  // sessions fall back to the App log service.
+  ['session.host_dir'],
 );

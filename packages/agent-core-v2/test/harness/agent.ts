@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { Readable, type Writable } from 'node:stream';
 
 import { createControlledPromise } from '@antfu/utils';
@@ -110,6 +110,7 @@ import {
   IHostFileSystem,
   ISessionBtwService,
   ISessionContext,
+  ISessionHostFiles,
   ISessionProcessRunner,
   IAgentScopeContext,
   IAgentShellCommandService,
@@ -136,6 +137,7 @@ import {
   bootstrap,
   bootstrapSeed,
   createAppScope,
+  makeSessionHostFiles,
   resolveBootstrapOptions,
   type IDisposable,
   type Scope,
@@ -1141,7 +1143,13 @@ export class AgentTestContext {
     const agentTelemetry = this.root.accessor
       .get(ITelemetryService)
       .withContext({ agent_id: agentId });
-    const sessionScope = bootstrap.sessionScope(workspaceId, sessionId);
+    // The harness emulates a LOCAL session: the frozen legacy bucket layout
+    // (`sessions/<wd_id>/<sessionId>`) is spelled out here instead of the
+    // retired bootstrap scope builders, and the host-files capability is
+    // seeded from the same root so file-bound services (plan/task/log/media)
+    // behave exactly like production.
+    const sessionScope = join('sessions', workspaceId, sessionId);
+    const sessionDir = bootstrap.sessionDir(workspaceId, sessionId);
     this.session = this.root.createChild(LifecycleScope.Session, sessionId, {
       extra: collectScopeSeed(
         [
@@ -1150,12 +1158,14 @@ export class AgentTestContext {
               _serviceBrand: undefined,
               sessionId,
               workspaceId,
-              sessionDir: bootstrap.sessionDir(workspaceId, sessionId),
-              metaScope: `${sessionScope}/session-meta`,
               cwd: this.cwd,
               scope: (subKey?: string): string =>
                 subKey === undefined || subKey === '' ? sessionScope : `${sessionScope}/${subKey}`,
             });
+            reg.defineInstance(
+              ISessionHostFiles,
+              makeSessionHostFiles({ workspaceId, sessionDir }),
+            );
             reg.defineInstance(ISessionInteractionService, this.createInteractionService());
             reg.defineInstance(ISessionApprovalService, this.createApprovalService());
             reg.defineInstance(ISessionQuestionService, this.createQuestionService());
@@ -1231,7 +1241,7 @@ export class AgentTestContext {
             reg.defineDescriptor(IAgentGoalService, new SyncDescriptor(AgentGoalService));
             reg.defineDescriptor(IAgentSkillService, new SyncDescriptor(AgentSkillService));
             reg.defineDescriptor(IAgentUserToolService, new SyncDescriptor(AgentUserToolService));
-            const agentScope = bootstrap.agentScope(workspaceId, sessionId, agentId);
+            const agentScope = join(sessionScope, 'agents', agentId);
             reg.defineInstance(IAgentScopeContext, {
               _serviceBrand: undefined,
               agentId,

@@ -131,11 +131,11 @@ export class RuntimeSessionHostService extends Disposable implements IRuntimeSes
       });
       await this.seedAdditionalDirs(scope, opts.additionalDirs);
       // The legacy `defaultPlanMode` auto-enter: fresh sessions only, and
-      // only where the runtime owns the plan working document (the
-      // transitional `session.host_files` capability).
+      // only where the runtime owns the plan working document — signalled by
+      // the lease's typed host-files capability (plan §7.2).
       if (
         this.config.get<boolean>(DEFAULT_PLAN_MODE_SECTION) === true &&
-        lease.capabilities.has('session.host_files')
+        lease.hostFiles !== undefined
       ) {
         const planAgent =
           scope.handle.accessor.get(IAgentLifecycleService).get(MAIN_AGENT_ID) ??

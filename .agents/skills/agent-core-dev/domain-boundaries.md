@@ -80,7 +80,8 @@ The `session` domain owns only Session-level identity, metadata, lifecycle comma
 
 | Concern | Owner | Notes |
 |---|---|---|
-| `sessionId`, `workspaceId`, `sessionDir`, `metaScope` | `sessionContext` | Seeded facts; no IO |
+| `sessionId`, `workspaceId`, `cwd` | `sessionContext` | Seeded facts; no IO |
+| Session host paths (log/plan/media/attachments dirs, bucket id) | `sessionHostFiles` | Typed lease capability; null on headless leases |
 | `SessionMeta` | `sessionMetadata` | Durable atomic document; entity-like |
 | Open session scope registry | `sessionLifecycle` | App-scope live handles; not the persisted entity table |
 | Session commands such as `archive()` | `session` | Orchestrates metadata, agent teardown, and events |

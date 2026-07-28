@@ -31,7 +31,6 @@ import {
   ScopeActivation,
   registerScopedService,
 } from '#/_base/di/scope';
-import { join } from 'pathe';
 import { IConfigService } from '#/app/config/config';
 import { IEventBus } from '#/app/event/eventBus';
 import { DEFAULT_PERMISSION_MODE_SECTION } from '#/agent/permissionMode/configSection';
@@ -40,6 +39,7 @@ import type { PermissionMode } from '#/agent/permissionPolicy/types';
 import { IAgentTaskService } from '#/agent/task/task';
 import { ISessionCapabilities } from '#/session/sessionCapabilities/sessionCapabilities';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import { ISessionHostFiles } from '#/session/sessionHostFiles/sessionHostFiles';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 import { ISessionMcpService } from '#/session/mcp/sessionMcp';
 import { IAgentScopeContext, makeAgentScopeContext } from '#/agent/scopeContext/scopeContext';
@@ -83,6 +83,7 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
   constructor(
     @IInstantiationService private readonly instantiation: IInstantiationService,
     @ISessionContext private readonly ctx: ISessionContext,
+    @ISessionHostFiles private readonly hostFiles: ISessionHostFiles,
     @ISessionMetadata private readonly sessionMetadata: ISessionMetadata,
     @ISessionCapabilities private readonly sessionCapabilities: ISessionCapabilities,
     @IConfigService private readonly config: IConfigService,
@@ -153,17 +154,17 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
 
   private async doCreate(agentId: string, opts: CreateAgentOptions): Promise<IAgentScopeHandle> {
     const mcpReady = this.sessionMcp.ensureMcpReady();
-    // The agent's persistence scope composes off the session's — identical to
-    // the legacy bootstrap.agentScope(workspaceId, sessionId, agentId), but
-    // without the App-level path builder, so runtime-backed sessions (whose
-    // scope comes from the lease namespace) share this code path.
+    // The agent's persistence scope composes off the session's — the lease
+    // mints it as the legacy `sessions/<wd_id>/<sid>/agents/<agentId>`
+    // namespace on the local runtime, so every scope-addressed write lands
+    // exactly where the old path put it.
     const agentScope = this.ctx.scope(`agents/${agentId}`);
-    // The physical per-agent directory only exists on the legacy local path;
-    // it is retained in session metadata for older v1 readers (current
-    // readers derive it from the scope). Runtime-backed sessions have no host
-    // directory (plan §7.2) and simply omit the field.
-    const agentHomedir =
-      this.ctx.sessionDir === '' ? undefined : join(this.ctx.sessionDir, 'agents', agentId);
+    // The physical per-agent directory only exists where the runtime owns a
+    // per-session host directory (the Local workspace runtime); it is retained
+    // in session metadata for older v1 readers (current readers derive it from
+    // the scope). The lease's typed host-files capability carries the path —
+    // host-files-less (headless) sessions simply omit the field.
+    const agentHomedir = this.hostFiles.agentDir(agentId) ?? undefined;
     const agentSeeds: Array<readonly [ServiceIdentifier<unknown>, unknown]> = [
       [IAgentScopeContext, makeAgentScopeContext({ agentId, agentScope })],
       [ITelemetryService, this.telemetry.withContext({ agent_id: agentId })],

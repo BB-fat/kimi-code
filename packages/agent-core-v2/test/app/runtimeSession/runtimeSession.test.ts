@@ -113,7 +113,7 @@ import { ISessionMcpService } from '#/session/mcp/sessionMcp';
 import { ISessionProcessRunner } from '#/session/process/processRunner';
 import { ISessionFsService } from '#/session/sessionFs/fs';
 import { ISessionFsWatchService } from '#/session/sessionFs/fsWatch';
-import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import { ISessionHostFiles } from '#/session/sessionHostFiles/sessionHostFiles';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 import { ISessionTerminalService } from '#/session/terminal/terminalService';
 import type { AgentTool, ToolExecution } from '#/tool/toolContract';
@@ -417,7 +417,10 @@ describe('memory host runtime: full session lifecycle without any Workspace serv
 
     // open → activate → run a real agent turn over the scripted fake model.
     const first = await activateMain(app, await runtime.sessions.open('s1', {}));
-    expect(first.handle.accessor.get(ISessionContext).sessionDir).toBe('');
+    // A headless runtime owns no session host directory: the lease's
+    // host-files capability is the absent view (and the context stays
+    // pathless — no `sessionDir` fact exists there at all, M8b).
+    expect(first.handle.accessor.get(ISessionHostFiles).sessionDir).toBeNull();
     // The runtime's descriptor plane carries the create() metadata; the
     // lease's engine metadata (state.json equivalent) starts from the lease.
     expect((await runtime.sessions.get('s1'))?.metadata['title']).toBe('one');

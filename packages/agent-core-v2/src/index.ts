@@ -367,6 +367,7 @@ export * from '#/session/interaction/interactionService';
 export * from '#/session/sessionContext/sessionContext';
 export * from '#/session/sessionCapabilities/sessionCapabilities';
 export * from '#/session/sessionCapabilities/sessionCapabilitiesService';
+export * from '#/session/sessionHostFiles/sessionHostFiles';
 
 import '#/session/approval/approval';
 import '#/session/approval/approvalService';

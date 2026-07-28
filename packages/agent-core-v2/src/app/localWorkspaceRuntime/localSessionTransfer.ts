@@ -36,6 +36,8 @@
  * it as a read-only fact. It is never used to route or locate anything.
  */
 
+import { createReadStream } from 'node:fs';
+
 import { ulid } from 'ulid';
 
 import { SessionHostRuntimeError, SessionHostRuntimeErrors } from '#/app/sessionHostRuntime/errors';
@@ -76,11 +78,49 @@ const EXPORT_SCHEMA_VERSION = 1;
 /* Export                                                                   */
 /* ------------------------------------------------------------------------ */
 
-/** One file found while walking the session directory. */
-export interface SessionDirFile {
+/**
+ * One file found while walking the session directory, paired with the
+ * content hash its export entry carries. Bytes are NOT held in memory: the
+ * hash comes from a streaming pre-pass (`hashLocalSessionFile`) and the
+ * entry content streams lazily off disk (`streamFileBytes`), so a large
+ * session export never buffers the whole directory (M8b).
+ */
+export interface SessionExportSourceFile {
   /** Path relative to the session directory, `/`-joined. */
   readonly rel: string;
-  readonly bytes: Uint8Array;
+  /** Absolute host path — read lazily, only through `streamFileBytes`. */
+  readonly abs: string;
+  /** FNV-1a hex of the file's content (the export entry's checksum). */
+  readonly contentHash: string;
+}
+
+/**
+ * Stream one file's FNV-1a content hash (bounded memory). The revision chain
+ * mixes the same per-file hashes, so the token and the entry checksums
+ * always describe the same bytes.
+ */
+export async function hashLocalSessionFile(abs: string): Promise<string> {
+  let hash = 0x811c9dc5;
+  for await (const chunk of streamFileBytes(abs)) {
+    for (const byte of chunk) {
+      hash ^= byte;
+      hash = Math.imul(hash, 0x01000193);
+    }
+  }
+  const unsigned = hash < 0 ? hash + 2 ** 32 : hash;
+  return unsigned.toString(16).padStart(8, '0');
+}
+
+/** Lazily stream a session file's bytes off disk (bounded memory). */
+export async function* streamFileBytes(abs: string): AsyncIterable<Uint8Array> {
+  const stream = createReadStream(abs);
+  try {
+    for await (const chunk of stream) {
+      yield chunk as Uint8Array;
+    }
+  } finally {
+    stream.destroy();
+  }
 }
 
 function entry(
@@ -99,6 +139,23 @@ function entry(
   };
 }
 
+/** The lazy-content twin of {@link entry} for session-directory files. */
+function streamedEntry(
+  kind: SessionExportEntry['kind'],
+  owner: ArtifactOwner,
+  name: string,
+  file: SessionExportSourceFile,
+): SessionExportEntry {
+  return {
+    kind,
+    owner,
+    name,
+    schemaVersion: EXPORT_SCHEMA_VERSION,
+    checksum: file.contentHash,
+    content: streamFileBytes(file.abs),
+  };
+}
+
 async function* once(bytes: Uint8Array): AsyncIterable<Uint8Array> {
   yield bytes;
 }
@@ -109,7 +166,7 @@ export interface ExportLocalSessionInput {
   readonly meta: SessionMeta;
   readonly stateBytes: Uint8Array;
   /** Every regular file under the session directory (symlinks excluded). */
-  readonly files: readonly SessionDirFile[];
+  readonly files: readonly SessionExportSourceFile[];
   /** Session-tagged cron tasks collected from the workspace cron scope. */
   readonly crons: readonly SessionCronTaskFile[];
 }
@@ -160,7 +217,8 @@ export async function collectSessionCronTasks(
  * leads (same shape as the standalone memory runtime's, so cross-runtime
  * imports share one staging path); the stored `state.json` bytes follow as a
  * `document`; the session-directory files classify by their position in the
- * layout; the session-tagged cron tasks close the stream as `cron` entries.
+ * layout and stream their content lazily; the session-tagged cron tasks
+ * close the stream as `cron` entries.
  */
 export async function* exportLocalSession(
   input: ExportLocalSessionInput,
@@ -190,10 +248,10 @@ export async function* exportLocalSession(
       const agentId = rest.slice(0, slash);
       const name = rest.slice(slash + 1);
       const owner: ArtifactOwner = { kind: 'agent', agentId };
-      yield entry(name === 'wire.jsonl' ? 'records' : 'blob', owner, name, file.bytes);
+      yield streamedEntry(name === 'wire.jsonl' ? 'records' : 'blob', owner, name, file);
       continue;
     }
-    yield entry('blob', { kind: 'session' }, file.rel, file.bytes);
+    yield streamedEntry('blob', { kind: 'session' }, file.rel, file);
   }
   for (const cron of input.crons) {
     yield entry('cron', { kind: 'session' }, `${cron.taskId}.json`, cron.bytes);
@@ -535,13 +593,16 @@ export function encodeStateDocument(meta: SessionMeta): Uint8Array {
 
 /**
  * Whole-inventory revision token for the transfer coordinator (plan §3.5):
- * one FNV-1a chain over every session-directory file (path + bytes) and
- * every session-tagged cron task (id + bytes) — anything the export stream
- * could carry. Derived from the stored bytes only; no watermark file
- * anywhere (plan §9.5).
+ * one FNV-1a chain over every session-directory file (path + content hash)
+ * and every session-tagged cron task (id + bytes) — anything the export
+ * stream could carry, so the token flips whenever any carried byte changes.
+ * The per-file hashes are the SAME checksums the export entries carry
+ * (`hashLocalSessionFile`), keeping the token and the stream on one byte
+ * view; derived from stored content only — no watermark file anywhere
+ * (plan §9.5).
  */
 export function revisionOfLocalSession(
-  files: readonly SessionDirFile[],
+  files: readonly SessionExportSourceFile[],
   crons: readonly SessionCronTaskFile[],
 ): string {
   let hash = 0x811c9dc5;
@@ -554,7 +615,7 @@ export function revisionOfLocalSession(
   const mixText = (text: string): void => mixBytes(textEncoder.encode(text));
   for (const file of files) {
     mixText(file.rel);
-    mixBytes(file.bytes);
+    mixText(file.contentHash);
   }
   for (const cron of crons) {
     mixText(cron.taskId);

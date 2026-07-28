@@ -46,6 +46,10 @@ import { IPluginService } from '#/app/plugin/plugin';
 import { IAppendLogStore } from '#/persistence/interface/appendLogStore';
 import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import {
+  ISessionHostFiles,
+  makeSessionHostFiles,
+} from '#/session/sessionHostFiles/sessionHostFiles';
 import { ISessionCapabilities } from '#/session/sessionCapabilities/sessionCapabilities';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 import { createWireMetadataRecord, type WireRecord } from '#/wire/record';
@@ -175,11 +179,16 @@ describe('AgentLifecycleService', () => {
       _serviceBrand: undefined,
       sessionId: 'sess_test',
       workspaceId: 'ws_test',
-      sessionDir: '/tmp/kimi-agentLifecycle-test',
-      metaScope: 'test',
       cwd: '/tmp/kimi-agentLifecycle-work',
       scope: (subKey?: string) => (subKey === undefined || subKey === '' ? 'test' : `test/${subKey}`),
     });
+    ix.stub(
+      ISessionHostFiles,
+      makeSessionHostFiles({
+        workspaceId: 'ws_test',
+        sessionDir: '/tmp/kimi-agentLifecycle-test',
+      }),
+    );
     ix.stub(ISessionCapabilities, {
       _serviceBrand: undefined,
       has: () => true,

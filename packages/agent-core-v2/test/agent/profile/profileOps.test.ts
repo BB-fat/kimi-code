@@ -173,8 +173,6 @@ function createSessionContextStub(): ISessionContext {
     _serviceBrand: undefined,
     sessionId: 'session-test',
     workspaceId: 'workspace-test',
-    sessionDir: '/tmp/session-test',
-    metaScope: 'sessions/workspace-test/session-test',
     cwd: '/tmp',
     scope: (subKey?: string) =>
       subKey === undefined || subKey.length === 0

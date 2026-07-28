@@ -113,6 +113,17 @@ export class FsWatchBridge {
     }
     const sw = resolved;
 
+    // A connection holds at most one watch per bare session id. The id is
+    // re-resolved on every add (M6), so a runtime switch (the old session
+    // closed, or a same-named session on another runtime now wins the
+    // resolver) would otherwise leave this connection subscribed under BOTH
+    // refs — duplicate `session_id` frames and a `removeWatch` that hits the
+    // stale entry. Evict the stale one before adding.
+    const stale = this.findConnWatch(conn, ref.sessionId);
+    if (stale !== undefined && stale.key !== sw.key) {
+      this.evictConn(stale, conn.id);
+    }
+
     const normalized: string[] = [];
     for (const raw of rawPaths) {
       const rel = this.normalize(sw, raw);
@@ -174,14 +185,19 @@ export class FsWatchBridge {
   /** Drop every subscription held by `conn` (called on socket close). */
   detachConnection(conn: FsWatchConnection): void {
     for (const sw of Array.from(this.bySession.values())) {
-      const entry = sw.conns.get(conn.id);
-      if (entry === undefined) continue;
-      sw.conns.delete(conn.id);
-      this.connPathCount.set(conn.id, Math.max(0, this.countFor(conn.id) - entry.paths.size));
-      this.recomputeAndApply(sw);
-      if (sw.conns.size === 0) this.teardownSession(sw);
+      this.evictConn(sw, conn.id);
     }
     this.connPathCount.delete(conn.id);
+  }
+
+  /** Drop one connection's whole entry from one session watch, if present. */
+  private evictConn(sw: SessionWatch, connId: string): void {
+    const entry = sw.conns.get(connId);
+    if (entry === undefined) return;
+    sw.conns.delete(connId);
+    this.connPathCount.set(connId, Math.max(0, this.countFor(connId) - entry.paths.size));
+    this.recomputeAndApply(sw);
+    if (sw.conns.size === 0) this.teardownSession(sw);
   }
 
   private resolveSession(ref: SessionRef): SessionWatch | undefined {

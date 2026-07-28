@@ -721,8 +721,9 @@ registerScopedService(
   SessionCronServiceImpl,
   ScopeActivation.OnScopeCreated,
   'cron',
-  // TODO(multi-runtime M8): cron persistence is the App-scope host-fs store
-  // (`cron/<workspaceId>/`); move it to the lease's typed Stores (plan §7.3)
-  // and drop this gate.
+  // Cron persistence stays the App-scope host-fs store (`cron/<wd_id>/`,
+  // the frozen layout); the session's bucket id arrives through the seeded
+  // `ISessionContext.workspaceId` sourced from the lease's host-files
+  // capability (M8b), so only runtimes with host files ever activate here.
   ['os.filesystem'],
 );

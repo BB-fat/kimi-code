@@ -38,6 +38,10 @@ import { IAgentScopeContext, makeAgentScopeContext } from '#/agent/scopeContext/
 import { IAgentStateService } from '#/agent/state/agentState';
 import { AgentStateService } from '#/agent/state/agentStateService';
 import { ISessionContext, makeSessionContext } from '#/session/sessionContext/sessionContext';
+import {
+  ISessionHostFiles,
+  makeSessionHostFiles,
+} from '#/session/sessionHostFiles/sessionHostFiles';
 import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
@@ -130,10 +134,13 @@ describe('AgentTaskService', () => {
       makeSessionContext({
         sessionId: 'test-session',
         workspaceId: 'test-ws',
-        sessionDir: '/tmp/test-session',
         sessionScope: 'sessions/test-ws/test-session',
         cwd: '/tmp/test-session',
       }),
+    );
+    ix.stub(
+      ISessionHostFiles,
+      makeSessionHostFiles({ workspaceId: 'test-ws', sessionDir: '/tmp/test-session' }),
     );
     ix.stub(
       IAgentScopeContext,
@@ -499,10 +506,13 @@ describe('AgentTaskService', () => {
       makeSessionContext({
         sessionId: 'test-session',
         workspaceId: 'test-ws',
-        sessionDir: '/tmp/test-session',
         sessionScope: 'sessions/test-ws/test-session',
         cwd: '/tmp/test-session',
       }),
+    );
+    ix.stub(
+      ISessionHostFiles,
+      makeSessionHostFiles({ workspaceId: 'test-ws', sessionDir: '/tmp/test-session' }),
     );
     ix.stub(
       IAgentScopeContext,

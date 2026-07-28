@@ -39,7 +39,6 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { join } from 'pathe';
 
 import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 
@@ -73,6 +72,7 @@ import { renderNotificationXml } from './notificationXml';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import { IConfigService } from '#/app/config/config';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import { ISessionHostFiles } from '#/session/sessionHostFiles/sessionHostFiles';
 import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
@@ -263,6 +263,7 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     @IAtomicDocumentStore atomicDocs: IAtomicDocumentStore,
     @IFileSystemStorageService byteStore: IFileSystemStorageService,
     @ISessionContext session: ISessionContext,
+    @ISessionHostFiles hostFiles: ISessionHostFiles,
     @IAgentScopeContext scopeContext: IAgentScopeContext,
     @ITaskService private readonly taskService: ITaskService,
     @IWireService private readonly wire: IWireService,
@@ -281,10 +282,14 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     this.states.register(taskActiveTaskReminderPendingKey);
     const fallbackRoot =
       scopeContext.agentId === 'main'
-        ? { dir: session.sessionDir, scope: session.scope() }
+        ? { dir: hostFiles.sessionDir ?? '', scope: session.scope() }
         : undefined;
     this.persistence = new AgentTaskPersistence(
-      join(session.sessionDir, 'agents', scopeContext.agentId),
+      // The display root of the task output paths (a wire-facing fact in the
+      // task output snapshot) comes from the lease's typed host-files
+      // capability; a host-files-less session degrades to the scope-relative
+      // display exactly like the pre-M8b empty-`sessionDir` fallback.
+      hostFiles.agentDir(scopeContext.agentId) ?? '',
       scopeContext.scope(),
       atomicDocs,
       byteStore,

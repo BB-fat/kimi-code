@@ -15,7 +15,10 @@ import type { McpConnectionManager, McpServerEntry } from '#/agent/mcp/connectio
 import { IAgentMcpService } from '#/agent/mcp/mcp';
 import { AgentMcpService } from '#/agent/mcp/mcpService';
 import { ISessionMcpService } from '#/session/mcp/sessionMcp';
-import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import {
+  ISessionHostFiles,
+  makeSessionHostFiles,
+} from '#/session/sessionHostFiles/sessionHostFiles';
 import type { McpOAuthService } from '#/agent/mcp/oauth/service';
 import type { MCPClient, MCPToolDefinition } from '#/agent/mcp/types';
 import { IWireService } from '#/wire/wire';
@@ -224,7 +227,10 @@ describe('AgentMcpService', () => {
       ensureMcpReady: () => Promise.resolve(),
       connectionManager: () => manager as unknown as McpConnectionManager,
     });
-    ix.stub(ISessionContext, { sessionDir: '/tmp/kimi-code-mcp-test' });
+    ix.stub(
+      ISessionHostFiles,
+      makeSessionHostFiles({ workspaceId: 'ws_test', sessionDir: '/tmp/kimi-code-mcp-test' }),
+    );
     const svc = ix.createInstance(AgentMcpService);
     disposables.add(svc);
     return svc;

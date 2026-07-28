@@ -6,9 +6,9 @@
  * `scope*(...)` methods and `configKey` are computed once at construction so
  * business code can read them synchronously. Path fields (`homeDir` / `*Dir` /
  * `configPath`) are kept alongside for now to ease migration, but new business
- * code should prefer `scope(name)` / `sessionScope(...)` / `agentScope(...)` —
- * only the file-only accessors (`sessionDir` / `agentHomedir`) still hand out
- * absolute paths, for the small number of legacy APIs that need them.
+ * code should prefer `scope(name)` — the only absolute per-session path
+ * builder left is `sessionDir(...)`, kept for the v1-compat surfaces (SDK
+ * summary, export manifest) documented on the interface.
  *
  * Bound at App scope.
  */
@@ -78,20 +78,8 @@ export class BootstrapService implements IBootstrapService {
     return this.scopes[name];
   }
 
-  sessionScope(workspaceId: string, sessionId: string): string {
-    return join(this.scopes.sessions, workspaceId, sessionId);
-  }
-
-  agentScope(workspaceId: string, sessionId: string, agentId: string): string {
-    return join(this.sessionScope(workspaceId, sessionId), 'agents', agentId);
-  }
-
   sessionDir(workspaceId: string, sessionId: string): string {
-    return join(this.homeDir, this.sessionScope(workspaceId, sessionId));
-  }
-
-  agentHomedir(workspaceId: string, sessionId: string, agentId: string): string {
-    return join(this.homeDir, this.agentScope(workspaceId, sessionId, agentId));
+    return join(this.homeDir, this.scopes.sessions, workspaceId, sessionId);
   }
 }
 

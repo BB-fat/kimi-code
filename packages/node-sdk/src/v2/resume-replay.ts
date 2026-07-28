@@ -68,7 +68,7 @@ export interface FoldedAgentReplay {
   readonly toolStore: Readonly<Record<string, unknown>>;
 }
 
-const EMPTY_FOLD: FoldedAgentReplay = { replay: [], toolStore: {} };
+export const EMPTY_FOLD: FoldedAgentReplay = { replay: [], toolStore: {} };
 
 /**
  * Read-only `AgentRecordPersistence` over an already-parsed journal. The

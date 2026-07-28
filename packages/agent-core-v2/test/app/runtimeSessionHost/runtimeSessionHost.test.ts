@@ -49,7 +49,7 @@ import { ILogService } from '#/_base/log/log';
 import { ILogOptions } from '#/_base/log/logConfig';
 import { createAppScope, type IAgentScopeHandle, type ISessionScopeHandle, type Scope } from '#/_base/di/scope';
 import { encodeWorkDirKey } from '#/_base/utils/workdir-slug';
-import { persistOriginalImage, sessionMediaOriginalsDir } from '#/agent/media/image-originals';
+import { persistOriginalImage } from '#/agent/media/image-originals';
 import { IAgentPlanService } from '#/agent/plan/plan';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentRPCService } from '#/agent/rpc/rpc';
@@ -92,7 +92,7 @@ import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IProtocolAdapterRegistry } from '#/kosong/protocol/protocol';
 import { IAgentLifecycleService, MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
 import { ensureMainAgent } from '#/session/agentLifecycle/mainAgent';
-import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import { ISessionHostFiles } from '#/session/sessionHostFiles/sessionHostFiles';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 
 import {
@@ -369,11 +369,12 @@ async function planRoundTrip(handle: ISessionScopeHandle): Promise<void> {
 }
 
 async function persistMedia(handle: ISessionScopeHandle): Promise<void> {
-  const ctx = handle.accessor.get(ISessionContext);
-  const dir = sessionMediaOriginalsDir(ctx.sessionDir);
+  const hostFiles = handle.accessor.get(ISessionHostFiles);
   // The M4 media-originals bug: this must never collapse to a cwd-relative
   // path on the runtime path.
-  expect(isAbsolute(dir)).toBe(true);
+  const dir = hostFiles.mediaOriginalsDir;
+  expect(dir === null || isAbsolute(dir)).toBe(true);
+  if (dir === null) throw new Error('expected a session media-originals dir');
   const saved = await persistOriginalImage(PNG_BYTES, 'image/png', { dir });
   expect(saved).not.toBeNull();
   expect(saved!.startsWith(dir)).toBe(true);
@@ -877,7 +878,7 @@ describe('runtimeSessionHost branch behavior', () => {
     app.registry.register(new StandaloneMemoryHostRuntime({ id: 'rt-mem' }));
 
     const scope = await app.host.create({ runtimeId: 'rt-mem', sessionId: 'pm-headless' });
-    // No `session.host_files` capability: the legacy config auto-enter is
+    // No host-files capability on the lease: the legacy config auto-enter is
     // skipped instead of writing a relative plan path into the host cwd.
     expect(scope.handle.accessor.get(IAgentLifecycleService).get(MAIN_AGENT_ID)).toBeUndefined();
     expect(existsSync(join(cwd, 'agents'))).toBe(false);

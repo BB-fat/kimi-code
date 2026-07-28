@@ -11,6 +11,7 @@ import {
   registerScopedService,
 } from '#/_base/di/scope';
 import { createScopedTestHost } from '#/_base/di/test';
+import type { ServiceIdentifier } from '#/_base/di/instantiation';
 import { ILogService } from '#/_base/log/log';
 import {
   logSeed,
@@ -20,6 +21,10 @@ import {
 import { AppLogService } from '#/_base/log/logService';
 import { SessionLogService } from '#/session/sessionLog/sessionLogService';
 import { makeSessionContext, sessionContextSeed } from '#/session/sessionContext/sessionContext';
+import {
+  ISessionHostFiles,
+  makeSessionHostFiles,
+} from '#/session/sessionHostFiles/sessionHostFiles';
 import { ISessionStateService } from '#/session/state/sessionState';
 import { SessionStateService } from '#/session/state/sessionStateService';
 
@@ -59,14 +64,18 @@ function buildHost() {
 }
 
 function testSessionSeed() {
-  return sessionContextSeed(makeSessionContext({
-    sessionId: 's1',
-    workspaceId: 'test-workspace',
-    sessionDir,
-    sessionScope: 'sessions/test-workspace/s1',
-    metaScope: 'sessions/test-workspace/s1/session-meta',
-    cwd: sessionDir,
-  }));
+  return [
+    ...sessionContextSeed(makeSessionContext({
+      sessionId: 's1',
+      workspaceId: 'test-workspace',
+      sessionScope: 'sessions/test-workspace/s1',
+      cwd: sessionDir,
+    })),
+    [
+      ISessionHostFiles as ServiceIdentifier<unknown>,
+      makeSessionHostFiles({ workspaceId: 'test-workspace', sessionDir }),
+    ] as const,
+  ];
 }
 
 async function readSessionLog(): Promise<string> {

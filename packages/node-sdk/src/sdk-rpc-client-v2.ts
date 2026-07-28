@@ -174,6 +174,7 @@ import {
   ISessionContext,
   ISessionCronService,
   ISessionExportService,
+  ISessionHostFiles,
   ISessionIndex,
   ISessionInitService,
   ISessionLifecycleService,
@@ -280,7 +281,7 @@ import {
 } from '#/v2/config-mapper';
 import { translateGlobalEvent } from '#/v2/event-mapper';
 import { assertImportFits, buildImportContextMessage } from '#/v2/import-context';
-import { foldAgentWireReplay } from '#/v2/resume-replay';
+import { EMPTY_FOLD, foldAgentWireReplay } from '#/v2/resume-replay';
 import {
   GlobalMcpConfigStore,
   mcpConfigWithoutName,
@@ -716,20 +717,26 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
 
   /**
    * The v1 summary of a live session, read from its own scope services (the
-   * metadata document, the context's cwd/sessionDir, the workspace context's
-   * additional dirs) rather than the index — no disk round-trip, and the
-   * additional dirs only exist on the live session in both engines.
+   * metadata document, the context's cwd, the lease's host-files capability
+   * for the host directory, the workspace context's additional dirs) rather
+   * than the index — no disk round-trip, and the additional dirs only exist
+   * on the live session in both engines.
    */
   private async liveSessionSummary(handle: ISessionScopeHandle): Promise<SessionSummary> {
     const meta = await handle.accessor.get(ISessionMetadata).read();
     const ctx = handle.accessor.get(ISessionContext);
+    const hostFiles = handle.accessor.get(ISessionHostFiles);
     const workspace = handle.accessor.get(ISessionWorkspaceContext);
     return {
       id: meta.id,
       title: meta.title,
       lastPrompt: meta.lastPrompt,
       workDir: ctx.cwd,
-      sessionDir: ctx.sessionDir,
+      // The v1 `sessionDir` field is a host path: Local sessions report the
+      // real directory through the lease's host-files capability; headless
+      // sessions degrade to the empty string exactly like the pre-M8b
+      // pathless context seed did.
+      sessionDir: hostFiles.sessionDir ?? '',
       createdAt: meta.createdAt,
       updatedAt: meta.updatedAt,
       archived: meta.archived,
@@ -763,14 +770,19 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       replay?.replayTurnLimit,
     );
     if (replay?.includeSubagents === true) {
-      const agentsDir = join(handle.accessor.get(ISessionContext).sessionDir, 'agents');
+      // The subagent roster is enumerated off the session's host directory
+      // (the lease's host-files capability); a host-files-less session has no
+      // agents directory to scan, so the main agent is the whole roster.
+      const sessionDir = handle.accessor.get(ISessionHostFiles).sessionDir;
       let subagentIds: readonly string[] = [];
-      try {
-        subagentIds = (await readdir(agentsDir, { withFileTypes: true }))
-          .filter((entry) => entry.isDirectory() && entry.name !== MAIN_AGENT_ID)
-          .map((entry) => entry.name);
-      } catch {
-        // No agents directory at all → the main agent is the whole roster.
+      if (sessionDir !== null) {
+        try {
+          subagentIds = (await readdir(join(sessionDir, 'agents'), { withFileTypes: true }))
+            .filter((entry) => entry.isDirectory() && entry.name !== MAIN_AGENT_ID)
+            .map((entry) => entry.name);
+        } catch {
+          // No agents directory at all → the main agent is the whole roster.
+        }
       }
       for (const agentId of subagentIds) {
         try {
@@ -814,12 +826,18 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   ): Promise<ResumedAgentState> {
     const facade = this.klient.session(session.id).agent(agent.id);
     const ctx = session.accessor.get(ISessionContext);
+    // The wire journal lives under the agent's host directory (the lease's
+    // host-files capability); a host-files-less session has no journal file
+    // to fold, so the replay degrades to the empty fold directly.
+    const agentDir = session.accessor.get(ISessionHostFiles).agentDir(agent.id);
     const [context, plan, usage, background, folded] = await Promise.all([
       facade.getContext(),
       facade.getPlan(),
       facade.getUsage(),
       facade.getTasks({ activeOnly: false }),
-      foldAgentWireReplay(join(ctx.sessionDir, 'agents', agent.id, 'wire.jsonl')),
+      agentDir === null
+        ? Promise.resolve(EMPTY_FOLD)
+        : foldAgentWireReplay(join(agentDir, 'wire.jsonl')),
     ]);
     const profile = agent.accessor.get(IAgentProfileService).data();
     return {

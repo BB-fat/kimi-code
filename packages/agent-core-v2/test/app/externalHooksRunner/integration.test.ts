@@ -172,8 +172,6 @@ function stubSessionContext(): ISessionContext {
     _serviceBrand: undefined,
     sessionId: 'session-1',
     workspaceId: 'workspace-1',
-    sessionDir: '/tmp/session-1',
-    metaScope: 'sessions/workspace-1/session-1',
     cwd: '/tmp',
     scope: (subKey?: string) =>
       subKey === undefined || subKey === ''
@@ -506,8 +504,6 @@ describe('IExternalHooksRunnerService integration', () => {
             _serviceBrand: undefined,
             sessionId: 'session-1',
             workspaceId: 'workspace-1',
-            sessionDir: '/tmp/session-1',
-            metaScope: 'sessions/workspace-1/session-1',
             cwd: '/tmp',
             scope: (subKey?: string) =>
               subKey === undefined || subKey === ''
@@ -841,8 +837,6 @@ describe('IExternalHooksRunnerService integration', () => {
             _serviceBrand: undefined,
             sessionId: 'session-1',
             workspaceId: 'workspace-1',
-            sessionDir: '/tmp/session-1',
-            metaScope: 'sessions/workspace-1/session-1',
             cwd,
             scope: (subKey?: string) =>
               subKey === undefined || subKey === ''

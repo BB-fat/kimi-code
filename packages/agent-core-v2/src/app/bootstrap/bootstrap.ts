@@ -69,10 +69,16 @@ export interface IBootstrapService {
   readonly logsDir: string;
   getEnv(name: string): string | undefined;
   scope(name: PersistenceScopeName): string;
-  sessionScope(workspaceId: string, sessionId: string): string;
-  agentScope(workspaceId: string, sessionId: string, agentId: string): string;
+  /**
+   * The absolute path of a LOCAL session's host directory
+   * (`<homeDir>/sessions/<wd_id>/<sessionId>`). Session Core never resolves
+   * it (the lease's typed `ISessionHostFiles` capability serves live
+   * sessions); the remaining callers are the v1-compat surfaces that must
+   * keep serving the path on their frozen wire shapes — the SDK's
+   * `SessionSummary.sessionDir` (node-sdk) and the export pipeline's ZIP
+   * manifest (`sessionExport`).
+   */
   sessionDir(workspaceId: string, sessionId: string): string;
-  agentHomedir(workspaceId: string, sessionId: string, agentId: string): string;
   readonly configKey: string;
 }
 

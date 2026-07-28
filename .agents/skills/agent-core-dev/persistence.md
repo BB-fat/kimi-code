@@ -70,14 +70,14 @@ Business code **never assembles scope strings from paths**. Scope strings come f
 The bootstrap layer decides how each semantic scope maps to concrete addressing. In the file deployment, `FileBootstrapService` reads a `ResolvedEnvironment` (the paths bag) and returns homeDir-relative scopes; a server deployment could bind a different `IBootstrapService` implementation that maps `'sessions'` to a DB table without any business change.
 
 ```ts
-// ❌ Wrong — path arithmetic on homeDir/sessionDir leaks the file layout
-const scope = relative(bootstrap.homeDir, join(session.sessionDir, 'agents', agentId, 'cron'));
+// ❌ Wrong — path arithmetic on the session's host directory leaks the file layout
+const scope = relative(bootstrap.homeDir, join(hostFiles.sessionDir ?? '', 'agents', agentId, 'cron'));
 
 // ✅ Right — the agent already knows its own scope root
 const scope = agentCtx.scope('cron');
 ```
 
-Absolute paths (`sessionDir`, `agentHomedir`) are still available on `IBootstrapService` for the very small number of legacy APIs that expose on-disk paths (session log rotation, background task tail file). Prefer scope strings; ask before adding a new absolute-path caller.
+Per-session absolute paths (the session log file, plan working documents, media originals, attachment and task display roots) arrive through the lease's typed `ISessionHostFiles` capability — Session-scoped, null on headless leases; `IBootstrapService.sessionDir(...)` remains only for the App-scope v1 surfaces that must serve the path on frozen wire shapes (the SDK summary/export). Prefer scope strings and the capability; ask before adding a new absolute-path caller.
 
 ## Which layer to depend on — decision tree
 

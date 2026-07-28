@@ -8,10 +8,13 @@
  * session never closes or unregisters the runtime.
  *
  * The contract is pathless and workspace-free (plan §1.4): no workspace
- * descriptors/ids, no `wd_id`, no cwd/`sessionDir` or other physical paths.
- * Concrete runtimes (Local workspace, remote workspace, standalone memory /
- * server) implement this interface behind their own adapters; the Workspace
- * domain's `IWorkspaceRuntime` extends it.
+ * descriptors/ids, no `wd_id`, no cwd/`sessionDir` or other physical paths on
+ * the contract fields themselves. The one sanctioned exception is the lease's
+ * typed `ISessionHostFiles` capability object (`ISessionRuntimeContext
+ * .hostFiles`, plan §7.2), which only runtimes owning a per-session host
+ * directory provide. Concrete runtimes (Local workspace, remote workspace,
+ * standalone memory / server) implement this interface behind their own
+ * adapters; the Workspace domain's `IWorkspaceRuntime` extends it.
  */
 
 import type { ISessionManager } from './sessionManager';
@@ -34,22 +37,21 @@ export type SessionRuntimeStatus = 'online' | 'offline' | 'degraded';
  * `ISessionOsCapabilities` (plan §7.4); the `session.*` family covers
  * runtime-provided session data planes.
  *
- * `session.host_files` is TRANSITIONAL: it marks contributions that still
- * need the legacy per-session host directory (`logs/`, plan working
- * documents, task output files, media originals). The Local workspace runtime
- * projects it — it owns that directory and contributes the `ISessionContext`
- * replacement backing it (`localSessionContextSeed.ts`); headless runtimes
- * (memory/server) never project it, so those contributions stay off their
- * activation path. M8 re-roots the consumers in lease artifacts (plan §7.5)
- * and drops this capability.
+ * `session.host_dir` marks a runtime that owns a per-session host directory
+ * (the Local workspace runtime): its leases carry the typed
+ * `ISessionHostFiles` capability object (`ISessionRuntimeContext.hostFiles`),
+ * and the registrations that cannot degrade without one — the session log
+ * writer, the plan-mode tools — stay gated on it. Headless runtimes (memory/
+ * server) never project it, so those registrations stay off their activation
+ * path and the remaining host-files consumers read the absent
+ * `NO_SESSION_HOST_FILES` view.
  */
 export type SessionRuntimeCapability =
   | 'os.filesystem'
   | 'os.process'
   | 'os.terminal'
   | 'os.watch'
-  | 'os.stdio'
-  | 'session.host_files'
+  | 'session.host_dir'
   | 'artifact.model_read'
   | 'session.cold_read'
   | 'session.export'

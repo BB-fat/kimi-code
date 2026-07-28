@@ -293,7 +293,6 @@ function createTestCtx(cwd = '/workspace'): ISessionContext {
   return makeSessionContext({
     sessionId: 's',
     workspaceId: 'w',
-    sessionDir: cwd,
     sessionScope: 'sessions/w/s',
     cwd,
   });

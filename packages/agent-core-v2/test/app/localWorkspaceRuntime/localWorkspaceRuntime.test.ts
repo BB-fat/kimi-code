@@ -489,14 +489,26 @@ describe('open/resume child lease', () => {
     expect(lease.artifacts).toBeDefined();
     expect(lease.coldReader).toBeDefined();
     expect([...lease.capabilities].toSorted()).toEqual([...env.runtime.capabilities()].toSorted());
-    // The lease carries the per-session `ISessionContext` replacement seed
-    // (the local host-facts contribution) beside the runtime's own (empty)
-    // contribution set.
+    // The lease carries the typed host-files capability (M8b): the local
+    // runtime owns this session's legacy host directory, so the real paths
+    // arrive with the context bundle — no contribution, no context-seed
+    // replacement.
     expect(lease.contributions.agentServices).toEqual([]);
     expect(lease.contributions.tools).toEqual([]);
-    expect(lease.contributions.sessionServices).toHaveLength(1);
-    const contextContribution = lease.contributions.sessionServices[0]!;
-    expect(contextContribution.requires).toEqual(['session.host_files']);
+    expect(lease.contributions.sessionServices).toEqual([]);
+    expect(lease.hostFiles?.workspaceId).toBe(env.workspaceId);
+    expect(lease.hostFiles?.sessionDir).toBe(
+      join(env.homeDir, 'sessions', env.workspaceId, created.ref.sessionId),
+    );
+    expect(lease.hostFiles?.sessionLogPath).toBe(
+      join(env.homeDir, 'sessions', env.workspaceId, created.ref.sessionId, 'logs', 'kimi-code.log'),
+    );
+    expect(lease.hostFiles?.agentDir('main')).toBe(
+      join(env.homeDir, 'sessions', env.workspaceId, created.ref.sessionId, 'agents', 'main'),
+    );
+    expect(lease.hostFiles?.planFilePath('main', 'p1')).toBe(
+      join(env.homeDir, 'sessions', env.workspaceId, created.ref.sessionId, 'agents', 'main', 'plans', 'p1.md'),
+    );
     // The lease projects the workspace root plus the runtime's shared
     // node-local OS handles (plan §7.4).
     expect(lease.os?.cwd).toBe(env.cwd);

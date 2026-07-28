@@ -65,11 +65,12 @@ export class EnterPlanModeTool implements IEnterPlanModeTool {
 registerAgentToolService(IEnterPlanModeTool, EnterPlanModeTool, {
   name: 'EnterPlanMode',
   domain: 'plan',
-  // The plan working document is a host file in the legacy session directory
+  // The plan working document is a host file in the session's host directory
   // (plan §7.5); only runtimes that own one (the Local workspace runtime)
-  // project the transitional capability. Headless leases keep plan mode
-  // file-less and these tools stay gated off.
-  requires: ['session.host_files'],
+  // project the `session.host_dir` capability and carry the typed
+  // `ISessionHostFiles` object on their leases. Headless leases keep plan
+  // mode file-less and these tools stay gated off.
+  requires: ['session.host_dir'],
 });
 
 function enteredPlanModeMessage(planPath: string | null): string {

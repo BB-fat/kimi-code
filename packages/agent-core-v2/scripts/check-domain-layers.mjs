@@ -92,9 +92,16 @@ const DOMAIN_LAYER = new Map([
   // publish/subscribe through, so it sits in L1 (not the edge boundary).
   ['event', 1],
   // `sessionContext` is the Session-scope seeded immutable facts value
-  // (`sessionId`/`workspaceId`/`sessionDir`/`metaScope`/`cwd`); a pure seed
-  // with no IO, so it sits in L1.
+  // (`sessionId`/`workspaceId`/`cwd` + the persistence scope helper); a pure
+  // seed with no IO, so it sits in L1.
   ['sessionContext', 1],
+  // `sessionHostFiles` is the typed host-files capability contract of a
+  // session lease (M8b): the DI token, the absent headless value and the
+  // within-session layout factory. A pure contract + path composition
+  // against a runtime-supplied root with no IO, so it sits in L1 beside
+  // `sessionContext`; only runtimes owning a host directory (the Local
+  // adapter) supply real roots.
+  ['sessionHostFiles', 1],
   // `scopeContext` is the Agent-scope seeded immutable facts value
   // (`agentId` plus a persistence scope helper); a pure seed with no IO, so it
   // sits in L1 beside `sessionContext`.
@@ -413,28 +420,48 @@ const KOSONG_BANNED_SDK_PACKAGES = ['@anthropic-ai/sdk', '@google/genai', 'opena
  *
  * Bans apply to production code (files under `src/`) and cover static,
  * dynamic and re-export imports alike (the shared IMPORT_RE).
+ *
+ * Multi-runtime refactor status (M8b, FINAL): the `ISessionContext` path
+ * fields (`sessionDir`/`metaScope`) and the bootstrap path builders
+ * (`sessionScope`/`agentScope`/`agentHomedir`) are DELETED, the transitional
+ * `localSessionContextSeed` + `session.host_files` capability is gone, and
+ * every host-path consumer reads the lease's typed `ISessionHostFiles`
+ * capability object (plan §7.2). The remaining AUTHORIZED path readers
+ * (plan §10.3: each keep an owner + reason here):
+ *
+ *   - `localWorkspaceRuntime` (owner: Local adapter) — the only domain that
+ *     knows the `sessions/<wd_id>/<sessionId>` bucket addressing; guarded
+ *     target-side by TARGET_IMPORT_ALLOWLIST below.
+ *   - `sessionHostFiles` (owner: Session Core contract) — the typed
+ *     capability contract + the frozen within-session layout conventions
+ *     (`logs/`, `agents/<id>/plans/`, `media-originals/`, `attachments/`)
+ *     composed against a runtime-supplied root; never touches the bucket
+ *     addressing or host IO.
+ *   - `sessionExport` (owner: v1-compat export pipeline, consumed by the
+ *     in-process SDK's `exportSession`) — the ZIP manifest's
+ *     `sessionDir`/`workspace_dir` are frozen wire fields; it computes the
+ *     absolute Local session dir through `IBootstrapService.sessionDir`,
+ *     the one bootstrap path builder kept for exactly this v1 surface (the
+ *     node-sdk `SessionSummary.sessionDir` field is the other consumer,
+ *     outside this package's import graph).
+ *   - `sessionIndex` (owner: App-scope v1 discovery) — `FileSessionIndex`
+ *     remains the App's local-deployment `ISessionIndex` backend serving the
+ *     v1 list/get surfaces (`workspaceSessions`, `messageLegacy`,
+ *     `sessionLifecycle` facade, `sessionExport`); its layout reads are its
+ *     own domain's business. kap-server cold surfaces route through the
+ *     runtime contracts instead (plan §7.6) and never import it.
+ *
+ * The bans below guard the domains that must NEVER see the Workspace domain
+ * or the layout helpers: the pathless contracts (`sessionHostRuntime`), the
+ * standalone memory runtime, the runtime-backed activation
+ * (`runtimeSession`), the composition host (`runtimeSessionHost`), the
+ * pathless Session-scope seeds (`sessionContext`) and the host-files
+ * capability contract (`sessionHostFiles`). `sessionLifecycle`'s Workspace
+ * imports (`workspace`, `workspaceRegistration`) are the facade's deliberate
+ * v1 compatibility job (the in-process SDK/klient contract still resolves
+ * workDirs through the Workspace catalog).
  */
 const DOMAIN_IMPORT_BANS = new Map([
-  // Multi-runtime refactor status (M8a): the legacy activation machine is
-  // deleted — `sessionLifecycle` is now a thin bare-id/workDir facade over
-  // `IRuntimeSessionHostService`, and its Workspace imports
-  // (`workspace`, `workspaceRegistration`) are the facade's deliberate v1
-  // compatibility job (the in-process SDK/klient contract still resolves
-  // workDirs through the Workspace catalog). The Session Core domains that
-  // must NEVER see the Workspace domain are guarded individually below:
-  // the pathless contracts (`sessionHostRuntime`), the standalone memory
-  // runtime, the runtime-backed activation (`runtimeSession`) and the
-  // composition host (`runtimeSessionHost`).
-  //
-  // TODO(multi-runtime M8b): the legacy layout helpers (`FileSessionIndex`'s
-  // layout reads, the bootstrap scope builders, `ISessionContext`'s
-  // `sessionDir`/`metaScope`) are still imported by the remaining v1
-  // surfaces (`sessionExport`, `sessionContext` seeds, `localWorkspaceRuntime`),
-  // so the plan §10.1 "layout helper only the Local adapter may import"
-  // rule cannot be enabled globally yet. M2 guards the NEW side instead
-  // (see TARGET_IMPORT_ALLOWLIST below); once M8b removes the context path
-  // fields and the remaining readers migrate onto the lease, extend the ban
-  // so no domain outside the Local adapter imports those helpers.
   [
     'sessionHostRuntime',
     {
@@ -516,6 +543,42 @@ const DOMAIN_IMPORT_BANS = new Map([
       specifiers: [],
       reason:
         'workspace registration/runtime management owns long-lived runtime leases and delegates to runtime.sessions (plan §7.7); the legacy session discovery/lifecycle/export machinery is not its business',
+    },
+  ],
+  [
+    'sessionContext',
+    {
+      domains: new Set([
+        'workspace',
+        'workspaceAliases',
+        'workspaceSessions',
+        'sessionIndex',
+        'bootstrap',
+        'localWorkspaceRuntime',
+        'persistence/backends',
+        'os/backends',
+      ]),
+      specifiers: [/^node:/, /^pathe$/],
+      reason:
+        'the Session-scope context seed is pathless pure facts (M8b, plan §7.2): identity, the opaque workspace bucket id, the logical initial cwd and the persistence scope helper — no host IO, no path math, no Workspace domain, no layout/index/bootstrap builders',
+    },
+  ],
+  [
+    'sessionHostFiles',
+    {
+      domains: new Set([
+        'workspace',
+        'workspaceAliases',
+        'workspaceSessions',
+        'sessionIndex',
+        'bootstrap',
+        'localWorkspaceRuntime',
+        'persistence/backends',
+        'os/backends',
+      ]),
+      specifiers: [/^node:/],
+      reason:
+        'the typed host-files capability contract composes the frozen within-session layout against a runtime-supplied root (plan §7.2) and nothing else: no bucket addressing (that is the Local adapter’s), no host IO, no Workspace domain, no layout/index/bootstrap readers',
     },
   ],
 ]);

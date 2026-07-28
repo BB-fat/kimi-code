@@ -2,9 +2,10 @@
  * `sessionMetadata` domain (L6) — `ISessionMetadata` implementation.
  *
  * Persists the session metadata document (`state.json`) through the `storage`
- * access-pattern store (`IAtomicDocumentStore`), rooted at the `metaScope`
- * namespace from `sessionContext`. Loads the existing document on
- * construction (creating it on first run), and logs through `log`. The
+ * access-pattern store (`IAtomicDocumentStore`), rooted at the session's own
+ * persistence namespace (`sessionContext.scope()`). Loads the existing
+ * document on construction (creating it on first run), and logs through
+ * `log`. The
  * plain-data state (`data`) is registered into `sessionState`
  * (`ISessionStateService`) and read/written through it. The
  * document always carries the `agents` / `custom` maps that v1's
@@ -76,7 +77,11 @@ export class SessionMetadata extends Disposable implements ISessionMetadata {
   ) {
     super();
     this.states.register(sessionMetadataDataKey);
-    this.scope = ctx.metaScope;
+    // The metadata document lives at the session's own persistence namespace
+    // (`state.json`) — the lease mints it as the legacy
+    // `sessions/<wd_id>/<sessionId>` scope on the local runtime, so the write
+    // lands exactly where the pre-refactor path put it.
+    this.scope = ctx.scope();
     this.onDidChangeMetadata = this._onDidChangeMetadata.event;
     this.ready = this.load();
   }

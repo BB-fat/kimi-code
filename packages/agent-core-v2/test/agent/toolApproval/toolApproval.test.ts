@@ -109,9 +109,7 @@ describe('AgentToolApprovalService', () => {
         reg.defineInstance(ISessionContext, makeSessionContext({
           sessionId: 'test-session',
           workspaceId: 'test-workspace',
-          sessionDir: '/tmp/test-session',
           sessionScope: 'sessions/test-workspace/test-session',
-          metaScope: 'sessions/test-workspace/test-session/session-meta',
           cwd: '/tmp/test-session',
         }));
         reg.defineInstance(ITelemetryService, recordingTelemetry(records));

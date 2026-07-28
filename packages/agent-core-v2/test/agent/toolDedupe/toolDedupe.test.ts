@@ -76,8 +76,6 @@ function createHarness(
         _serviceBrand: undefined,
         sessionId: 'session-1',
         workspaceId: 'workspace-1',
-        sessionDir: homedir,
-        metaScope: 'sessions/workspace-1/session-1',
         cwd: homedir,
         scope: (sub?: string): string =>
           sub ? `sessions/workspace-1/session-1/${sub}` : 'sessions/workspace-1/session-1',

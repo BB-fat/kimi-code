@@ -23,7 +23,22 @@ import { pino } from 'pino';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket, type RawData } from 'ws';
 
+import {
+  ISessionFsWatchService,
+  ISessionLifecycleService,
+  ISessionWorkspaceContext,
+  sessionRefKey,
+  type Scope,
+  type SessionRef,
+} from '@moonshot-ai/agent-core-v2';
+import type { FsChangeEvent } from '@moonshot-ai/agent-core-v2/session/sessionFs/fsWatch';
+
 import { startServer, type RunningServer } from '../src/start';
+import {
+  FS_WATCH_CODE,
+  FsWatchBridge,
+  type FsWatchConnection,
+} from '../src/transport/ws/v1/fsWatchBridge';
 
 let tmpDir: string;
 let bridgeHome: string;
@@ -399,5 +414,110 @@ describe('WS fs watch (kap-server)', () => {
     expect(ack.code).toBe(41304);
 
     conn.ws.close();
+  });
+});
+
+
+/* ------------------------------------------------------------------------ */
+/* FsWatchBridge unit cases (no server boot)                                */
+/* ------------------------------------------------------------------------ */
+
+interface FakeFsWatch {
+  paths: string[];
+  listeners: Array<(ev: FsChangeEvent) => void>;
+}
+
+function fakeSessionHandle(ref: SessionRef, watch: FakeFsWatch) {
+  const workspace = {
+    workDir: '/w',
+    resolve: (rel: string) => (rel.startsWith('/') ? rel : join('/w', rel)),
+    isWithin: (abs: string) => abs === '/w' || abs.startsWith('/w/'),
+    additionalDirs: [],
+  };
+  return {
+    id: ref.sessionId,
+    accessor: {
+      get(token: unknown): unknown {
+        if (token === ISessionFsWatchService) {
+          return {
+            setWatchedPaths: (paths: string[]) => {
+              watch.paths = [...paths];
+            },
+            onDidChangeFiles: (listener: (ev: FsChangeEvent) => void) => {
+              watch.listeners.push(listener);
+              return { dispose: () => {} };
+            },
+          };
+        }
+        if (token === ISessionWorkspaceContext) return workspace;
+        throw new Error('unexpected token');
+      },
+    },
+  };
+}
+
+function fakeCore(handles: Map<string, ReturnType<typeof fakeSessionHandle>>): Scope {
+  return {
+    accessor: {
+      get(token: unknown): unknown {
+        if (token === ISessionLifecycleService) {
+          return { getByRef: (ref: SessionRef) => handles.get(sessionRefKey(ref)) };
+        }
+        throw new Error('unexpected token');
+      },
+    },
+  } as unknown as Scope;
+}
+
+function fakeConn(id: string): FsWatchConnection & { readonly frames: unknown[] } {
+  const frames: unknown[] = [];
+  return { id, frames, send: (envelope) => frames.push(envelope) };
+}
+
+function changeEvent(path: string): FsChangeEvent {
+  return { changes: [{ path, change: 'created', kind: 'file' }], coalesced_window_ms: 200 };
+}
+
+describe('FsWatchBridge same-name runtime switch (M8b)', () => {
+  it('re-resolving the same bare id onto another ref evicts the stale watch', async () => {
+    const refA: SessionRef = { runtimeId: 'rt-a', sessionId: 's' };
+    const refB: SessionRef = { runtimeId: 'rt-b', sessionId: 's' };
+    const watchA: FakeFsWatch = { paths: [], listeners: [] };
+    const watchB: FakeFsWatch = { paths: [], listeners: [] };
+    const handles = new Map([
+      [sessionRefKey(refA), fakeSessionHandle(refA, watchA)],
+      [sessionRefKey(refB), fakeSessionHandle(refB, watchB)],
+    ]);
+    const bridge = new FsWatchBridge({ core: fakeCore(handles) });
+    const conn = fakeConn('c1');
+
+    const ack1 = await bridge.addWatch(conn, refA, ['src']);
+    expect(ack1.code).toBe(FS_WATCH_CODE.OK);
+    expect(ack1.current_count).toBe(1);
+    expect(watchA.paths).toEqual(['src']);
+
+    // The bare id re-resolves to a DIFFERENT ref (runtime switch): the
+    // connection must not stay subscribed under both — the stale watch is
+    // evicted and the path count does not double.
+    const ack2 = await bridge.addWatch(conn, refB, ['docs']);
+    expect(ack2.code).toBe(FS_WATCH_CODE.OK);
+    expect(ack2.current_count).toBe(1);
+    expect(ack2.watched_paths).toEqual(['docs']);
+    expect(watchA.paths).toEqual([]); // stale watch torn down
+    expect(watchB.paths).toEqual(['docs']);
+
+    // Events on the stale ref never reach the connection; events on the
+    // current ref do, projected onto the same bare session_id.
+    for (const listener of watchA.listeners) listener(changeEvent('src/a.ts'));
+    expect(conn.frames).toHaveLength(0);
+    for (const listener of watchB.listeners) listener(changeEvent('docs/b.md'));
+    expect(conn.frames).toHaveLength(1);
+    expect(conn.frames[0]).toMatchObject({ type: 'event.fs.changed', session_id: 's' });
+
+    // removeWatch by bare id hits the CURRENT watch, not the stale one.
+    const ack3 = await bridge.removeWatch(conn, 's', ['docs']);
+    expect(ack3.code).toBe(FS_WATCH_CODE.OK);
+    expect(ack3.current_count).toBe(0);
+    expect(watchB.paths).toEqual([]);
   });
 });

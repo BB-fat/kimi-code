@@ -17,7 +17,7 @@
  * pre-migration `flushLiveSession`.
  */
 
-import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, open, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -77,29 +77,22 @@ async function materializeEntries(
   entries: AsyncIterable<SessionExportEntry>,
   stagingDir: string,
 ): Promise<void> {
-  // TODO(M8): every entry's bytes are buffered whole (and the local runtime's
-  // export already pre-read the directory). The pre-migration zip pipeline
-  // streamed from disk; revisit the materialization as a streaming pass
-  // (entry content → staging file stream, or zip entries fed directly from
-  // the export stream) so large session exports stop buffering everything.
+  // Entry content streams straight to its staging file (the local runtime's
+  // export already reads lazily off disk), so a large session export never
+  // buffers an entry's bytes in memory (M8b).
   for await (const entry of entries) {
     const rel = entryRelativePath(entry);
     if (rel === undefined) continue;
     const target = join(stagingDir, rel);
     await mkdir(dirname(target), { recursive: true });
-    const chunks: Uint8Array[] = [];
-    let total = 0;
-    for await (const chunk of entry.content) {
-      chunks.push(chunk);
-      total += chunk.byteLength;
+    const handle = await open(target, 'w');
+    try {
+      for await (const chunk of entry.content) {
+        await handle.write(chunk);
+      }
+    } finally {
+      await handle.close();
     }
-    const bytes = new Uint8Array(total);
-    let offset = 0;
-    for (const chunk of chunks) {
-      bytes.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-    await writeFile(target, bytes);
   }
 }
 

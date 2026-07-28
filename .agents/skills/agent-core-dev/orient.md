@@ -86,10 +86,10 @@ Impl file example (`sessionMetadataService.ts`):
  * `sessionMetadata` domain (L6) — `ISessionMetadata` implementation.
  *
  * Persists the session metadata document (`state.json`) through the `storage`
- * access-pattern store (`IAtomicDocumentStore`), rooted at the `metaScope`
- * namespace from `sessionContext`. Loads the existing document on
- * construction (creating it on first run), and logs through `log`. Bound at
- * Session scope.
+ * access-pattern store (`IAtomicDocumentStore`), rooted at the session's own
+ * persistence namespace (`sessionContext.scope()`). Loads the existing
+ * document on construction (creating it on first run), and logs through
+ * `log`. Bound at Session scope.
  */
 ```
 

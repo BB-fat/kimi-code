@@ -40,6 +40,10 @@ import { ITelemetryService } from '#/app/telemetry/telemetry';
 import type { ToolCall } from '#/kosong/contract/message';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import {
+  ISessionHostFiles,
+  makeSessionHostFiles,
+} from '#/session/sessionHostFiles/sessionHostFiles';
 import { ToolAccesses } from '#/tool/toolContract';
 import type { ToolInputDisplay } from '#/tool/toolInputDisplay';
 
@@ -185,8 +189,11 @@ describe('AgentPlanService plan-guard listener', () => {
         );
         reg.definePartialInstance(ISessionContext, {
           sessionId: 'session-1',
-          sessionDir: SESSION_DIR,
         });
+        reg.defineInstance(
+          ISessionHostFiles,
+          makeSessionHostFiles({ workspaceId: 'ws-1', sessionDir: SESSION_DIR }),
+        );
         reg.definePartialInstance(IAgentContextMemoryService, {});
         reg.definePartialInstance(IAgentContextInjectorService, {
           register: () => ({ dispose: () => {} }),

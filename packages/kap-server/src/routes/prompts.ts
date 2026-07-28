@@ -21,6 +21,7 @@ import {
   IAuthSummaryService,
   IEventService,
   IFileService,
+  ISessionHostFiles,
   ISessionMetadata,
   buildKimiFileUrl,
   parseKimiFileUrl,
@@ -29,7 +30,6 @@ import {
   type ContentPart,
   type PromptHandle,
   type PromptQueueSnapshot,
-  ISessionContext,
   ITelemetryService,
   applyPromptMetadataUpdate,
   buildImageCompressionCaption,
@@ -44,7 +44,6 @@ import {
   normalizeImageMime,
   persistOriginalImage,
   resolveEffectiveImageMime,
-  sessionMediaOriginalsDir,
   unsupportedImageMimeFromUrl,
   type GetResult,
   type ImageCompressionTelemetry,
@@ -261,16 +260,19 @@ export function registerPromptsRoutes(app: PromptRouteHost, core: Scope): void {
         // provider form (upload / inline / `<video path>` tag) at request
         // time, so the edge no longer uploads.
         const telemetry = core.accessor.get(ITelemetryService).withContext({ sessionId: session_id });
+        // The session's media/attachment directories arrive through the
+        // lease's typed host-files capability (plan §7.2); a host-files-less
+        // session leaves them undefined and the media pipeline falls back to
+        // the shared temp/cache dirs.
+        const hostFiles = session.accessor.get(ISessionHostFiles);
         const resolvedBody = await resolvePromptMediaFiles(
           req.body,
           core.accessor.get(IFileService),
           core.accessor.get(IBootstrapService).cacheDir,
           {
             telemetry,
-            resolveOriginalsDir: async () =>
-              sessionMediaOriginalsDir(session.accessor.get(ISessionContext).sessionDir),
-            resolveAttachmentsDir: async () =>
-              join(session.accessor.get(ISessionContext).sessionDir, 'attachments'),
+            resolveOriginalsDir: async () => hostFiles.mediaOriginalsDir ?? undefined,
+            resolveAttachmentsDir: async () => hostFiles.attachmentsDir ?? undefined,
           },
         );
 
