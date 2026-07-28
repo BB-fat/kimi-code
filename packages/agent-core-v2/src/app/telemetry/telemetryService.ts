@@ -35,6 +35,7 @@ export class TelemetryService implements ITelemetryService {
     ITelemetryAppenderRegistration
   >();
   private readonly retirements = new Map<ITelemetryAppender, Promise<void>>();
+  private readonly retiredAppenders = new WeakSet<ITelemetryAppender>();
   private shutdownPromise: Promise<void> | null = null;
   private context: TelemetryProperties = {};
   private enabled = true;
@@ -73,6 +74,7 @@ export class TelemetryService implements ITelemetryService {
 
   addAppender(appender: ITelemetryAppender): ITelemetryAppenderRegistration {
     this.assertOpen();
+    this.assertReusable(appender);
     const existing = this.registrations.get(appender);
     if (existing !== undefined) return existing;
     this.startAppender(appender);
@@ -96,11 +98,25 @@ export class TelemetryService implements ITelemetryService {
     options?: TelemetryShutdownOptions,
   ): Promise<void> {
     this.assertOpen();
-    if (!this.appenders.includes(appender)) this.startAppender(appender);
+    this.assertReusable(appender);
+    const active = this.appenders.includes(appender);
     if (!this.registrations.has(appender)) this.createRegistration(appender);
     const previous = this.appenders.filter((candidate) => candidate !== appender);
     this.appenders = [appender];
     await Promise.all(previous.map((candidate) => this.retireAppender(candidate, options)));
+    if (
+      this.shutdownPromise === null &&
+      this.appenders.includes(appender) &&
+      !this.retiredAppenders.has(appender)
+    ) {
+      if (active) {
+        if (previous.length > 0) {
+          await this.invokeAppender(() => appender.recover?.());
+        }
+      } else {
+        this.startAppender(appender);
+      }
+    }
   }
 
   setEnabled(enabled: boolean): void {
@@ -154,6 +170,12 @@ export class TelemetryService implements ITelemetryService {
     }
   }
 
+  private assertReusable(appender: ITelemetryAppender): void {
+    if (this.retiredAppenders.has(appender)) {
+      throw new BugIndicatingError('Telemetry appender has already shut down');
+    }
+  }
+
   private retireAppender(
     appender: ITelemetryAppender,
     options?: TelemetryShutdownOptions,
@@ -165,8 +187,16 @@ export class TelemetryService implements ITelemetryService {
       }
       return retirement;
     }
+    if (this.retiredAppenders.has(appender)) return Promise.resolve();
+    this.retiredAppenders.add(appender);
+    this.registrations.delete(appender);
     const pending = this.invokeAppender(() => appender.shutdown?.(options));
     this.retirements.set(appender, pending);
+    void pending.then(() => {
+      if (this.retirements.get(appender) === pending) {
+        this.retirements.delete(appender);
+      }
+    });
     return pending;
   }
 

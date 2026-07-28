@@ -2,8 +2,8 @@
  * `telemetry` domain (L1) — cloud delivery and durable spool coverage.
  *
  * Exercises spool retention and capacity plus appender batching, durable
- * shutdown, startup replay, privacy, and wire shape through the real transport
- * and file-storage stack.
+ * shutdown, startup and replacement-handoff replay, privacy, and wire shape
+ * through the real transport and file-storage stack.
  */
 
 import { getEventListeners } from 'node:events';
@@ -27,6 +27,7 @@ import {
 import { FileStorageService } from '#/persistence/backends/node-fs/fileStorageService';
 import { CloudAppender, type CloudAppenderOptions } from '#/app/telemetry/cloudAppender';
 import { CloudTransport, type EnrichedCloudEvent } from '#/app/telemetry/cloudTransport';
+import { TelemetryService } from '#/app/telemetry/telemetryService';
 import { TelemetrySpoolStore } from '#/app/telemetry/telemetrySpoolStore';
 
 import { stubBootstrap } from '../bootstrap/stubs';
@@ -148,8 +149,28 @@ describe('TelemetrySpoolStore', () => {
     rmSync(homeDir, { recursive: true, force: true });
   });
 
-  it('recovery expires an old event after a newer write reaches the file cap', async () => {
+  it('recovery expires entries older than retention while keeping newer entries', async () => {
     const dayMs = 24 * 60 * 60 * 1000;
+    let now = 0;
+    const store = new TelemetrySpoolStore({
+      storage: new FileStorageService(homeDir),
+      maxFiles: 2,
+      now: () => now,
+    });
+
+    await store.put([spoolEvent('old')]);
+    now = 6 * dayMs;
+    await store.put([spoolEvent('new')]);
+    now = 8 * dayMs;
+
+    const entries = await store.recoverable(10);
+
+    expect(entries.flatMap((entry) => entry.events).map((event) => event.event)).toEqual([
+      'new',
+    ]);
+  });
+
+  it('put keeps the newest entries when file capacity is exceeded', async () => {
     let now = 0;
     const store = new TelemetrySpoolStore({
       storage: new FileStorageService(homeDir),
@@ -158,9 +179,8 @@ describe('TelemetrySpoolStore', () => {
     });
 
     await store.put([spoolEvent('old')]);
-    now = 6 * dayMs;
+    now = 1;
     await store.put([spoolEvent('new')]);
-    now = 8 * dayMs;
 
     const entries = await store.recoverable(10);
 
@@ -707,6 +727,63 @@ describe('CloudAppender', () => {
     await restartedAppender.shutdown();
 
     expect(replayed).toBe(1);
+    expect(listFailedSpoolFiles(homeDir)).toHaveLength(0);
+  });
+
+  it('setAppender replays events persisted while the previous appender retires', async () => {
+    const previous = new CloudAppender(
+      baseOptions({
+        homeDir,
+        fetchImpl: makeFetch(() => statusResponse(500)),
+      }),
+    );
+    const replayed: string[] = [];
+    const replacement = new CloudAppender(
+      baseOptions({
+        homeDir,
+        fetchImpl: makeFetch((request) => {
+          replayed.push(String(request.body.events[0]?.['event']));
+          return okResponse();
+        }),
+      }),
+    );
+    const service = new TelemetryService();
+    await service.setAppender(previous);
+    service.track('handoff');
+
+    await service.setAppender(replacement);
+    await replacement.flush();
+
+    expect(replayed).toEqual(['kfc_handoff']);
+    expect(listFailedSpoolFiles(homeDir)).toHaveLength(0);
+  });
+
+  it('setAppender recovers durable events when the replacement is already active', async () => {
+    const previous = new CloudAppender(
+      baseOptions({
+        homeDir,
+        fetchImpl: makeFetch(() => statusResponse(500)),
+      }),
+    );
+    const replayed: string[] = [];
+    const replacement = new CloudAppender(
+      baseOptions({
+        homeDir,
+        fetchImpl: makeFetch((request) => {
+          replayed.push(String(request.body.events[0]?.['event']));
+          return okResponse();
+        }),
+      }),
+    );
+    const service = new TelemetryService();
+    await service.setAppender(previous);
+    service.addAppender(replacement);
+    await replacement.flush();
+    previous.track('active_handoff');
+
+    await service.setAppender(replacement);
+
+    expect(replayed).toEqual(['kfc_active_handoff']);
     expect(listFailedSpoolFiles(homeDir)).toHaveLength(0);
   });
 

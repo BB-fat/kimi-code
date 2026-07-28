@@ -470,7 +470,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   private installEngineTelemetry(client: TelemetryClient | undefined): void {
     if (client === undefined) return;
     const telemetry = this.app.accessor.get(ITelemetryService);
-    telemetry.setAppender(client);
+    void telemetry.setAppender(client);
     void this.configReady.then(() => {
       telemetry.setEnabled(this.engineAccessor.get(IConfigService).get('telemetry') !== false);
     });

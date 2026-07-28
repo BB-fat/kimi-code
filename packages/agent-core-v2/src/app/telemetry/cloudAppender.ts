@@ -214,7 +214,13 @@ export class CloudAppender implements ITelemetryAppender {
     this.flushTimer = null;
   }
 
+  recover(): Promise<void> {
+    return this.retryDiskEvents();
+  }
+
   async retryDiskEvents(): Promise<void> {
+    const replay = this.replayPromise;
+    if (replay !== null) await replay;
     this.replayPending = true;
     await this.ensureReplay();
   }
