@@ -11,6 +11,10 @@
  * `append` concatenates into the same key slot `write` replaces, mirroring the
  * file implementation's single-namespace semantics so the two are
  * interchangeable for the facades above.
+ *
+ * Bytes are copied on the way in AND on the way out: mutating a written or a
+ * returned `Uint8Array` never touches the stored value, matching the fresh
+ * copy every disk read hands back in the file implementation.
  */
 
 import {
@@ -40,7 +44,7 @@ export class InMemoryStorageService implements IFileSystemStorageService {
   private readonly watchers = new Map<string, WatchEntry>();
 
   async read(scope: string, key: string): Promise<Uint8Array | undefined> {
-    return this.scopes.get(scope)?.get(key);
+    return this.scopes.get(scope)?.get(key)?.slice();
   }
 
   async *readStream(
@@ -51,12 +55,12 @@ export class InMemoryStorageService implements IFileSystemStorageService {
     const data = this.scopes.get(scope)?.get(key);
     if (data === undefined) return;
     if (range === undefined) {
-      yield data;
+      yield data.slice();
       return;
     }
     const start = Math.max(0, range.start);
     const end = Math.min(data.byteLength, range.end + 1);
-    if (start < end) yield data.subarray(start, end);
+    if (start < end) yield data.slice(start, end);
   }
 
   async write(
@@ -65,7 +69,7 @@ export class InMemoryStorageService implements IFileSystemStorageService {
     data: Uint8Array,
     _options: StorageWriteOptions = {},
   ): Promise<void> {
-    this.bucket(scope).set(key, data);
+    this.bucket(scope).set(key, data.slice());
     this.notifyWatchers(scope, key);
   }
 

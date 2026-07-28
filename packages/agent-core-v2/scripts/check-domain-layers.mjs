@@ -154,6 +154,12 @@ const DOMAIN_LAYER = new Map([
   // `_base` and the persistence/interface contracts; on top of the numeric
   // layer it carries the targeted import bans of Rule 4 (plan §10.1).
   ['sessionHostRuntime', 2],
+  // `standaloneMemoryRuntime` is the headless in-memory `ISessionHostRuntime`
+  // implementation (plan §4.5): a long-lived multi-session host used by
+  // standalone compositions and test harnesses. It builds on the L2 contracts
+  // and the L4 memory persistence backends, so it sits at L4 beside them; it
+  // also carries the Rule 4 bans that keep it workspace-free and fs-free.
+  ['standaloneMemoryRuntime', 4],
   // L3 — registries & capabilities
   ['tool', 3],
   ['skill', 3],
@@ -381,6 +387,21 @@ const DOMAIN_IMPORT_BANS = new Map([
       specifiers: [/^node:/],
       reason:
         'session-host-runtime contracts are pathless and workspace-free (plan §1.4/§10.1): no Workspace domain, no node builtins, no Local layout/index, no persistence/OS backends',
+    },
+  ],
+  [
+    'standaloneMemoryRuntime',
+    {
+      domains: new Set([
+        'workspace',
+        'workspaceAliases',
+        'workspaceSessions',
+        'sessionIndex',
+        'os/backends',
+      ]),
+      specifiers: [/^node:fs/, /^fs$/],
+      reason:
+        'the standalone memory runtime is headless and purely in-memory (plan §4.5): no Workspace domain, no Local layout/index, no OS backends, no filesystem I/O',
     },
   ],
 ]);
