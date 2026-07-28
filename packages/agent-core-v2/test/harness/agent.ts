@@ -15,6 +15,7 @@ import type { AgentTaskInfo } from '#/agent/task/task';
 import { IAgentBlobService } from '#/agent/blob/agentBlobService';
 import { AgentBlobServiceImpl } from '#/agent/blob/agentBlobServiceImpl';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
+import type { HostFsChange } from '#/os/interface/hostFsWatch';
 import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
 import { CHECKPOINTED_MODELS, type Checkpointed } from '#/agent/contextMemory/conversationTime';
 import type { ContextMessage } from '#/agent/contextMemory/types';
@@ -119,6 +120,7 @@ import {
   AgentSwarmService,
   ITelemetryService,
   IHostTerminalService,
+  IHostFsWatchService,
   IAgentToolRegistryService,
   IAgentToolActivationService,
   IAgentUserToolService,
@@ -1096,6 +1098,9 @@ export class AgentTestContext {
             );
           }
           reg.defineInstance(IHostTerminalService, createHostTerminalService());
+          // Real fs watching belongs outside the harness: sessions otherwise
+          // spin up chokidar handles on candidate skill roots for every test.
+          reg.defineInstance(IHostFsWatchService, createHostFsWatchService());
           reg.defineInstance(
             IHostEnvironment,
             {
@@ -2191,6 +2196,16 @@ function createHostTerminalService(): IHostTerminalService {
       write: () => { },
       resize: () => { },
       kill: () => { },
+    }),
+  };
+}
+
+function createHostFsWatchService(): IHostFsWatchService {
+  return {
+    _serviceBrand: undefined,
+    watch: () => ({
+      onDidChange: Event.None as Event<HostFsChange>,
+      dispose: () => { },
     }),
   };
 }

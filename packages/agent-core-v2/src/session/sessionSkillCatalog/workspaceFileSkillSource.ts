@@ -3,8 +3,10 @@
  *
  * Discovers project skills from the session's current `workDir`
  * (`workspaceContext`) through `ISkillDiscovery`, contributing them at priority
- * 30 (above user / extra / plugin / builtin). Bound at Session scope so each session reads
- * its own workspace root.
+ * 30 (above user / extra / plugin / builtin). Watches the candidate root paths
+ * (existing or not) through `SkillSourceWatcher` and re-fires `onDidChange` on
+ * debounced fs changes. Bound at Session scope so each session reads its own
+ * workspace root.
  */
 
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';
@@ -18,8 +20,10 @@ import {
 } from '#/app/skillCatalog/configSection';
 import { ISkillCatalogRuntimeOptions } from '#/app/skillCatalog/skillCatalogRuntimeOptions';
 import { ISkillDiscovery } from '#/app/skillCatalog/skillDiscovery';
-import { projectRoots } from '#/app/skillCatalog/skillRoots';
+import { projectRootCandidates, projectRoots } from '#/app/skillCatalog/skillRoots';
+import { SkillSourceWatcher } from '#/app/skillCatalog/skillSourceWatcher';
 import { SKILL_SOURCE_PRIORITY, type ISkillSource, type SkillContribution } from '#/app/skillCatalog/skillSource';
+import { IHostFsWatchService } from '#/os/interface/hostFsWatch';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 
 export interface IWorkspaceFileSkillSource extends ISkillSource {
@@ -36,14 +40,19 @@ export class WorkspaceFileSkillSource extends Disposable implements IWorkspaceFi
   readonly priority = SKILL_SOURCE_PRIORITY.workspace;
   private readonly onDidChangeEmitter = this._register(new Emitter<void>());
   readonly onDidChange: Event<void> = this.onDidChangeEmitter.event;
+  private readonly watcher: SkillSourceWatcher;
 
   constructor(
     @ISkillDiscovery private readonly discovery: ISkillDiscovery,
     @ISessionWorkspaceContext private readonly workspace: ISessionWorkspaceContext,
     @IConfigService private readonly config: IConfigService,
     @ISkillCatalogRuntimeOptions private readonly runtimeOptions: ISkillCatalogRuntimeOptions,
+    @IHostFsWatchService hostFsWatch: IHostFsWatchService,
   ) {
     super();
+    this.watcher = this._register(
+      new SkillSourceWatcher(hostFsWatch, () => this.onDidChangeEmitter.fire()),
+    );
     this._register(
       this.config.onDidSectionChange((event) => {
         if (event.domain === MERGE_ALL_AVAILABLE_SKILLS_SECTION) this.onDidChangeEmitter.fire();
@@ -58,6 +67,7 @@ export class WorkspaceFileSkillSource extends Disposable implements IWorkspaceFi
     await this.config.ready;
     const mergeAllAvailableSkills =
       this.config.get<MergeAllAvailableSkillsConfig>(MERGE_ALL_AVAILABLE_SKILLS_SECTION) ?? true;
+    this.watcher.setPaths(await projectRootCandidates(this.workspace.workDir));
     return this.discovery.discover(await projectRoots(this.workspace.workDir, { mergeAllAvailableSkills }));
   }
 }

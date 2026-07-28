@@ -47,10 +47,12 @@ import { ISessionStateService } from '#/session/state/sessionState';
 import { SessionStateService } from '#/session/state/sessionStateService';
 import { ISkillDiscovery } from '#/app/skillCatalog/skillDiscovery';
 import type { SkillRoot } from '#/app/skillCatalog/types';
+import { IHostFsWatchService } from '#/os/interface/hostFsWatch';
 
 import { stubBootstrap } from '../../app/bootstrap/stubs';
 import { stubSkill } from '../../app/skillCatalog/stubs';
 import { stubProviderService } from '../../app/provider/stubs';
+import { stubHostFsWatch, type StubHostFsWatch } from '../../os/stubs';
 
 const bootstrapStub = stubBootstrap('/home');
 
@@ -156,6 +158,7 @@ function makeHost(
   pluginReloadEmitter?: Emitter<ReloadSummary>,
 ) {
   const config = configStub();
+  const watch = stubHostFsWatch();
   const runtimeOptions = {
     _serviceBrand: undefined,
     explicitDirs,
@@ -166,9 +169,10 @@ function makeHost(
     stubPair(IConfigService, config),
     stubPair(ISkillCatalogRuntimeOptions, runtimeOptions),
     stubPair(IPluginService, pluginStub(pluginRoots, pluginReloadEmitter)),
+    stubPair(IHostFsWatchService, watch),
   ]);
   const session = host.child(LifecycleScope.Session, 's1', [stubPair(ISessionWorkspaceContext, ws)]);
-  return { host, session, config };
+  return { host, session, config, watch };
 }
 
 function waitForEvents(event: Event<unknown>, count: number): Promise<void> {
@@ -363,6 +367,7 @@ describe('SessionSkillCatalogService', () => {
       stubPair(IConfigService, config),
       stubPair(ISkillCatalogRuntimeOptions, runtimeOptions),
       stubPair(IPluginService, pluginStub()),
+      stubPair(IHostFsWatchService, stubHostFsWatch()),
     ]);
     const session = host.child(LifecycleScope.Session, 's1', [stubPair(ISessionWorkspaceContext, ws)]);
 
@@ -402,6 +407,7 @@ describe('SessionSkillCatalogService', () => {
       stubPair(IConfigService, config),
       stubPair(ISkillCatalogRuntimeOptions, runtimeOptions),
       stubPair(IPluginService, pluginStub()),
+      stubPair(IHostFsWatchService, stubHostFsWatch()),
     ]);
     const session = host.child(LifecycleScope.Session, 's1', [stubPair(ISessionWorkspaceContext, ws)]);
 
@@ -619,6 +625,7 @@ describe('SessionSkillCatalogService', () => {
         _serviceBrand: undefined,
       } as unknown as ISkillCatalogRuntimeOptions),
       stubPair(IPluginService, pluginStub()),
+      stubPair(IHostFsWatchService, stubHostFsWatch()),
     ]);
     const session = host.child(LifecycleScope.Session, 's1', [
       stubPair(ISessionWorkspaceContext, ws),
@@ -678,6 +685,7 @@ describe('SessionSkillCatalogService', () => {
         _serviceBrand: undefined,
       } as unknown as ISkillCatalogRuntimeOptions),
       stubPair(IPluginService, pluginService),
+      stubPair(IHostFsWatchService, stubHostFsWatch()),
     ]);
     const session = host.child(LifecycleScope.Session, 's1', [
       stubPair(ISessionWorkspaceContext, ws),
@@ -736,6 +744,7 @@ describe('SessionSkillCatalogService', () => {
         _serviceBrand: undefined,
       } as unknown as ISkillCatalogRuntimeOptions),
       stubPair(IProviderService, stubProviderService()),
+      stubPair(IHostFsWatchService, stubHostFsWatch()),
     ]);
     const { stub: ws } = workspaceStub('/work');
     const session = host.child(LifecycleScope.Session, 's1', [
@@ -780,6 +789,93 @@ describe('SessionSkillCatalogService', () => {
     } finally {
       host.dispose();
       await rm(homeDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reloads the user source after a debounced fs event under a watched root', async () => {
+    const store = new InMemorySkillDiscovery();
+    store.setUserSkills([stubSkill('initial')]);
+    const { stub: ws } = workspaceStub('/work');
+    const { host, session, watch } = makeHost(store, ws);
+
+    try {
+      const catalog = session.accessor.get(ISessionSkillCatalog);
+      await catalog.load();
+      expect(catalog.catalog.getSkill('initial')).toBeDefined();
+      expect(watch.watchedPaths()).toContain('/home/skills');
+      expect(watch.watchedPaths()).toContain('/home/test/.agents/skills');
+
+      store.setUserSkills([stubSkill('initial'), stubSkill('added')]);
+      const refreshed = new Promise<string>((resolve) => {
+        const subscription = catalog.onDidChange((sourceId) => {
+          subscription.dispose();
+          resolve(sourceId);
+        });
+      });
+      watch.fire('/home/test/.agents/skills/added/SKILL.md', { action: 'created' });
+      const sourceId = await refreshed;
+
+      expect(sourceId).toBe('user');
+      expect(catalog.catalog.getSkill('added')).toBeDefined();
+    } finally {
+      host.dispose();
+    }
+  });
+
+  it('reloads the workspace source after an fs event under a project skills root', async () => {
+    const store = new InMemorySkillDiscovery();
+    const { stub: ws } = workspaceStub('/work');
+    const { host, session, watch } = makeHost(store, ws);
+
+    try {
+      const catalog = session.accessor.get(ISessionSkillCatalog);
+      await catalog.load();
+      expect(watch.watchedPaths()).toContain('/work/.kimi-code/skills');
+      expect(watch.watchedPaths()).toContain('/work/.agents/skills');
+
+      store.setProjectSkills([stubSkill('project-added')]);
+      const refreshed = new Promise<string>((resolve) => {
+        const subscription = catalog.onDidChange((sourceId) => {
+          subscription.dispose();
+          resolve(sourceId);
+        });
+      });
+      watch.fire('/work/.agents/skills/project-added/SKILL.md', { action: 'created' });
+      const sourceId = await refreshed;
+
+      expect(sourceId).toBe('workspace');
+      expect(catalog.catalog.getSkill('project-added')).toBeDefined();
+    } finally {
+      host.dispose();
+    }
+  });
+
+  it('keeps the previous contribution when a watch-triggered reload fails', async () => {
+    const store = new InMemorySkillDiscovery();
+    store.setUserSkills([stubSkill('initial')]);
+    let failDiscovery = false;
+    const discovery: ISkillDiscovery = {
+      _serviceBrand: undefined,
+      discover: async (roots) => {
+        if (failDiscovery) throw new Error('scan failed');
+        return store.discover(roots);
+      },
+    };
+    const { stub: ws } = workspaceStub('/work');
+    const { host, session, watch } = makeHost(discovery, ws);
+
+    try {
+      const catalog = session.accessor.get(ISessionSkillCatalog);
+      await catalog.load();
+      expect(catalog.catalog.getSkill('initial')).toBeDefined();
+
+      failDiscovery = true;
+      watch.fire('/home/test/.agents/skills/added/SKILL.md', { action: 'created' });
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      expect(catalog.catalog.getSkill('initial')).toBeDefined();
+    } finally {
+      host.dispose();
     }
   });
 });

@@ -62,6 +62,35 @@ export async function configuredRoots(
   return roots;
 }
 
+/**
+ * Watch candidates: every plausible root path WITHOUT existence filtering, so
+ * file watchers can also observe a skills directory being created mid-session
+ * (chokidar reports paths that appear after the watch was armed).
+ */
+export function userRootCandidates(homeDir: string, osHomeDir: string): readonly string[] {
+  return [
+    ...USER_BRAND_DIRS.map((dir) => path.join(homeDir, dir)),
+    ...USER_GENERIC_DIRS.map((dir) => path.join(osHomeDir, dir)),
+  ];
+}
+
+export async function projectRootCandidates(workDir: string): Promise<readonly string[]> {
+  const projectRoot = await findProjectRoot(workDir);
+  return [
+    ...PROJECT_BRAND_DIRS.map((dir) => path.join(projectRoot, dir)),
+    ...PROJECT_GENERIC_DIRS.map((dir) => path.join(projectRoot, dir)),
+  ];
+}
+
+export async function configuredRootCandidates(
+  dirs: readonly string[],
+  workDir: string,
+  osHomeDir: string,
+): Promise<readonly string[]> {
+  const projectRoot = await findProjectRoot(workDir);
+  return dirs.map((dir) => resolveConfiguredDir(dir, projectRoot, osHomeDir));
+}
+
 async function findProjectRoot(workDir: string): Promise<string> {
   const start = path.resolve(workDir);
   let current = start;

@@ -191,6 +191,10 @@ const DOMAIN_LAYER = new Map([
   ['contextInjector', 4],
   ['agentPlugin', 4],
   ['systemReminder', 4],
+  // `dateChange` owns the `date_change` context-injection provider (stale
+  // system-prompt date announcement) — agent behaviour beside the other
+  // injection owners.
+  ['dateChange', 4],
   ['contextProjector', 4],
   ['contextSize', 4],
   ['fullCompaction', 4],
@@ -513,6 +517,12 @@ const ALLOWED_EXCEPTIONS = new Set([
   'replayBuilder>sessionMetadata',
   'skill>contextMemory',
   'skill>prompt',
+  // `skillListReminder` (skill, L3) owns the `skill_list` context-injection
+  // provider: it registers through `contextInjector` (L4) and reads the
+  // rendered system prompt from `profile` (L4) as its diff baseline — the same
+  // shape as the `permissionMode>contextInjector` exception.
+  'skill>contextInjector',
+  'skill>profile',
   'swarm>sessionMetadata',
   'btw>agentLifecycle',
   'toolExecutor>loop',

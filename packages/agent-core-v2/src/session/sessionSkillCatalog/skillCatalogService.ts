@@ -60,7 +60,11 @@ export class SessionSkillCatalogService
     this.states.register(skillCatalogMergedKey);
     this.sources = [builtin, user, explicit, extra, workspace, plugin].toSorted((a, b) => a.priority - b.priority);
     for (const s of this.sources) {
-      if (s.onDidChange) this._register(s.onDidChange(() => { void this.reloadSource(s.id); }));
+      if (s.onDidChange) {
+        // A failed source reload keeps the previous contribution (skip this
+        // update); the catch only silences the otherwise-unhandled rejection.
+        this._register(s.onDidChange(() => { void this.reloadSource(s.id).catch(() => undefined); }));
+      }
     }
     this.ready = this.loadAll();
   }
