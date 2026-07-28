@@ -28,6 +28,7 @@ import { ProfileErrors } from '#/agent/profile/errors';
 import { PromptErrors } from '#/agent/prompt/errors';
 import { ModelsDevImportErrors } from '#/app/kosongConfig/errors';
 import { SessionExportErrors } from '#/app/sessionExport/errors';
+import { SessionHostRuntimeErrors } from '#/app/sessionHostRuntime/errors';
 import { SessionErrors } from '#/session/errors';
 import { SkillErrors } from '#/app/skillCatalog/errors';
 import { StorageErrors } from '#/persistence/interface/storage';
@@ -61,6 +62,7 @@ export { ProfileErrors } from '#/agent/profile/errors';
 export { PromptErrors } from '#/agent/prompt/errors';
 export { ModelsDevImportErrors } from '#/app/kosongConfig/errors';
 export { SessionExportErrors } from '#/app/sessionExport/errors';
+export { SessionHostRuntimeErrors } from '#/app/sessionHostRuntime/errors';
 export { SessionErrors } from '#/session/errors';
 export { SkillErrors } from '#/app/skillCatalog/errors';
 export { StorageErrors } from '#/persistence/interface/storage';
@@ -91,6 +93,7 @@ export const ErrorCodes = {
   ...PromptErrors.codes,
   ...ModelsDevImportErrors.codes,
   ...SessionExportErrors.codes,
+  ...SessionHostRuntimeErrors.codes,
   ...SessionErrors.codes,
   ...SkillErrors.codes,
   ...StorageErrors.codes,

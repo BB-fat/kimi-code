@@ -15,6 +15,21 @@
  * The surface is read through the public `/openapi.json` endpoint rather than
  * by inspecting Fastify's route table directly — keeping this a behavior-only
  * guardrail over the wire contract.
+ *
+ * The second test is the multi-runtime refactor's frozen v1 wire baseline
+ * (plan §9.8/§10.2): the FULL normalized OpenAPI `paths` + `components` (so
+ * any request/response schema, error-envelope or pagination change diffs),
+ * the full AsyncAPI `channels` + `operations` + `components` (every WS
+ * control/system/event frame with its payload schema), and the WS
+ * `protocol_version`. Any v1 surface addition/removal or wire change fails
+ * this snapshot. Regenerate intentionally with `pnpm vitest run -u`.
+ *
+ * The baseline snapshots one JSON STRING per shard (per route, per schema,
+ * per WS frame) rather than one large object: @vitest/pretty-format's
+ * per-depth output budget silently prints composites past the budget as
+ * `[Object]`/`[Array]`, which once truncated the whole WS section and the
+ * tail routes out of the snapshot. Do not collapse the shards back into a
+ * single object snapshot.
  */
 
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -24,6 +39,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { startServer, type RunningServer } from '../src';
+import { WS_PROTOCOL_VERSION } from '../src/protocol/ws-control';
 import { authHeaders } from './helpers/auth';
 
 /** OpenAPI path-item keys that are HTTP methods (skip `parameters`, etc.). */
@@ -101,5 +117,75 @@ describe('API surface snapshot', () => {
     meta.sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]) || a[2] - b[2]);
 
     expect({ routes, meta }).toMatchSnapshot();
+  });
+
+  it('matches the frozen v1 wire baseline (OpenAPI + AsyncAPI + protocol version)', async () => {
+    home = mkdtempSync(join(tmpdir(), 'kimi-server-v2-wire-baseline-'));
+
+    server = await startServer({
+      host: '127.0.0.1',
+      port: 0,
+      homeDir: home,
+      logLevel: 'silent',
+      debugEndpoints: true,
+    });
+
+    const base = `http://${server.host}:${server.port}`;
+
+    // Full documented REST wire: every operation's parameters, request body,
+    // responses and shared schemas. `info`/doc-level metadata is excluded
+    // (version churn is not a wire change).
+    const openApiRes = await fetch(`${base}/openapi.json`, { headers: authHeaders(server) } as never);
+    expect(openApiRes.status).toBe(200);
+    const openApi = (await openApiRes.json()) as Record<string, unknown>;
+
+    // Full documented WebSocket wire: every control/system/event frame with
+    // its payload schema, derived from the same `wsOperations` manifest the
+    // connection handler enforces.
+    const asyncApiRes = await fetch(`${base}/asyncapi.json`, { headers: authHeaders(server) } as never);
+    expect(asyncApiRes.status).toBe(200);
+    const asyncApi = (await asyncApiRes.json()) as Record<string, unknown>;
+
+    // Sharding & stringification are load-bearing, do NOT "simplify" this
+    // into one big object snapshot: @vitest/pretty-format enforces a per-
+    // depth output budget (maxOutputLength) and silently prints every
+    // composite value past the budget as `[Object]`/`[Array]`. A whole-
+    // document object snapshot truncated the entire WS section and the tail
+    // routes that way (review finding B1). Snapshotting one JSON STRING per
+    // shard keeps every byte in the snapshot (strings are primitives and
+    // bypass the budget), and one named snapshot per shard keeps keys stable
+    // when unrelated shards change.
+    const snap = (name: string, value: unknown): void => {
+      expect(`${name}\n${JSON.stringify(value, null, 2)}`).toMatchSnapshot(name);
+    };
+    const sortedEntries = (obj: unknown): Array<[string, unknown]> =>
+      Object.entries((obj ?? {}) as Record<string, unknown>).sort(([a], [b]) =>
+        a.localeCompare(b),
+      );
+
+    snap('WS protocol_version', WS_PROTOCOL_VERSION);
+
+    // REST: one snapshot per route path-item, then one per OpenAPI component.
+    for (const [path, pathItem] of sortedEntries(openApi['paths'])) {
+      snap(`REST ${path}`, pathItem);
+    }
+    for (const [section, sectionValue] of sortedEntries(openApi['components'])) {
+      if (section === 'schemas') {
+        for (const [name, schema] of sortedEntries(sectionValue)) {
+          snap(`REST schema ${name}`, schema);
+        }
+      } else {
+        snap(`REST components.${section}`, sectionValue);
+      }
+    }
+
+    // WS: channels/operations wholesale, then one snapshot per frame message
+    // (control + ack + system + session_event payload schemas).
+    snap('WS channels', asyncApi['channels']);
+    snap('WS operations', asyncApi['operations']);
+    const wsComponents = (asyncApi['components'] ?? {}) as Record<string, unknown>;
+    for (const [id, message] of sortedEntries(wsComponents['messages'])) {
+      snap(`WS frame ${id}`, message);
+    }
   });
 });

@@ -66,4 +66,70 @@ describe('check-domain-layers', () => {
     );
     expect(violations).toHaveLength(0);
   });
+
+  it('flags sessionHostRuntime importing the Workspace domain', () => {
+    const violations = checkSource(
+      `import { IWorkspaceService } from '#/app/workspace/workspaceService';`,
+      at('sessionHostRuntime', 'sessionService.ts'),
+    );
+    expect(violations).toHaveLength(1);
+    expect(violations[0]?.message).toMatch(/sessionHostRuntime.*must not import domain 'workspace'/);
+    expect(violations[0]?.message).toMatch(/pathless and workspace-free/);
+  });
+
+  it('flags sessionHostRuntime importing node builtins and backends', () => {
+    const fromNode = checkSource(
+      `import { readFileSync } from 'node:fs';`,
+      at('sessionHostRuntime', 'sessionRuntimeContext.ts'),
+    );
+    expect(fromNode).toHaveLength(1);
+    expect(fromNode[0]?.message).toMatch(/must not import 'node:fs'/);
+
+    const fromBackend = checkSource(
+      `import { AppendLogStore } from '#/persistence/backends/node-fs/appendLogStore';`,
+      at('sessionHostRuntime', 'sessionRuntimeContext.ts'),
+    );
+    expect(fromBackend).toHaveLength(1);
+    expect(fromBackend[0]?.message).toMatch(/must not import domain 'persistence\/backends'/);
+
+    const fromIndex = checkSource(
+      `import { something } from '#/app/sessionIndex/sessionIndex';`,
+      at('sessionHostRuntime', 'sessionService.ts'),
+    );
+    expect(fromIndex).toHaveLength(1);
+    expect(fromIndex[0]?.message).toMatch(/must not import domain 'sessionIndex'/);
+  });
+
+  it('flags sessionHostRuntime bans through re-exports and dynamic import', () => {
+    const reExport = checkSource(
+      `export { IWorkspaceService } from '#/app/workspace/workspace';`,
+      at('sessionHostRuntime', 'index.ts'),
+    );
+    expect(reExport).toHaveLength(1);
+
+    const dynamic = checkSource(
+      `const m = await import('#/app/workspace/workspaceService');`,
+      at('sessionHostRuntime', 'sessionService.ts'),
+    );
+    expect(dynamic).toHaveLength(1);
+  });
+
+  it('allows sessionHostRuntime to import _base and persistence/interface', () => {
+    const violations = checkSource(
+      [
+        `import { createDecorator } from '#/_base/di/instantiation';`,
+        `import type { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';`,
+      ].join('\n'),
+      at('sessionHostRuntime', 'sessionRuntimeContext.ts'),
+    );
+    expect(violations).toHaveLength(0);
+  });
+
+  it('does not apply the sessionHostRuntime bans to other domains', () => {
+    const violations = checkSource(
+      `import { IWorkspaceService } from '#/app/workspace/workspaceService';`,
+      at('sessionLifecycle', 'sessionLifecycleService.ts'),
+    );
+    expect(violations).toHaveLength(0);
+  });
 });

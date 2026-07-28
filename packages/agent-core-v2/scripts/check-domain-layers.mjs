@@ -27,6 +27,12 @@
  *         exempt.
  *     Kosong directories that do not exist yet are skipped silently (later
  *     refactor phases add them).
+ *  4. **Targeted import bans** — per-domain bans that cannot be expressed as
+ *     numeric layers (multi-runtime refactor guards, plan §10.1). The
+ *     `sessionHostRuntime` contracts (Session identity, ISessionRuntimeContext
+ *     and the host-runtime base domain) must stay pathless and
+ *     workspace-free: no Workspace domain, no node builtins, no Local
+ *     layout/index and no persistence/OS backends.
  *
  * Intra-package relative imports and `#/`-alias imports are resolved to a
  * domain by the first path segment under `src/`. Sibling packages
@@ -142,6 +148,12 @@ const DOMAIN_LAYER = new Map([
   ['model', 2],
   ['sessionIndex', 2],
   ['sessionStore', 2],
+  // `sessionHostRuntime` holds the pathless, workspace-free multi-runtime
+  // session contracts (SessionRef, ISessionHostRuntime/ISessionManager,
+  // ISessionRuntimeContext, registry, routing service). It depends only on
+  // `_base` and the persistence/interface contracts; on top of the numeric
+  // layer it carries the targeted import bans of Rule 4 (plan §10.1).
+  ['sessionHostRuntime', 2],
   // L3 — registries & capabilities
   ['tool', 3],
   ['skill', 3],
@@ -330,6 +342,48 @@ const KOSONG_BASE_ONLY_SUBDOMAINS = new Set(['contract', 'protocol', 'provider',
  * covers the SDK ban for `protocol`.
  */
 const KOSONG_BANNED_SDK_PACKAGES = ['@anthropic-ai/sdk', '@google/genai', 'openai'];
+
+/**
+ * Rule 4 — targeted per-domain import bans (multi-runtime refactor guards,
+ * plan §10.1). Each entry bans one source domain from importing:
+ *
+ *   - `domains`: resolved v2 target domains. For `sessionHostRuntime` these
+ *     are the Workspace domain branches (`workspace`, `workspaceAliases`,
+ *     `workspaceSessions`), the Local session discovery machinery
+ *     (`sessionIndex`, home of the FileSessionIndex readers) and every
+ *     persistence/OS backend — the generic contracts only see
+ *     `persistence/interface` and `_base`.
+ *   - `specifiers`: raw-specifier bans covering node builtins (`node:fs` and
+ *     friends) — the generic session-host-runtime contracts are pathless and
+ *     must not touch host I/O directly.
+ *
+ * Bans apply to production code (files under `src/`) and cover static,
+ * dynamic and re-export imports alike (the shared IMPORT_RE).
+ */
+const DOMAIN_IMPORT_BANS = new Map([
+  // TODO(multi-runtime): as the refactor milestones land, extend this table
+  // beyond `sessionHostRuntime` — M4/M5 must ban the domains that import
+  // `#/app/workspace/**` today (e.g. `sessionLifecycle`, `sessionExport`)
+  // once their workspace coupling is removed, and M8 should cover every
+  // remaining Session Core domain. Do not leave this skeleton guarding only
+  // the M0 contracts.
+  [
+    'sessionHostRuntime',
+    {
+      domains: new Set([
+        'workspace',
+        'workspaceAliases',
+        'workspaceSessions',
+        'sessionIndex',
+        'persistence/backends',
+        'os/backends',
+      ]),
+      specifiers: [/^node:/],
+      reason:
+        'session-host-runtime contracts are pathless and workspace-free (plan §1.4/§10.1): no Workspace domain, no node builtins, no Local layout/index, no persistence/OS backends',
+    },
+  ],
+]);
 
 /**
  * Parse an absolute path under `src/kosong/` into its subdomain info.
@@ -614,6 +668,30 @@ export function checkSource(source, absFile) {
     if (sourceDomain === undefined) continue; // top-level barrel / non-domain file
     const targetAbs = resolveIntraV2(specifier, absFile);
     const sourceKosong = kosongInfoOf(absFile);
+
+    // Rule 4: targeted per-domain import bans (plan §10.1).
+    const importBan = DOMAIN_IMPORT_BANS.get(sourceDomain);
+    if (importBan !== undefined) {
+      if (importBan.specifiers.some((re) => re.test(specifier))) {
+        violations.push({
+          file: absFile,
+          line,
+          message: `'${sourceDomain}' must not import '${specifier}' — ${importBan.reason}`,
+        });
+        continue;
+      }
+      if (targetAbs !== undefined) {
+        const bannedTarget = targetDomainOf(targetAbs);
+        if (bannedTarget !== undefined && importBan.domains.has(bannedTarget)) {
+          violations.push({
+            file: absFile,
+            line,
+            message: `'${sourceDomain}' must not import domain '${bannedTarget}' via '${specifier}' — ${importBan.reason}`,
+          });
+          continue;
+        }
+      }
+    }
 
     // Rule 3a: kosong purity bans on external packages. The L0 contract
     // imports no external package at all (no SDKs, not even types); the L1
