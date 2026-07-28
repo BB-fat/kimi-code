@@ -435,7 +435,7 @@ export class LocalWorkspaceSessionManager implements ISessionManager {
     return new LocalSessionColdReader(this.storage, this.workspaceId, {
       runtimeId: this.runtimeId,
       sessionId,
-    });
+    }, this.homeDir);
   }
 
   async *export(
@@ -532,6 +532,7 @@ export class LocalWorkspaceSessionManager implements ISessionManager {
       this.caps,
       this.contributions,
       this.osHandles,
+      this.homeDir,
       (closed) => {
         if (this.leases.get(sessionId) === closed) this.leases.delete(sessionId);
       },
@@ -727,6 +728,11 @@ export class LocalWorkspaceSessionManager implements ISessionManager {
 
   /** Collect every regular file under the session directory (symlinks excluded). */
   private async walkSessionDir(sessionDir: string): Promise<readonly SessionDirFile[]> {
+    // TODO(M8): this pre-reads every file's bytes up front (the export entry
+    // stream then carries them in memory). The pre-migration zip pipeline
+    // streamed from disk; when the export data plane is revisited, switch the
+    // `blob` entries to lazy byte sources so a large session export no longer
+    // buffers the whole directory.
     const files: SessionDirFile[] = [];
     const walk = async (dir: string, relBase: string): Promise<void> => {
       let entries;

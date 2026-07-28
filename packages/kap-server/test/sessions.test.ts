@@ -270,6 +270,40 @@ describe('server-v2 /api/v1/sessions', () => {
     expect(manifest.desktopLogPath).toBe('logs/kimi-desktop.log');
   });
 
+  it('keeps manifest.workspaceDir empty after the workspace is unregistered (baseline behavior)', async () => {
+    const created = await postJson<SessionWire>('/api/v1/sessions', {
+      metadata: { cwd: home as string },
+    });
+    const id = created.body.data.id;
+    const workspaceId = created.body.data.workspace_id;
+
+    const deleted = await deleteJson<{ deleted: boolean }>(`/api/v1/workspaces/${workspaceId}`);
+    expect(deleted.body.code).toBe(0);
+
+    const res = await fetch(`${base}/api/v1/sessions/${id}/export`, {
+      method: 'POST',
+      headers: authHeaders(server as RunningServer, {
+        'content-type': 'application/json',
+        connection: 'close',
+      }),
+      body: '{}',
+    } as never);
+    const archive = Buffer.from(await res.arrayBuffer());
+    expect(res.status).toBe(200);
+    const entries = readZipEntries(archive);
+    const manifest = JSON.parse(entries.get('manifest.json')?.toString('utf8') ?? 'null') as {
+      sessionId: string;
+      workspaceDir?: string;
+    };
+    // The pre-migration baseline fills `workspaceDir` from the workspace
+    // catalog only: an unregistered (tombstoned) workspace exports with the
+    // field absent — never the session's own persisted cwd (plan §9.8).
+    expect(manifest.sessionId).toBe(id);
+    expect(manifest.workspaceDir).toBeUndefined();
+    // The session's own files still travel with the archive.
+    expect(entries.has('state.json')).toBe(true);
+  });
+
   async function createStoppedGoalRig(status: 'paused' | 'blocked') {
     const cwd = home as string;
     const created = await postJson<SessionWire>('/api/v1/sessions', { metadata: { cwd } });
@@ -821,6 +855,26 @@ describe('server-v2 /api/v1/sessions', () => {
     const childChildren = await getJson<PageWire>(`/api/v1/sessions/${childId}/children`);
     expect(childChildren.body.code).toBe(0);
     expect(childChildren.body.data.items.some((s) => s.id === grandchildId)).toBe(true);
+  });
+
+  it('hides an archived child from the children list (baseline archived exclusion)', async () => {
+    const cwd = home as string;
+    const parent = await postJson<SessionWire>('/api/v1/sessions', { metadata: { cwd } });
+    const parentId = parent.body.data.id;
+    const kept = await postJson<SessionWire>(`/api/v1/sessions/${parentId}/children`, {});
+    const archivedChild = await postJson<SessionWire>(`/api/v1/sessions/${parentId}/children`, {});
+    const archivedId = archivedChild.body.data.id;
+
+    const beforeArchive = await getJson<PageWire>(`/api/v1/sessions/${parentId}/children`);
+    expect(beforeArchive.body.data.items.some((s) => s.id === archivedId)).toBe(true);
+
+    const archived = await postJson(`/api/v1/sessions/${archivedId}:archive`, {});
+    expect(archived.body.code).toBe(0);
+
+    const afterArchive = await getJson<PageWire>(`/api/v1/sessions/${parentId}/children`);
+    expect(afterArchive.body.code).toBe(0);
+    expect(afterArchive.body.data.items.some((s) => s.id === archivedId)).toBe(false);
+    expect(afterArchive.body.data.items.some((s) => s.id === kept.body.data.id)).toBe(true);
   });
 
   it('does not list a plain fork as a child (kind must be "child")', async () => {

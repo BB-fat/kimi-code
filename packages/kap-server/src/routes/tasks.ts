@@ -17,12 +17,13 @@
  * sets) — the same field/literal mapping v1 performs in
  * `packages/agent-core/src/services/task/task.ts`.
  *
- * **Resolution**: `core` → `ISessionIndex` (existence, → 40401) →
- * `ISessionLifecycleService` (live session handle) → `IAgentLifecycleService`
- * (the `main` agent) → `IAgentTaskService`. When the session is not live or
- * has no main agent yet (server-v2 gap G10 — the main agent is not created on
- * session creation), there is no task service: `list` returns an empty page
- * and `get`/`cancel` answer `40406`.
+ * **Resolution** (M5a): the bare id resolves through the v1
+ * `IV1SessionRefResolver` (existence, → 40401; ambiguous/unavailable → the
+ * frozen 50001 mapping) → `ISessionLifecycleService` (live session handle) →
+ * `IAgentLifecycleService` (the `main` agent) → `IAgentTaskService`. When the
+ * session is not live or has no main agent yet (server-v2 gap G10 — the main
+ * agent is not created on session creation), there is no task service:
+ * `list` returns an empty page and `get`/`cancel` answer `40406`.
  *
  * **Error mapping**:
  *   - unknown session            → `40401` (session.not_found)
@@ -40,7 +41,6 @@
 
 import {
   IAgentTaskService,
-  ISessionIndex,
   ISessionLifecycleService,
   type AgentTaskInfo,
   type Scope,
@@ -56,6 +56,10 @@ import {
 import type { Task, TaskKind, TaskStatus } from '../protocol/task';
 import { z } from 'zod';
 
+import {
+  createV1SessionRefResolver,
+  v1ResolveFailureEnvelope,
+} from '../app/v1Compatibility/v1SessionRefResolver';
 import { errEnvelope, okEnvelope } from '../envelope';
 import { requestLog } from '../lib/requestLog';
 import { defineRoute } from '../middleware/defineRoute';
@@ -122,6 +126,10 @@ export function registerTasksRoutes(app: TasksRouteHost, core: Scope): void {
         reply.send(sessionNotFound(session_id, req.id));
         return;
       }
+      if (resolved.kind === 'failed') {
+        reply.send(v1ResolveFailureEnvelope({ kind: resolved.result }, session_id, req.id));
+        return;
+      }
 
       // `list(false)` = include terminal (ghost) tasks, matching v1 which
       // lists everything and filters by wire status in-memory.
@@ -157,6 +165,10 @@ export function registerTasksRoutes(app: TasksRouteHost, core: Scope): void {
       const resolved = await resolveSessionTasks(core, session_id);
       if (resolved.kind === 'not_found') {
         reply.send(sessionNotFound(session_id, req.id));
+        return;
+      }
+      if (resolved.kind === 'failed') {
+        reply.send(v1ResolveFailureEnvelope({ kind: resolved.result }, session_id, req.id));
         return;
       }
 
@@ -241,6 +253,10 @@ export function registerTasksRoutes(app: TasksRouteHost, core: Scope): void {
         reply.send(sessionNotFound(session_id, req.id));
         return;
       }
+      if (resolved.kind === 'failed') {
+        reply.send(v1ResolveFailureEnvelope({ kind: resolved.result }, session_id, req.id));
+        return;
+      }
 
       // Pre-fetch so we can distinguish 40406 (not found) from 40904 (already
       // finished) deterministically — `IAgentTaskService.stop` does not
@@ -265,19 +281,25 @@ export function registerTasksRoutes(app: TasksRouteHost, core: Scope): void {
 }
 
 // ---------------------------------------------------------------------------
-// Resolution — walk core → session → main agent → `IAgentTaskService`.
-// Returns `{kind:'not_found'}` when the session does not exist (→ 40401). A
-// missing live session / main agent yields `{kind:'resolved', tasks: undefined}`
-// (gap G10), which `list` treats as empty and `get`/`cancel` treat as 40406.
+// Resolution — bare id → v1 ref resolver (existence, → 40401; ambiguous /
+// unavailable → the frozen 50001 mapping) → `ISessionLifecycleService` (live
+// session handle) → `IAgentLifecycleService` (the `main` agent) →
+// `IAgentTaskService`. When the session is not live or has no main agent yet
+// (server-v2 gap G10 — the main agent is not created on session creation),
+// there is no task service: `list` returns an empty page and `get`/`cancel`
+// answer `40406`. The task DATA stays a live dependency (M5a migrates only
+// the cold existence check).
 // ---------------------------------------------------------------------------
 
 type ResolvedTasks =
   | { readonly kind: 'not_found' }
+  | { readonly kind: 'failed'; readonly result: 'ambiguous' | 'unavailable' }
   | { readonly kind: 'resolved'; readonly tasks: IAgentTaskService | undefined };
 
 async function resolveSessionTasks(core: Scope, sid: string): Promise<ResolvedTasks> {
-  const summary = await core.accessor.get(ISessionIndex).get(sid);
-  if (summary === undefined) return { kind: 'not_found' };
+  const resolved = await createV1SessionRefResolver(core).resolve(sid);
+  if (resolved.kind === 'not_found') return { kind: 'not_found' };
+  if (resolved.kind !== 'resolved') return { kind: 'failed', result: resolved.kind };
 
   const session = core.accessor.get(ISessionLifecycleService).get(sid);
   if (session === undefined) return { kind: 'resolved', tasks: undefined };

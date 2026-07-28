@@ -22,6 +22,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import type { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { SessionHostRuntimeRegistry } from '#/app/sessionHostRuntime/sessionHostRuntimeRegistry';
+import type { IWorkspaceService } from '#/app/workspace/workspace';
 import type { WorkspaceRuntimeRef } from '#/app/workspaceRegistration/workspaceRuntimeManager';
 import { WorkspaceRuntimeManagerService } from '#/app/workspaceRegistration/workspaceRuntimeManagerService';
 import { WorkspaceSessionServiceImpl } from '#/app/workspaceRegistration/workspaceSessionServiceImpl';
@@ -32,6 +33,31 @@ import {
   FakeRemoteWorkspaceProvider,
   FakeRemoteWorkspaceRuntime,
 } from '../../harness/remoteWorkspaceRuntime';
+
+/** Minimal catalog stub: no workspaces unless a test seeds them. */
+function stubWorkspaceService(entries: { id: string; root: string }[] = []): IWorkspaceService {
+  return {
+    _serviceBrand: undefined,
+    list: async () =>
+      entries.map((entry) => ({
+        ...entry,
+        name: entry.id,
+        createdAt: 0,
+        lastOpenedAt: 0,
+      })),
+    get: async (id: string) => {
+      const found = entries.find((entry) => entry.id === id);
+      return found === undefined
+        ? undefined
+        : { ...found, name: found.id, createdAt: 0, lastOpenedAt: 0 };
+    },
+    createOrTouch: async () => {
+      throw new Error('not implemented in stub');
+    },
+    update: async () => undefined,
+    delete: async () => {},
+  };
+}
 
 interface Env {
   readonly homeDir: string;
@@ -45,7 +71,7 @@ interface Env {
   readonly C: WorkspaceRuntimeRef;
 }
 
-async function makeEnv(): Promise<Env> {
+async function makeEnv(options?: { catalog?: { id: string; root: string }[] }): Promise<Env> {
   const homeDir = await mkdtemp(join(tmpdir(), 'wsreg-home-'));
   const rootA = await mkdtemp(join(tmpdir(), 'wsreg-a-'));
   const rootB = await mkdtemp(join(tmpdir(), 'wsreg-b-'));
@@ -59,6 +85,7 @@ async function makeEnv(): Promise<Env> {
     registry,
     { homeDir } as IBootstrapService,
     new FileStorageService(homeDir, 0o700, 0o600),
+    stubWorkspaceService(options?.catalog ?? []),
   );
   const facade = new WorkspaceSessionServiceImpl(manager);
   const remoteProvider = new FakeRemoteWorkspaceProvider();
@@ -190,6 +217,73 @@ describe('WorkspaceRuntimeManagerService registration (plan §7.7)', () => {
     await env.facade.update(env.A.workspaceId, 'same', { metadata: { title: 'A session' } });
     expect((await env.facade.get(env.B.workspaceId, 'same'))?.metadata['title']).toBeUndefined();
     expect((await env.facade.get(env.A.workspaceId, 'same'))?.metadata['title']).toBe('A session');
+  });
+
+  it('ensureDiscovered registers runtimes for on-disk buckets the catalog does not know', async () => {
+    const env = await makeEnv();
+    const storage = new FileStorageService(env.homeDir, 0o700, 0o600);
+    // A bucket whose workspace was never cataloged (or was tombstoned): the
+    // root comes back from the session's own metadata document.
+    const meta = {
+      id: 'legacy1',
+      version: 2,
+      cwd: '/legacy/root',
+      createdAt: 1,
+      updatedAt: 2,
+      archived: false,
+      agents: {},
+      custom: {},
+    };
+    await storage.write('sessions/wd_legacy/legacy1', 'state.json', jsonDocumentCodec.encode(meta), {
+      atomic: true,
+    });
+    // A bucket with no readable metadata is skipped (no root source).
+    await storage.write('sessions/wd_orphan/orphan1', 'state.json', new TextEncoder().encode('{{'), {
+      atomic: true,
+    });
+
+    const runtimes = await env.manager.ensureDiscovered();
+    expect(runtimes.map((runtime) => runtime.id)).toEqual(['local-workspace_wd_legacy']);
+    expect(env.manager.getRuntime('wd_legacy')).toBe(runtimes[0]);
+    expect(env.manager.getRuntime('wd_orphan')).toBeUndefined();
+
+    // The discovered runtime serves the retained session immediately.
+    const descriptor = await runtimes[0]?.sessions.get('legacy1');
+    expect(descriptor?.ref).toEqual({ runtimeId: 'local-workspace_wd_legacy', sessionId: 'legacy1' });
+    expect(descriptor?.metadata['cwd']).toBe('/legacy/root');
+
+    // Repeat calls are pure reuse — no second registration, no provider churn.
+    const again = await env.manager.ensureDiscovered();
+    expect(again).toHaveLength(1);
+    expect(again[0]).toBe(runtimes[0]);
+    expect(env.registry.list()).toHaveLength(1);
+  });
+
+  it('ensureDiscovered prefers the catalog root over the bucket-recovered one', async () => {
+    const rootA = await mkdtemp(join(tmpdir(), 'wsreg-cat-'));
+    afterEach(async () => {
+      await rm(rootA, { recursive: true, force: true });
+    });
+    const env = await makeEnv({ catalog: [{ id: 'wd_a', root: rootA }] });
+    const storage = new FileStorageService(env.homeDir, 0o700, 0o600);
+    // A legacy v1-shaped document (workDir, ISO timestamps, no version): the
+    // bucket recovery still finds a root, but the catalog entry wins.
+    await storage.write(
+      'sessions/wd_a/s1',
+      'state.json',
+      jsonDocumentCodec.encode({ id: 's1', workDir: '/stale/spelling', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' }),
+      { atomic: true },
+    );
+
+    const runtimes = await env.manager.ensureDiscovered();
+    expect(runtimes).toHaveLength(1);
+    // The runtime was opened with the catalog root: sessions created through
+    // it stamp the catalog spelling, not the stale bucket one.
+    const created = await runtimes[0]!.sessions.create({ sessionId: 's2' });
+    expect(created.metadata['cwd']).toBe(rootA);
+    // … while the pre-existing v1-shaped session reads back normalized.
+    const legacy = await runtimes[0]!.sessions.get('s1');
+    expect(legacy?.ref.sessionId).toBe('s1');
   });
 });
 

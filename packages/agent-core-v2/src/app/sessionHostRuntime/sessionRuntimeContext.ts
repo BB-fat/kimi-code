@@ -192,6 +192,16 @@ export interface ISessionColdReader {
   listAgents(): Promise<readonly AgentDescriptor[]>;
   readRecords(query: ColdRecordQuery): AsyncIterable<ColdRecord>;
   readArtifact(ref: ArtifactRef, options?: ReadArtifactOptions): Promise<ReadableStream<Uint8Array>>;
+  /**
+   * OPTIONAL opaque revision token for one agent's record stream (plan §5.9:
+   * the runtime derives revisions from its existing storage facts, never from
+   * an added watermark). It changes whenever the stream's content may have
+   * changed, so edge readers can use it as a cache key; `undefined` means the
+   * stream is absent (or the runtime cannot tell). Runtimes without a cheap
+   * revision source omit the method — callers must then treat every read as
+   * uncacheable.
+   */
+  recordsRevision?(agentId: string): Promise<string | undefined>;
 }
 
 /* ------------------------------------------------------------------------ */

@@ -86,6 +86,20 @@ export interface IWorkspaceRuntimeManager {
   ): Promise<IWorkspaceRuntime>;
 
   /**
+   * Composition catch-up (plan §3.1/§7.7): ensure every LOCALLY discoverable
+   * session bucket has a registered runtime, so bare-id lookups cover the
+   * same session set the legacy session index sees — including buckets whose
+   * workspace was tombstoned or never cataloged (their sessions stay
+   * readable under the v1 rules). Already-registered workspaces are reused;
+   * buckets with no recoverable root are skipped. Returns every runtime
+   * currently registered with the manager.
+   *
+   * This opens/registers runtimes — it belongs to composition and to the v1
+   * compatibility edge's resolver, never to ordinary session CRUD.
+   */
+  ensureDiscovered(): Promise<readonly IWorkspaceRuntime[]>;
+
+  /**
    * Detach the workspace's runtime: block new child leases, close live
    * session leases and the runtime, then drop registry routing. Session data
    * is retained — re-registering the same workspace revives it. A no-op for

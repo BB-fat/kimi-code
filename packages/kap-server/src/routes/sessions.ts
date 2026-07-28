@@ -91,7 +91,6 @@ import {
   ISessionSecondaryModelWarningService,
   IEventService,
   IWorkspaceAliases,
-  IWorkspaceService,
   isError2,
   Error2,
   toProtocolMessage,
@@ -128,6 +127,17 @@ import { workspaceIdSchema } from '../protocol/workspace';
 import { z } from 'zod';
 
 import { createV1WorkspaceSession } from '../app/v1Compatibility/v1WorkspaceSessionAdapter';
+import {
+  createV1SessionRefResolver,
+  v1ResolveFailureEnvelope,
+} from '../app/v1Compatibility/v1SessionRefResolver';
+import {
+  buildV1ProjectionLookups,
+  projectV1Session,
+  resolveV1SessionView,
+  v1SessionViewFailureEnvelope,
+  type V1SessionSummaryFields,
+} from '../app/v1Compatibility/v1SessionProjection';
 import { errEnvelope, okEnvelope } from '../envelope';
 import { requestLog } from '../lib/requestLog';
 import { defineRoute } from '../middleware/defineRoute';
@@ -314,14 +324,21 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
       const pageSize = raw.page_size;
       const archivedOnly = raw.archived_only === true;
 
-      const workspaces = await core.accessor.get(IWorkspaceService).list();
-      const roots = new Map(workspaces.map((w) => [w.id, w.root]));
+      // M5a: the session set comes from the v1 ref resolver's cross-runtime
+      // fan-out (plan §5.5) instead of `ISessionIndex`. `listAll` runs the
+      // discovery catch-up FIRST — the projection lookups built after it see
+      // the registrations a cold process had not opened yet, and its catalog
+      // read doubles as the `roots` map below (one catalog query per request).
+      const resolver = createV1SessionRefResolver(core);
+      const resolutions = await resolver.listAll();
+      const lookups = await buildV1ProjectionLookups(core);
+      const roots = lookups.rootByWorkspaceId;
 
       // v1 resolves `workspace_id` to its root and 40410s when it is unknown;
       // the existence check stays on the listed (root-deduped) registry so an
       // unknown id fails byte-identically, and only then is a known id
       // expanded to every id spelling of the same directory — legacy split
-      // buckets (casing/slash variants) list as one workspace.
+      // buckets list as one workspace.
       if (raw.workspace_id !== undefined && !roots.has(raw.workspace_id)) {
         reply.send(
           errEnvelope(
@@ -333,19 +350,27 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
         return;
       }
 
-      // `FileSessionIndex` does not implement `cursor` (gap G5 closed here), so
-      // we fetch the full recency-sorted set (no `limit`) and apply the id
-      // cursor in this handler. `list()` already orders by `updatedAt` desc and
-      // filters across the workspace-id set / archived. `archived_only` forces
-      // archived rows into the set, then the filter below keeps only them.
+      // Each runtime's page is projected onto the same summary shape the index
+      // produced, merged and re-sorted here; the id-cursor/page-size semantics
+      // below are untouched, so `before_id`/`after_id`/`page_size`/`items`/
+      // `has_more` behave the same. `archived_only` forces archived rows into
+      // the set, then the filter below keeps only them.
       const workspaceIds =
         raw.workspace_id === undefined
           ? undefined
           : await core.accessor.get(IWorkspaceAliases).resolveAliasIds(raw.workspace_id);
-      const page = await core.accessor.get(ISessionIndex).list({
-        workspaceIds,
-        includeArchived: archivedOnly ? true : raw.include_archive,
-      });
+      const includeArchived = archivedOnly ? true : raw.include_archive;
+      const summaries: V1SessionSummaryFields[] = [];
+      for (const resolution of resolutions) {
+        const view = projectV1Session(resolution, lookups);
+        if (view === undefined) continue;
+        if (workspaceIds !== undefined && !workspaceIds.includes(view.workspaceId)) continue;
+        if (includeArchived !== true && view.summary.archived) continue;
+        summaries.push(view.summary);
+      }
+      // Cross-runtime merge: one global recency ordering over all runtimes'
+      // pages (stable sort; identical `updatedAt` keeps fan-out order).
+      const sortedSummaries = summaries.toSorted((a, b) => b.updatedAt - a.updatedAt);
 
       // Filter down to the sequence the client can page over BEFORE computing
       // the cursor position. `cwd` is read from the session's own summary first
@@ -354,11 +379,11 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
       // written before `cwd` was persisted. A session with no recoverable cwd is
       // still skipped.
       const eligible: {
-        readonly summary: (typeof page.items)[number];
+        readonly summary: V1SessionSummaryFields;
         readonly cwd: string;
         readonly facts?: SessionFacts;
       }[] = [];
-      for (const summary of page.items) {
+      for (const summary of sortedSummaries) {
         const cwd = summary.cwd ?? roots.get(summary.workspaceId);
         if (cwd === undefined) continue;
         if (raw.exclude_empty === true && (summary.lastPrompt ?? '').length === 0) continue;
@@ -433,29 +458,19 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
     },
     async (req, reply) => {
       const { session_id } = req.params;
-      const summary = await core.accessor.get(ISessionIndex).get(session_id);
-      if (summary === undefined) {
-        reply.send(
-          errEnvelope(ErrorCode.SESSION_NOT_FOUND, `session ${session_id} does not exist`, req.id),
-        );
-        return;
-      }
-      const cwd =
-        summary.cwd ?? (await core.accessor.get(IWorkspaceService).get(summary.workspaceId))?.root;
-      if (cwd === undefined) {
-        // Persisted session with no `cwd` on disk and no registered workspace
-        // to fall back to (predates gap-G3 persistence) — cannot project cwd.
-        reply.send(
-          errEnvelope(
-            ErrorCode.SESSION_NOT_FOUND,
-            `session ${session_id} has no recoverable cwd`,
-            req.id,
-          ),
-        );
+      // M5a: bare-id resolution goes through the v1 ref resolver (plan §1.3);
+      // the descriptor read is delegated to the owner runtime and projected
+      // back onto the same summary the index produced (plan §6.2).
+      const view = await resolveV1SessionView(core, session_id);
+      if (view.kind !== 'view') {
+        reply.send(v1SessionViewFailureEnvelope(view, session_id, req.id));
         return;
       }
       reply.send(
-        okEnvelope(toWireSession(summary, cwd, resolveSessionFacts(core, session_id)), req.id),
+        okEnvelope(
+          toWireSession(view.view.summary, view.view.cwd, resolveSessionFacts(core, session_id)),
+          req.id,
+        ),
       );
     },
   );
@@ -480,27 +495,16 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
     },
     async (req, reply) => {
       const { session_id } = req.params;
-      const summary = await core.accessor.get(ISessionIndex).get(session_id);
-      if (summary === undefined) {
-        reply.send(
-          errEnvelope(ErrorCode.SESSION_NOT_FOUND, `session ${session_id} does not exist`, req.id),
-        );
-        return;
-      }
-      const cwd =
-        summary.cwd ?? (await core.accessor.get(IWorkspaceService).get(summary.workspaceId))?.root;
-      if (cwd === undefined) {
-        reply.send(
-          errEnvelope(
-            ErrorCode.SESSION_NOT_FOUND,
-            `session ${session_id} has no recoverable cwd`,
-            req.id,
-          ),
-        );
+      const view = await resolveV1SessionView(core, session_id);
+      if (view.kind !== 'view') {
+        reply.send(v1SessionViewFailureEnvelope(view, session_id, req.id));
         return;
       }
       reply.send(
-        okEnvelope(toWireSession(summary, cwd, resolveSessionFacts(core, session_id)), req.id),
+        okEnvelope(
+          toWireSession(view.view.summary, view.view.cwd, resolveSessionFacts(core, session_id)),
+          req.id,
+        ),
       );
     },
   );
@@ -700,6 +704,15 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
         }
 
         if (parsed.action === 'restore') {
+          // M5a (plan §6.3): the path and the live restore behavior stay; the
+          // bare id is resolved through the v1 ref resolver first so an
+          // ambiguous or unreachable session fails with the frozen mapping
+          // instead of being restored by guesswork. No new restore action.
+          const resolution = await createV1SessionRefResolver(core).resolve(parsed.id);
+          if (resolution.kind !== 'resolved') {
+            reply.send(v1ResolveFailureEnvelope(resolution, parsed.id, req.id));
+            return;
+          }
           const restored = await core.accessor.get(ISessionLifecycleService).restore(parsed.id);
           if (restored === undefined) {
             throw new Error2(ErrorCodes.SESSION_NOT_FOUND, `session ${parsed.id} does not exist`);
@@ -755,46 +768,68 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
       try {
         const { session_id } = req.params;
         // 404 when the parent is unknown — the live handle wins, otherwise the
-        // persisted index (a closed parent can still list children, like v1).
-        const exists =
-          core.accessor.get(ISessionLifecycleService).get(session_id) !== undefined ||
-          (await core.accessor.get(ISessionIndex).get(session_id)) !== undefined;
-        if (!exists) {
-          throw new Error2(ErrorCodes.SESSION_NOT_FOUND, `session ${session_id} does not exist`);
+        // v1 ref resolver's cross-runtime probe (a closed parent can still
+        // list children, like v1). Ambiguous/unavailable parents map onto the
+        // frozen resolver envelopes instead of a false "does not exist".
+        if (core.accessor.get(ISessionLifecycleService).get(session_id) === undefined) {
+          const parent = await createV1SessionRefResolver(core).resolve(session_id);
+          if (parent.kind !== 'resolved') {
+            reply.send(v1ResolveFailureEnvelope(parent, session_id, req.id));
+            return;
+          }
         }
 
-        // The index filters by the child markers (`parent_session_id` +
-        // `child_session_kind`) and returns the recency-sorted children. The
+        // M5a: the child set comes from the resolver's cross-runtime fan-out,
+        // filtered by the same child markers the index matched
+        // (`parent_session_id` + `child_session_kind`) and the same archived
+        // exclusion the index applied without `includeArchived` (an archived
+        // child disappears from the list, like the pre-migration read). The
         // id-cursor, page-size, and status projection/filter stay at the edge
         // (v1 wire concerns; status needs live handles).
-        const children = (await core.accessor.get(ISessionIndex).list({ childOf: session_id }))
-          .items;
+        const resolver = createV1SessionRefResolver(core);
+        // Same ordering as the list route: `listAll` discovers first.
+        const resolutions = await resolver.listAll();
+        const lookups = await buildV1ProjectionLookups(core);
+        const children: V1SessionSummaryFields[] = [];
+        for (const resolution of resolutions) {
+          const view = projectV1Session(resolution, lookups);
+          if (view === undefined) continue;
+          if (view.summary.archived) continue;
+          const custom = view.summary.custom;
+          if (
+            custom?.['parent_session_id'] !== session_id ||
+            custom?.['child_session_kind'] !== 'child'
+          ) {
+            continue;
+          }
+          children.push(view.summary);
+        }
+        const sortedChildren = children.toSorted((a, b) => b.updatedAt - a.updatedAt);
 
         let pivotIndex = -1;
         if (req.query.before_id !== undefined) {
-          pivotIndex = children.findIndex((s) => s.id === req.query.before_id);
+          pivotIndex = sortedChildren.findIndex((s) => s.id === req.query.before_id);
         } else if (req.query.after_id !== undefined) {
-          pivotIndex = children.findIndex((s) => s.id === req.query.after_id);
+          pivotIndex = sortedChildren.findIndex((s) => s.id === req.query.after_id);
         }
         let slice: typeof children;
         if (req.query.before_id !== undefined && pivotIndex >= 0) {
-          slice = children.slice(pivotIndex + 1);
+          slice = sortedChildren.slice(pivotIndex + 1);
         } else if (req.query.after_id !== undefined && pivotIndex >= 0) {
-          slice = children.slice(0, pivotIndex);
+          slice = sortedChildren.slice(0, pivotIndex);
         } else {
-          slice = children;
+          slice = sortedChildren;
         }
         // `page_size` is already clamped to [1, 100] by the query coercion; 100
         // is the v1 default when omitted.
         const pageSize = req.query.page_size ?? 100;
         const window = slice.slice(0, pageSize);
 
-        // `cwd` is read from the child's own summary first (gap G3 closed); the
-        // registry is only a back-compat fallback for sessions written before
-        // `cwd` was persisted, defaulting to '' (matches the prior adapter).
-        const roots = new Map(
-          (await core.accessor.get(IWorkspaceService).list()).map((w) => [w.id, w.root]),
-        );
+        // `cwd` is read from the child's own summary first (gap G3 closed);
+        // the projection lookups' catalog map is only a back-compat fallback
+        // for sessions written before `cwd` was persisted, defaulting to ''
+        // (matches the prior adapter).
+        const roots = lookups.rootByWorkspaceId;
         const projected = window.map((summary) =>
           toWireSession(
             summary,

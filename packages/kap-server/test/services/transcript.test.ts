@@ -47,6 +47,7 @@ import {
   snapshotToOps,
   TRANSCRIPT_OPS_JOURNAL_CAPACITY,
 } from '../../src/services/transcript/transcriptService';
+import { fakeRuntimeHarness } from '../helpers/fakeRuntime';
 
 function ev(payload: Record<string, unknown>): DomainEvent {
   return payload as unknown as DomainEvent;
@@ -1466,26 +1467,33 @@ describe('AgentTranscriptProjector', () => {
   });
 
   it('readColdSnapshot answers empty for path-hostile agent ids without touching disk', async () => {
-    const service = new TranscriptService({
-      homeDir: '/nonexistent-home',
-      core: {
-        accessor: {
-          get: (token: unknown) => {
-            if (token === ISessionLifecycleService) {
-              return {
-                onDidCloseSession: () => ({ dispose: () => undefined }),
-                onDidArchiveSession: () => ({ dispose: () => undefined }),
-              };
-            }
-            if (token === ISessionIndex) return { get: async () => ({ workspaceId: 'ws' }) };
-            return undefined;
+    const home = await mkdtemp(join(tmpdir(), 'transcript-hostile-'));
+    try {
+      // The session exists (empty bucket); hostile agent ids answer empty
+      // without ever mapping onto the agent namespace.
+      await mkdir(join(home, 'sessions', 'ws', 's1'), { recursive: true });
+      const service = new TranscriptService({
+        resolver: fakeRuntimeHarness(home).resolver,
+        core: {
+          accessor: {
+            get: (token: unknown) => {
+              if (token === ISessionLifecycleService) {
+                return {
+                  onDidCloseSession: () => ({ dispose: () => undefined }),
+                  onDidArchiveSession: () => ({ dispose: () => undefined }),
+                };
+              }
+              return undefined;
+            },
           },
-        },
-      } as unknown as Scope,
-    });
-    for (const hostile of ['../../main', '..', 'a/b', 'a\\b']) {
-      const snapshot = await service.readColdSnapshot('s1', hostile);
-      expect(snapshot?.items).toEqual([]);
+        } as unknown as Scope,
+      });
+      for (const hostile of ['../../main', '..', 'a/b', 'a\\b']) {
+        const snapshot = await service.readColdSnapshot('s1', hostile);
+        expect(snapshot?.items).toEqual([]);
+      }
+    } finally {
+      await rm(home, { recursive: true, force: true });
     }
   });
 
@@ -1565,7 +1573,7 @@ describe('AgentTranscriptProjector', () => {
       await writeFile(join(wireDir, 'wire.jsonl'), `${records.map((r) => JSON.stringify(r)).join('\n')}\n`);
 
       const service = new TranscriptService({
-        homeDir: home,
+        resolver: fakeRuntimeHarness(home).resolver,
         core: {
           accessor: {
             get: (token: unknown) => {
@@ -2133,7 +2141,7 @@ describe('bindSessionTranscript', () => {
       const agents = new FakeAgents();
       agents.add('main', { loopStatus: { state: 'running', activeTurnId: 0 } });
       const service = new TranscriptService({
-        homeDir: home,
+        resolver: fakeRuntimeHarness(home).resolver,
         core: fakeCoreWithAgents(new SessionInteractionService(new TestSessionStateService()), agents),
       });
       const store = service.forSessionLive('s1');
@@ -2156,7 +2164,7 @@ describe('bindSessionTranscript', () => {
       const agents = new FakeAgents();
       agents.add('main', { loopStatus: { state: 'running', activeTurnId: 0 } });
       const service = new TranscriptService({
-        homeDir: home,
+        resolver: fakeRuntimeHarness(home).resolver,
         core: fakeCoreWithAgents(new SessionInteractionService(new TestSessionStateService()), agents),
       });
       const store = service.forSessionLive('s1');
@@ -2201,7 +2209,7 @@ describe('bindSessionTranscript', () => {
       const agents = new FakeAgents();
       agents.add('main', { loopStatus: { state: 'running', activeTurnId: 0 } });
       const service = new TranscriptService({
-        homeDir: home,
+        resolver: fakeRuntimeHarness(home).resolver,
         core: fakeCoreWithAgents(new SessionInteractionService(new TestSessionStateService()), agents),
       });
       const store = service.forSessionLive('s1');
@@ -2226,7 +2234,7 @@ describe('bindSessionTranscript', () => {
       const agents = new FakeAgents();
       const main = agents.add('main');
       const service = new TranscriptService({
-        homeDir: '/nonexistent-home',
+        resolver: fakeRuntimeHarness('/nonexistent-home').resolver,
         core: fakeCoreWithAgents(new SessionInteractionService(new TestSessionStateService()), agents),
       });
       service.forSessionLive('s1');
@@ -2276,7 +2284,7 @@ describe('bindSessionTranscript', () => {
       const agents = new FakeAgents();
       const main = agents.add('main');
       const service = new TranscriptService({
-        homeDir: '/nonexistent-home',
+        resolver: fakeRuntimeHarness('/nonexistent-home').resolver,
         core: fakeCoreWithAgents(new SessionInteractionService(new TestSessionStateService()), agents),
       });
       service.forSessionLive('s1');

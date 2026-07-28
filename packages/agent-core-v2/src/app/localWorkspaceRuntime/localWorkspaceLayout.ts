@@ -42,6 +42,14 @@ import { normalizeSessionMeta } from '#/session/sessionMetadata/sessionMetadataS
 export const SESSION_META_KEY = 'state.json';
 export const SESSION_INDEX_KEY = 'session_index.jsonl';
 
+/**
+ * Pre-unification v2 sessions kept their metadata document one level down
+ * (`<sessionDir>/session-meta/state.json`); the session index reads through
+ * that fallback, and so does this runtime (plan §9.5: old session
+ * directories open directly, no importer runs).
+ */
+export const LEGACY_SESSION_META_SCOPE = 'session-meta';
+
 /** The session persistence namespace == the legacy session storage scope. */
 export function sessionScopeOf(workspaceId: string, sessionId: string) {
   return toPersistenceNamespace(`sessions/${workspaceId}/${sessionId}`);
@@ -106,10 +114,17 @@ export async function readStateDocument(
   scope: string,
   sessionId: string,
 ): Promise<StateDocument | undefined> {
-  const bytes = await storage.read(scope, SESSION_META_KEY);
+  const bytes =
+    (await storage.read(scope, SESSION_META_KEY)) ??
+    (await storage.read(`${scope}/${LEGACY_SESSION_META_SCOPE}`, SESSION_META_KEY));
   if (bytes === undefined) return undefined;
   const raw = jsonDocumentCodec.decode(bytes) as SessionMeta;
-  const meta = normalizeSessionMeta(raw, sessionId);
+  const normalized = normalizeSessionMeta(raw, sessionId);
+  // The DIRECTORY name is the authoritative session id (the same semantics
+  // `FileSessionIndex` applies — it never reads `meta.id`): a v2 document
+  // with a missing or drifting id is re-anchored to its bucket, while
+  // `normalizeSessionMeta` only backfills the id for legacy documents.
+  const meta = normalized.id === sessionId ? normalized : { ...normalized, id: sessionId };
   return { meta, bytes, revision: fnv1aHex(bytes) };
 }
 
@@ -119,10 +134,27 @@ export function metadataOfMeta(meta: SessionMeta): SessionMetadata {
   if (meta.title !== undefined) metadata['title'] = meta.title;
   if (meta.isCustomTitle !== undefined) metadata['isCustomTitle'] = meta.isCustomTitle;
   if (meta.lastPrompt !== undefined) metadata['lastPrompt'] = meta.lastPrompt;
-  if (meta.cwd !== undefined) metadata['cwd'] = meta.cwd;
+  // The cwd fact follows the session index's full `recoverCwd` chain:
+  // normalized `cwd` (itself `cwd ?? workDir`) first, then the pre-G3
+  // `custom.cwd` spelling as the last resort.
+  const cwd = meta.cwd ?? recoverCustomCwd(meta);
+  if (cwd !== undefined) metadata['cwd'] = cwd;
   if (meta.forkedFrom !== undefined) metadata['forkedFrom'] = meta.forkedFrom;
   if (meta.custom !== undefined) metadata['custom'] = meta.custom;
+  // The persisted agent roster travels as logical metadata too: cold readers
+  // (e.g. the v1 transcript edge) rebuild their roster view from it without
+  // touching the layout. It stays OUT of `applyMetadataPatch`'s known fields —
+  // the roster is engine-owned and never patched through metadata updates.
+  if (meta.agents !== undefined) metadata['agents'] = meta.agents;
   return metadata;
+}
+
+/** The session index's third-level cwd recovery: a non-empty `custom.cwd`. */
+function recoverCustomCwd(meta: SessionMeta): string | undefined {
+  const custom = meta.custom;
+  if (custom === null || typeof custom !== 'object' || Array.isArray(custom)) return undefined;
+  const fromCustom = custom['cwd'];
+  return typeof fromCustom === 'string' && fromCustom.length > 0 ? fromCustom : undefined;
 }
 
 export function descriptorOf(
@@ -145,10 +177,13 @@ export function descriptorOf(
  * top-level fields map back one-to-one; unknown keys merge into `custom` —
  * the same funnel the v1 `updateProfile` flow uses for arbitrary metadata.
  * `cwd` in a patch is ignored: the session's workspace root is fixed by the
- * owning runtime, never rewritten per session.
+ * owning runtime, never rewritten per session. `agents` is ignored too: the
+ * roster is engine-owned state (patched by agent lifecycle, never by a
+ * metadata update) — it rides `metadataOfMeta` so cold readers can rebuild
+ * their roster view, and must not funnel back into `custom` on patch/import.
  */
 export function applyMetadataPatch(meta: SessionMeta, patch: SessionMetadata): SessionMeta {
-  const { title, isCustomTitle, lastPrompt, cwd: _cwd, forkedFrom, custom, ...rest } = patch;
+  const { title, isCustomTitle, lastPrompt, cwd: _cwd, forkedFrom, custom, agents: _agents, ...rest } = patch;
   const extraCustom = rest as Record<string, unknown>;
   const customPatch =
     custom !== null && typeof custom === 'object' && !Array.isArray(custom)

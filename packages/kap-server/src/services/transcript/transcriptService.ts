@@ -21,13 +21,16 @@
  * agent's presence in the store roster, so a graded subscriber always has a
  * reset target.
  *
- * Cold path: rebuilds one agent's transcript from the persisted wire records
- * (`<sessionDir>/agents/<agentId>/wire.jsonl`), exactly the
- * `SnapshotReader` read (`readWireRecords` + `reduceContextTranscript`), then
- * groups the flat messages into a base snapshot via
+ * Cold path (M5a, plan §5.9/§6.3): the bare id resolves through the v1
+ * `IV1SessionRefResolver` and one agent's transcript is rebuilt from the
+ * persisted wire records streamed by the OWNER runtime's cold reader
+ * (`runtime.sessions.coldRead` — never assembled from the App home dir), the
+ * same reduction the `SnapshotReader` applies (`reduceContextTranscript`),
+ * then groups the flat messages into a base snapshot via
  * `groupMessagesIntoSnapshot` and folds the non-`context.*` records
  * (tasks / interactions / todos / goal / plan / swarm) on top via
- * `foldWireRecordFacts` — best-effort fidelity.
+ * `foldWireRecordFacts` — best-effort fidelity. A live flush is visible to
+ * the cold reader immediately (same files, same or higher revision).
  *
  * Lifecycle: entries are dropped when the session closes or archives
  * (`onDidCloseSession` / `onDidArchiveSession`, plus a lifecycle re-check on
@@ -41,19 +44,14 @@
  * (debounced per agent) and merged back live-first — see `healTurnOps`.
  */
 
-import { join } from 'node:path';
-import { readFile } from 'node:fs/promises';
-
 import {
   IAgentLifecycleService,
-  ISessionIndex,
   ISessionLifecycleService,
   ISessionMetadata,
   IAgentLoopService,
   reduceContextTranscript,
   type IDisposable,
   type Scope,
-  type SessionMeta,
 } from '@moonshot-ai/agent-core-v2';
 import {
   TranscriptStore,
@@ -70,7 +68,7 @@ import {
   type TranscriptTurn,
 } from '@moonshot-ai/transcript';
 
-import { readWireRecords } from '../snapshot/snapshotReader';
+import type { IV1SessionRefResolver } from '../../app/v1Compatibility/v1SessionRefResolver';
 import {
   bindSessionTranscript,
   descriptorFromMeta,
@@ -78,15 +76,15 @@ import {
   type TranscriptBindingLogger,
 } from './coreBinding';
 
-const SESSIONS_ROOT = 'sessions';
-const AGENTS_DIR = 'agents';
 const MAIN_AGENT_ID = 'main';
-const WIRE_FILE = 'wire.jsonl';
-const STATE_FILE = 'state.json';
+
+/** One raw `wire.jsonl` journal line as the cold reader streams it back. */
+type WireJournalRecord = { readonly type: string; readonly [key: string]: unknown };
 
 export interface TranscriptServiceDeps {
-  readonly homeDir: string;
   readonly core: Scope;
+  /** The single bare-id entry point (plan §1.3) cold reads resolve through. */
+  readonly resolver: IV1SessionRefResolver;
   readonly logger?: TranscriptBindingLogger;
 }
 
@@ -510,64 +508,69 @@ export class TranscriptService {
   }
 
   /**
-   * Roster for a cold session, read from the persisted session metadata
-   * (`<sessionDir>/state.json`) and mapped like the live seeding
-   * (`descriptorFromMeta`). Returns `undefined` when the session is unknown
-   * to the index; an unreadable or missing metadata file yields an empty
-   * roster (best-effort — transcripts work without descriptors).
+   * Resolve a bare id for a COLD read (plan §5.9): `undefined` means the
+   * session does not exist (the route's current 40401 mapping); an ambiguous
+   * or unreachable id throws — it is NOT "not found" — and surfaces as the
+   * frozen 50001 through the route's global error handler.
+   */
+  private async resolveColdSession(sessionId: string) {
+    const resolved = await this.deps.resolver.resolve(sessionId);
+    if (resolved.kind === 'not_found') return undefined;
+    if (resolved.kind !== 'resolved') {
+      throw new Error(
+        resolved.kind === 'ambiguous'
+          ? `session ${sessionId} is ambiguous across runtimes`
+          : `session ${sessionId} is temporarily unavailable`,
+      );
+    }
+    return resolved.resolution;
+  }
+
+  /**
+   * Roster for a cold session, read from the persisted session metadata (the
+   * owner runtime's descriptor, `state.json`) and mapped like the live seeding
+   * (`descriptorFromMeta`). Returns `undefined` when the session is unknown;
+   * an unreadable or agent-less metadata document yields an empty roster
+   * (best-effort — transcripts work without descriptors).
    */
   async readColdRoster(sessionId: string): Promise<AgentDescriptor[] | undefined> {
-    const summary = await this.deps.core.accessor.get(ISessionIndex).get(sessionId);
-    if (summary === undefined) return undefined;
-    let meta: SessionMeta;
+    const resolution = await this.resolveColdSession(sessionId);
+    if (resolution === undefined) return undefined;
+    const coldReader = await resolution.runtime.sessions.coldRead(sessionId);
+    let agents: unknown;
     try {
-      const raw = await readFile(
-        join(this.deps.homeDir, SESSIONS_ROOT, summary.workspaceId, sessionId, STATE_FILE),
-        'utf-8',
-      );
-      meta = JSON.parse(raw) as SessionMeta;
+      agents = (await coldReader.descriptor()).metadata['agents'];
     } catch {
       return [];
     }
-    return Object.entries(meta.agents ?? {}).map(([agentId, agentMeta]) =>
-      descriptorFromMeta(agentId, agentMeta),
+    if (agents === null || typeof agents !== 'object' || Array.isArray(agents)) return [];
+    return Object.entries(agents as Record<string, Parameters<typeof descriptorFromMeta>[1]>).map(
+      ([agentId, agentMeta]) => descriptorFromMeta(agentId, agentMeta),
     );
   }
 
   /**
    * Rebuild one agent's transcript snapshot for a cold session from its
-   * persisted wire records. Returns `undefined` when the session is unknown to
-   * the index; a known session without wire records for the agent yields an
-   * empty snapshot.
+   * persisted wire records, streamed through the owner runtime's cold reader
+   * (M5a — never assembled from the App home dir). Returns `undefined` when
+   * the session is unknown; a known session without wire records for the
+   * agent yields an empty snapshot.
    */
   async readColdSnapshot(
     sessionId: string,
     agentId: string = MAIN_AGENT_ID,
   ): Promise<AgentTranscriptSnapshot | undefined> {
-    const summary = await this.deps.core.accessor.get(ISessionIndex).get(sessionId);
-    if (summary === undefined) return undefined;
+    const resolution = await this.resolveColdSession(sessionId);
+    if (resolution === undefined) return undefined;
     // Path-hostile ids never map to a real agent directory — answer empty
-    // instead of letting the id traverse outside `<sessionDir>/agents/`.
+    // instead of letting the id traverse outside the agent namespace.
     if (!isPlainAgentId(agentId)) {
       return groupMessagesIntoSnapshot([]);
     }
-    const wirePath = join(
-      this.deps.homeDir,
-      SESSIONS_ROOT,
-      summary.workspaceId,
-      sessionId,
-      AGENTS_DIR,
-      agentId,
-      WIRE_FILE,
-    );
-    let records: Awaited<ReturnType<typeof readWireRecords>>;
-    try {
-      records = await readWireRecords(wirePath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        return groupMessagesIntoSnapshot([]);
-      }
-      throw error;
+    const coldReader = await resolution.runtime.sessions.coldRead(sessionId);
+    const records: WireJournalRecord[] = [];
+    for await (const record of coldReader.readRecords({ agentId })) {
+      records.push(record.data as WireJournalRecord);
     }
     const messages = [...reduceContextTranscript(records).entries];
     const base = groupMessagesIntoSnapshot(messages);

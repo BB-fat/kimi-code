@@ -28,6 +28,7 @@ import type {
   IWorkspaceRuntimeRegistration,
 } from '#/app/workspace/workspaceRuntime';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
+import { IWorkspaceService } from '#/app/workspace/workspace';
 import { ErrorCodes, Error2 } from '#/errors';
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
 
@@ -48,21 +49,24 @@ export class WorkspaceRuntimeManagerService implements IWorkspaceRuntimeManager 
   declare readonly _serviceBrand: undefined;
 
   private readonly providers = new Map<string, IWorkspaceProvider>();
+  /** The built-in local provider, kept concretely for `discover`/`openExisting`. */
+  private readonly localProvider: LocalWorkspaceProvider;
   private readonly registrations = new Map<string, RegisteredWorkspaceRuntime>();
   /** In-flight `ensureRegistered` opens, folded per workspace. */
   private readonly inflight = new Map<string, Promise<IWorkspaceRuntime>>();
   /** In-flight `unregister` teardowns; a re-register waits for them. */
   private readonly draining = new Map<string, Promise<void>>();
+  /** In-flight `ensureDiscovered` catch-ups, folded process-wide. */
+  private discovering: Promise<readonly IWorkspaceRuntime[]> | undefined;
 
   constructor(
     @ISessionHostRuntimeRegistry private readonly registry: ISessionHostRuntimeRegistry,
     @IBootstrapService bootstrap: IBootstrapService,
     @IFileSystemStorageService storage: IFileSystemStorageService,
+    @IWorkspaceService private readonly workspaces: IWorkspaceService,
   ) {
-    this.providers.set(
-      'local',
-      new LocalWorkspaceProvider({ homeDir: bootstrap.homeDir, storage }),
-    );
+    this.localProvider = new LocalWorkspaceProvider({ homeDir: bootstrap.homeDir, storage });
+    this.providers.set('local', this.localProvider);
   }
 
   registerProvider(kind: string, provider: IWorkspaceProvider): void {
@@ -106,9 +110,52 @@ export class WorkspaceRuntimeManagerService implements IWorkspaceRuntimeManager 
     return promise;
   }
 
+  ensureDiscovered(): Promise<readonly IWorkspaceRuntime[]> {
+    this.discovering ??= this.doEnsureDiscovered().finally(() => {
+      this.discovering = undefined;
+    });
+    return this.discovering;
+  }
+
+  private async doEnsureDiscovered(): Promise<readonly IWorkspaceRuntime[]> {
+    // Catalog roots cover the registered spellings; bucket-recovered roots
+    // (from the sessions' own metadata documents) cover tombstoned or
+    // never-cataloged buckets. A catalog read failure must not block the
+    // on-disk discovery.
+    const catalogRoots = new Map<string, string>();
+    try {
+      for (const workspace of await this.workspaces.list()) {
+        catalogRoots.set(workspace.id, workspace.root);
+      }
+    } catch {
+      // Best-effort — discovery falls back to bucket-recovered roots.
+    }
+    const discovered = await this.localProvider.discover();
+    for (const bucket of discovered) {
+      if (this.registrations.has(bucket.workspaceId)) continue;
+      const root = catalogRoots.get(bucket.workspaceId) ?? bucket.root;
+      if (root === undefined) continue;
+      try {
+        await this.doEnsureRegistered(
+          { workspaceId: bucket.workspaceId, root },
+          'local',
+          // Buckets are accepted as found (no root-existence probe): their
+          // sessions stay readable even when the workspace root directory is
+          // gone from the host (the v1 read rules).
+          true,
+        );
+      } catch {
+        // A single undiscoverable bucket must not block the others; the
+        // legacy index tolerates per-bucket failures the same way.
+      }
+    }
+    return [...this.registrations.values()].map((entry) => entry.runtime);
+  }
+
   private async doEnsureRegistered(
     workspace: WorkspaceRuntimeRef,
     kind: string,
+    openExistingBucket = false,
   ): Promise<IWorkspaceRuntime> {
     // A concurrent unregister may still be tearing the previous runtime down:
     // wait it out so the fresh registration never collides with a stale
@@ -124,10 +171,11 @@ export class WorkspaceRuntimeManagerService implements IWorkspaceRuntimeManager 
         `no workspace provider registered for kind '${kind}'`,
       );
     }
-    const registration = await provider.open({
-      root: workspace.root,
-      workspaceId: workspace.workspaceId,
-    });
+    const descriptor = { root: workspace.root, workspaceId: workspace.workspaceId };
+    const registration =
+      openExistingBucket && provider === this.localProvider
+        ? await this.localProvider.openExisting(descriptor)
+        : await provider.open(descriptor);
     let registryLease: IDisposable;
     try {
       // The registry is the sentinel: a second live instance under this

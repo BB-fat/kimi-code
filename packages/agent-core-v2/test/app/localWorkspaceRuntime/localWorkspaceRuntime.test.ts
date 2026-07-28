@@ -429,6 +429,45 @@ describe('session CRUD', () => {
     expect(rest.items.map((d) => d.ref.sessionId)).toEqual(['s-1']);
     expect(rest.cursor).toBeUndefined();
   });
+
+  it('reads pre-unification v2 sessions through the session-meta/ fallback', async () => {
+    const env = await makeEnv({});
+    // Pre-unification layout: no top-level state.json, the metadata document
+    // lives one level down — the same fallback `FileSessionIndex` applies.
+    const legacyDir = join(sessionDirOf(env, 'pre-unified'), 'session-meta');
+    await mkdir(legacyDir, { recursive: true });
+    await writeFile(
+      join(legacyDir, 'state.json'),
+      JSON.stringify({ version: 2, cwd: '/legacy/root', createdAt: 10, updatedAt: 20 }),
+    );
+
+    const descriptor = await env.runtime.sessions.get('pre-unified');
+    expect(descriptor?.ref).toEqual({ runtimeId: env.runtime.id, sessionId: 'pre-unified' });
+    expect(descriptor?.metadata['cwd']).toBe('/legacy/root');
+    // … and the cold reader + list see it too.
+    const coldDescriptor = await (await env.runtime.sessions.coldRead('pre-unified')).descriptor();
+    expect(coldDescriptor.metadata['cwd']).toBe('/legacy/root');
+    expect((await env.runtime.sessions.list()).items.map((d) => d.ref.sessionId)).toEqual([
+      'pre-unified',
+    ]);
+  });
+
+  it('recovers cwd from custom.cwd when the document has no top-level cwd/workDir', async () => {
+    const env = await makeEnv({});
+    // The pre-G3 spelling: the work dir only exists inside custom metadata —
+    // the session index's third-level `recoverCwd` fallback.
+    await writeStateJson(env, 'custom-only', {
+      version: 2,
+      createdAt: 10,
+      updatedAt: 20,
+      custom: { cwd: '/custom/root', other: 1 },
+    });
+
+    const descriptor = await env.runtime.sessions.get('custom-only');
+    expect(descriptor?.metadata['cwd']).toBe('/custom/root');
+    // The custom map itself still round-trips untouched.
+    expect(descriptor?.metadata['custom']).toEqual({ cwd: '/custom/root', other: 1 });
+  });
 });
 
 /* ------------------------------------------------------------------------ */

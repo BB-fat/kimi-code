@@ -14,11 +14,11 @@ import { join } from 'node:path';
 import {
   ErrorCodes,
   ILogService,
-  ISessionExportService,
   isError2,
   type Scope,
 } from '@moonshot-ai/agent-core-v2';
 
+import { exportV1Session } from '../app/v1Compatibility/v1SessionExportAdapter';
 import { requestLog } from '../lib/requestLog';
 import { defineRoute } from '../middleware/defineRoute';
 import { ErrorCode } from '../protocol/error-codes';
@@ -114,7 +114,12 @@ export function registerSessionExportRoute(
         }
 
         const outputPath = join(tempDir, 'session.zip');
-        await core.accessor.get(ISessionExportService).export(
+        // M5a (plan §5.10/§6.3): the bare id resolves through the v1 ref
+        // resolver and the session's files stream from the OWNER runtime's
+        // logical export entries, materialized into a staging dir and zipped
+        // by the same pipeline as before — the ZIP contract is unchanged.
+        await exportV1Session(
+          core,
           {
             sessionId: req.params.session_id,
             outputPath,

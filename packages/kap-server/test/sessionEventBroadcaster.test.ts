@@ -43,6 +43,7 @@ import {
 } from '../src/transport/ws/v1/sessionEventBroadcaster';
 import type { EventEnvelope } from '../src/transport/ws/v1/sessionEventJournal';
 import { TranscriptService } from '../src/services/transcript/transcriptService';
+import { fakeRuntimeHarness } from './helpers/fakeRuntime';
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -1686,7 +1687,7 @@ describe('SessionEventBroadcaster', () => {
         eventsDir: dir,
         core,
         maxBufferSize: 3,
-        transcriptService: new TranscriptService({ homeDir: dir, core }),
+        transcriptService: new TranscriptService({ core, resolver: fakeRuntimeHarness(dir).resolver }),
       });
     }
 
@@ -1933,7 +1934,7 @@ describe('SessionEventBroadcaster', () => {
       lc.addAgent('main');
       sessions.set('s1', lc);
       const core = makeCore(sessions, eventBus, { 'sub-1': { type: 'sub' } });
-      const service = new TranscriptService({ homeDir: dir, core });
+      const service = new TranscriptService({ core, resolver: fakeRuntimeHarness(dir).resolver });
       let releaseBackfill!: () => void;
       const gate = new Promise<void>((resolve) => {
         releaseBackfill = resolve;
@@ -1970,7 +1971,7 @@ describe('SessionEventBroadcaster', () => {
       const main = lc.addAgent('main');
       sessions.set('s1', lc);
       const core = makeCore(sessions, eventBus);
-      const service = new TranscriptService({ homeDir: dir, core });
+      const service = new TranscriptService({ core, resolver: fakeRuntimeHarness(dir).resolver });
       bc = new SessionEventBroadcaster({
         eventsDir: dir,
         core,

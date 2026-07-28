@@ -25,6 +25,9 @@
 
 import { Error2 } from '#/_base/errors/errors';
 
+import { stat } from 'node:fs/promises';
+import { join } from 'pathe';
+
 import { SessionHostRuntimeError, SessionHostRuntimeErrors } from '#/app/sessionHostRuntime/errors';
 import type { SessionRuntimeCapability } from '#/app/sessionHostRuntime/sessionHostRuntime';
 import type { SessionRef } from '#/app/sessionHostRuntime/sessionRef';
@@ -331,6 +334,8 @@ export class LocalSessionColdReader implements ISessionColdReader {
     private readonly storage: IFileSystemStorageService,
     private readonly workspaceId: string,
     private readonly bound: SessionRef,
+    /** App home dir the legacy layout is rooted at (stat facts for revisions). */
+    private readonly homeDir?: string,
   ) {}
 
   async descriptor(): Promise<SessionDescriptor> {
@@ -386,6 +391,28 @@ export class LocalSessionColdReader implements ISessionColdReader {
     options?: ReadArtifactOptions,
   ): Promise<ReadableStream<Uint8Array>> {
     return readLocalArtifact(this.storage, this.workspaceId, this.bound, ref, options);
+  }
+
+  /**
+   * The wire journal's revision token, derived from the existing file facts
+   * (`size:mtimeMs`) — no watermark file is added (plan §5.9). `undefined`
+   * when the agent has no journal yet or the cold reader was built without a
+   * home dir.
+   */
+  async recordsRevision(agentId: string): Promise<string | undefined> {
+    if (this.homeDir === undefined || !isValidIdSegment(agentId)) return undefined;
+    try {
+      const info = await stat(
+        join(
+          this.homeDir,
+          agentScopeOf(this.workspaceId, this.bound.sessionId, agentId),
+          AGENT_WIRE_RECORD_KEY,
+        ),
+      );
+      return `${info.size}:${info.mtimeMs}`;
+    } catch {
+      return undefined;
+    }
   }
 
   private async requireState(): Promise<StateDocument> {
@@ -447,6 +474,7 @@ export class LocalSessionLease implements ISessionRuntimeContext, LocalLeaseHand
     capabilities: ReadonlySet<SessionRuntimeCapability>,
     contributions: SessionRuntimeContributions,
     osHandles: Omit<ISessionOsCapabilities, 'cwd'>,
+    homeDir: string | undefined,
     private readonly onClosed: (lease: LocalSessionLease) => void,
   ) {
     this.ref = { runtimeId, sessionId: state.meta.id };
@@ -460,7 +488,7 @@ export class LocalSessionLease implements ISessionRuntimeContext, LocalLeaseHand
       this.logStores,
     );
     this.artifacts = new LocalArtifactService(storage, workspaceId, this.ref, blobs);
-    this.coldReader = new LocalSessionColdReader(storage, workspaceId, this.ref);
+    this.coldReader = new LocalSessionColdReader(storage, workspaceId, this.ref, homeDir);
     this.capabilities = capabilities;
     this.contributions = contributions;
     // The workspace root plus the runtime's shared node-local host services

@@ -1,11 +1,15 @@
 /**
- * Unit tests for the server-layer disk reader (`services/snapshot`).
+ * Unit tests for the server-layer cold reader (`services/snapshot`).
  *
- * Constructs `SnapshotReader` with stub core services and a real tmp `homeDir`,
- * writing `state.json` + `agents/main/wire.jsonl` directly — exercising the
- * disk read, the `context.*` reduction, the `(size, mtimeMs)` transcript cache,
- * `state.json` normalization, and `KIMI_SNAPSHOT_*` config parsing without
- * booting a Fastify daemon.
+ * M5a: the reader resolves the bare id through the v1 `IV1SessionRefResolver`
+ * and reads metadata / wire records / blobs through the OWNER runtime's cold
+ * reader — never the App home dir. These tests construct `SnapshotReader`
+ * with a file-backed fake runtime (`test/helpers/fakeRuntime`) over a real
+ * tmp home (`state.json` + `agents/main/wire.jsonl` fixtures), exercising the
+ * resolver mapping, the v1 404 conditions (unknown session, unregistered
+ * workspace), the `context.*` reduction, the revision-keyed transcript cache,
+ * created_at synthesis, blobref rehydration, and `KIMI_SNAPSHOT_*` config
+ * parsing without booting a Fastify daemon.
  */
 
 import { mkdir, rm, writeFile } from 'node:fs/promises';
@@ -14,21 +18,20 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
-  ISessionIndex,
   ISessionLifecycleService,
+  IWorkspaceRuntimeManager,
   IWorkspaceService,
   type ContextMessage,
-  type SessionSummary,
 } from '@moonshot-ai/agent-core-v2';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   loadSnapshotConfig,
-  readWireRecords,
   SnapshotNotFoundError,
   SnapshotReader,
   type SnapshotReaderDeps,
 } from '../src/services/snapshot';
+import { fakeRuntimeHarness } from './helpers/fakeRuntime';
 
 // ─── tiny stubs ───────────────────────────────────────────────────────────
 
@@ -47,8 +50,8 @@ const noopLogger = { info: () => {} };
 interface Fixture {
   homeDir: string;
   workspaceId: string;
+  workspaces: Map<string, { root: string }>;
   sessionDir: (sid: string) => string;
-  index: Map<string, SessionSummary>;
   reader: SnapshotReader;
   broadcaster: { seq: number; epoch: string; inFlightTurn: unknown };
 }
@@ -59,20 +62,42 @@ async function makeFixtureAsync(opts?: { cacheLimit?: number }): Promise<Fixture
   const homeDir = await mkdtemp(join(tmpdir(), 'kimi-snapshot-reader-'));
   tmpDirs.push(homeDir);
   const workspaceId = 'wd_unittest_012345abcdef';
-  const index = new Map<string, SessionSummary>();
   const workspaces = new Map([[workspaceId, { root: join(homeDir, 'workspace') }]]);
+  const harness = fakeRuntimeHarness(homeDir, { workspaceId });
 
   const core = {
     accessor: fakeAccessor([
-      [ISessionIndex, { get: async (sid: string) => index.get(sid) }],
-      [IWorkspaceService, { get: async (ws: string) => workspaces.get(ws) }],
+      [
+        IWorkspaceService,
+        {
+          list: async () =>
+            [...workspaces].map(([id, w]) => ({
+              id,
+              root: w.root,
+              name: id,
+              createdAt: 0,
+              lastOpenedAt: 0,
+            })),
+          get: async (id: string) => {
+            const found = workspaces.get(id);
+            return found === undefined
+              ? undefined
+              : { id, root: found.root, name: id, createdAt: 0, lastOpenedAt: 0 };
+          },
+        },
+      ],
+      [
+        IWorkspaceRuntimeManager,
+        {
+          list: () => [{ workspaceId, runtimeId: harness.runtime.id, kind: harness.runtime.kind }],
+        },
+      ],
       // Cold by default — no live handle.
       [ISessionLifecycleService, { get: () => undefined }],
     ]),
   };
   const broadcaster = { seq: 0, epoch: 'ep_unit', inFlightTurn: null };
   const deps: SnapshotReaderDeps = {
-    homeDir,
     core: core as never,
     broadcaster: {
       getSnapshotState: async () => ({
@@ -84,12 +109,13 @@ async function makeFixtureAsync(opts?: { cacheLimit?: number }): Promise<Fixture
     } as never,
     logger: noopLogger,
     config: { mode: 'auto', timeoutMs: 4000, cacheLimit: opts?.cacheLimit ?? 32 },
+    resolver: harness.resolver,
   };
   return {
     homeDir,
     workspaceId,
+    workspaces,
     sessionDir: (sid) => join(homeDir, 'sessions', workspaceId, sid),
-    index,
     reader: new SnapshotReader(deps),
     broadcaster,
   };
@@ -105,14 +131,6 @@ async function seedSession(
   opts?: { createdAt?: number; title?: string; rawState?: Record<string, unknown> },
 ): Promise<void> {
   const createdAt = opts?.createdAt ?? 1700000000000;
-  f.index.set(sid, {
-    id: sid,
-    workspaceId: f.workspaceId,
-    title: opts?.title,
-    createdAt,
-    updatedAt: createdAt,
-    archived: false,
-  });
   const state = opts?.rawState ?? {
     id: sid,
     version: 2,
@@ -146,13 +164,10 @@ describe('SnapshotReader.read', () => {
 
   it('throws SnapshotNotFoundError when the workspace is gone', async () => {
     const f = await makeFixtureAsync();
-    f.index.set('sess_orphan', {
-      id: 'sess_orphan',
-      workspaceId: 'wd_gone_000000000000',
-      createdAt: 1,
-      updatedAt: 1,
-      archived: false,
-    });
+    await seedSession(f, 'sess_orphan');
+    // The catalog no longer holds the workspace: the session stays gettable
+    // elsewhere but loses its snapshot (the pre-migration 404 condition).
+    f.workspaces.clear();
     await expect(f.reader.read('sess_orphan')).rejects.toBeInstanceOf(SnapshotNotFoundError);
   });
 
@@ -452,7 +467,7 @@ describe('SnapshotReader.read', () => {
     expect(Number.isNaN(Date.parse(snap.session.created_at))).toBe(false);
   });
 
-  it('serves repeated reads from the (size, mtime) cache', async () => {
+  it('serves repeated reads from the revision-keyed cache', async () => {
     const f = await makeFixtureAsync();
     await seedSession(f, 'sess_cache');
     await writeWire(f.sessionDir('sess_cache'), [
@@ -460,9 +475,8 @@ describe('SnapshotReader.read', () => {
     ]);
     const first = await f.reader.read('sess_cache');
     expect(first.messages.items).toHaveLength(1);
-    // Rewrite with identical content (size + mtime may change) — the cache is
-    // keyed on (size, mtime); a same-size rewrite keeps serving the cached
-    // reduction only when mtime is unchanged, so just assert stability.
+    // Rewrite with identical content — the cache is keyed on the runtime's
+    // opaque revision token (`(size, mtimeMs)` locally); just assert stability.
     const second = await f.reader.read('sess_cache');
     expect(second.messages.items.map((m) => (m.content[0] as { text: string }).text)).toEqual([
       'cached',
@@ -486,24 +500,28 @@ describe('SnapshotReader.read', () => {
     expect(snap.messages.items).toHaveLength(1);
     expect((snap.messages.items[0]!.content[0] as { text: string }).text).toBe('only-one');
   });
-});
 
-describe('readWireRecords', () => {
-  it('drops a torn final line but throws on mid-file corruption', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'kimi-wire-'));
-    tmpDirs.push(dir);
-    const p = join(dir, 'wire.jsonl');
-    await writeFile(
-      p,
-      '{"type":"context.append_message","message":{"role":"user","content":[],"toolCalls":[]}}\n{"type":"context.append_message","message":{"role":"user","cont',
-      'utf-8',
-    );
-    const records = await readWireRecords(p);
-    expect(records).toHaveLength(1);
-
-    const bad = join(dir, 'bad.jsonl');
-    await writeFile(bad, '{not-json}\n{"type":"context.append_message"}\n', 'utf-8');
-    await expect(readWireRecords(bad)).rejects.toThrow(/corrupted line 1/);
+  it('rehydrates blobref media URLs through the runtime cold reader and placeholders missing blobs', async () => {
+    const f = await makeFixtureAsync();
+    await seedSession(f, 'sess_blob');
+    const hash = 'a1b2c3d4e5f60718';
+    const blobDir = join(f.sessionDir('sess_blob'), 'agents', 'main', 'blobs');
+    await mkdir(blobDir, { recursive: true });
+    await writeFile(join(blobDir, hash), Buffer.from([1, 2, 3, 255]), 'binary');
+    const mediaMessage = (url: string): ContextMessage => ({
+      role: 'user',
+      content: [{ type: 'image_url', imageUrl: { url } } as never],
+      toolCalls: [],
+    });
+    await writeWire(f.sessionDir('sess_blob'), [
+      { type: 'context.append_message', message: mediaMessage(`blobref:image/png;${hash}`) },
+      { type: 'context.append_message', message: mediaMessage('blobref:image/png;0000000000000000') },
+    ]);
+    const snap = await f.reader.read('sess_blob');
+    const urlOf = (index: number): unknown =>
+      (snap.messages.items[index]!.content[0] as { source?: { url?: unknown } }).source?.url;
+    expect(urlOf(0)).toBe(`data:image/png;base64,${Buffer.from([1, 2, 3, 255]).toString('base64')}`);
+    expect(urlOf(1)).toBe('[media missing]');
   });
 });
 

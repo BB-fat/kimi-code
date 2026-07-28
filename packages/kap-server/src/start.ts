@@ -63,6 +63,7 @@ import { createSecurityHeadersHook } from './middleware/securityHeaders';
 import { createAuthHook } from './middleware/auth';
 import { GuiStoreService } from './services/guiStore/guiStoreService';
 import { loadSnapshotConfig, SnapshotReader } from './services/snapshot';
+import { createV1SessionRefResolver } from './app/v1Compatibility/v1SessionRefResolver';
 import {
   initializeServerTelemetry,
   type ServerTelemetry,
@@ -360,7 +361,11 @@ export async function startServer(opts: ServerStartOptions = {}): Promise<Runnin
   };
 
   const connectionRegistry = new ConnectionRegistry();
-  const transcriptService = new TranscriptService({ homeDir, core, logger });
+  // The single bare-id entry point for every v1 `{session_id}` surface (plan
+  // §1.3/§7.6): cold/descriptor reads resolve through it and delegate to the
+  // owner runtime; internal services keep passing full `SessionRef`s.
+  const v1SessionRefResolver = createV1SessionRefResolver(core, logger);
+  const transcriptService = new TranscriptService({ core, resolver: v1SessionRefResolver, logger });
   // The global search service is DI-managed (App scope) while the transcript
   // service is constructed here by hand — wire the former to the latter so
   // container-scoped searches on live sessions scan the in-memory transcript.
@@ -374,11 +379,11 @@ export async function startServer(opts: ServerStartOptions = {}): Promise<Runnin
   const fsWatchBridge = new FsWatchBridge({ core, logger });
 
   const snapshotReader = new SnapshotReader({
-    homeDir,
     core,
     broadcaster,
     logger,
     config: loadSnapshotConfig(),
+    resolver: v1SessionRefResolver,
   });
 
   const serverVersion = hostVersion;
