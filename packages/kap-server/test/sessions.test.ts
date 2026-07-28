@@ -20,6 +20,7 @@ import {
   IAgentConversationUndoService,
   IAgentGoalService,
   IAgentLifecycleService,
+  ICronTaskPersistence,
   IEventBus,
   IEventService,
   IRuntimeSessionHostService,
@@ -208,6 +209,51 @@ describe('server-v2 /api/v1/sessions', () => {
       webLogPath: 'logs/kimi-web.jsonl',
     });
     await expect.poll(() => listExportTempDirs(id)).toEqual([]);
+  });
+
+  it('keeps session-tagged cron tasks out of the export ZIP (frozen ZIP contract)', async () => {
+    const created = await postJson<SessionWire>('/api/v1/sessions', {
+      metadata: { cwd: home as string },
+    });
+    const id = created.body.data.id;
+    const workspaceId = created.body.data.workspace_id;
+    // A session-tagged cron task, persisted through the same service the cron
+    // tools use. It joins the runtime's export stream as transfer inventory
+    // (M7), but the pre-M7 baseline ZIP never contained cron files — they
+    // live outside the session directory — so the frozen ZIP contract must
+    // not materialize them (plan §6.1).
+    const taskId = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
+    await (server as RunningServer).core.accessor.get(ICronTaskPersistence).save(workspaceId, {
+      id: taskId,
+      cron: '0 * * * *',
+      prompt: 'ping',
+      createdAt: 1_700_000_000_000,
+      tags: { sessionId: id },
+    });
+
+    const res = await fetch(`${base}/api/v1/sessions/${id}/export`, {
+      method: 'POST',
+      headers: authHeaders(server as RunningServer, {
+        'content-type': 'application/json',
+        connection: 'close',
+      }),
+      body: '{}',
+    } as never);
+    const archive = Buffer.from(await res.arrayBuffer());
+
+    expect(res.status).toBe(200);
+    const entries = readZipEntries(archive);
+    // No cron file anywhere in the archive...
+    for (const name of entries.keys()) {
+      expect(name).not.toContain(taskId);
+    }
+    // ...while the rest of the archive is unaffected.
+    expect(entries.has('manifest.json')).toBe(true);
+    expect(entries.has('state.json')).toBe(true);
+    // The task itself still exists on disk (the exclusion is a projection
+    // decision, not data loss).
+    const cronDir = join(home as string, 'cron', workspaceId);
+    expect(await readdir(cronDir)).toEqual([`${taskId}.json`]);
   });
 
   it('returns the JSON session-not-found envelope instead of a ZIP', async () => {

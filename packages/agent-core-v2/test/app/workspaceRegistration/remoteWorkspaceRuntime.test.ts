@@ -129,7 +129,12 @@ describe('multi-session hosting over one shared connection (plan §9.1)', () => 
 
     const forked = await runtime.sessions.fork('src', { sessionId: 'forked' });
     expect(forked.ref.runtimeId).toBe(runtime.id);
-    expect((await runtime.sessions.get('forked'))?.metadata['title']).toBe('renamed');
+    // Fork identity semantics (plan §5.8): the fork gets the `Fork:` default
+    // title and `forkedFrom` provenance, not a verbatim metadata copy.
+    expect((await runtime.sessions.get('forked'))?.metadata).toMatchObject({
+      title: 'Fork: renamed',
+      forkedFrom: 'src',
+    });
 
     const cold = await runtime.sessions.coldRead('src');
     expect((await cold.descriptor()).ref.sessionId).toBe('src');

@@ -106,7 +106,15 @@ export type SessionExportEntryKind =
   /** An append-log record stream (agent wire, session logs, ...). */
   | 'records'
   /** A binary object (blobs, media, attachments, tool results, ...). */
-  | 'blob';
+  | 'blob'
+  /**
+   * A session-owned cron task document (plan §7.10). The payload is the
+   * source runtime's stored task record verbatim; the TARGET runtime decides
+   * the write-back policy (re-schedule with a fresh task id re-tagged to the
+   * new session, retain as an opaque blob, ...). Names are logical task
+   * file names — never the source's physical cron directory.
+   */
+  | 'cron';
 
 /**
  * One logical entry of the export stream (plan §3.5): logical kind, owner,
@@ -133,6 +141,16 @@ export interface SessionImportInput {
   /** Runtime-local id for the imported session; minted when absent. */
   readonly sessionId?: string;
   readonly metadata?: SessionMetadataPatch;
+  /**
+   * Fork provenance (plan §5.8): when present, the import applies the target
+   * runtime's SAME-runtime fork identity semantics on top of the transfer
+   * data plane — re-anchored identity, `forkedFrom` set to this source
+   * session id, fresh timestamps, unarchived status, goal state dropped and
+   * the default fork title — instead of the plain transfer semantics (which
+   * keep the source's createdAt/status). The value is a provenance string
+   * only; it is never used for routing.
+   */
+  readonly forkFrom?: string;
   /** The logical entry stream produced by the source runtime's `export`. */
   readonly entries: AsyncIterable<SessionExportEntry>;
 }
@@ -168,4 +186,19 @@ export interface ISessionManager {
   coldRead(sessionId: string): Promise<ISessionColdReader>;
   export(sessionId: string, options?: SessionExportOptions): AsyncIterable<SessionExportEntry>;
   import(input: SessionImportInput): Promise<SessionDescriptor>;
+
+  /**
+   * OPTIONAL opaque revision token covering the session's WHOLE exportable
+   * inventory — descriptor/state, every namespace's documents, records and
+   * blobs, and session-owned cron tasks (plan §3.5: the source stays
+   * consistent across the export window and is re-validated before commit).
+   * It must change whenever ANY byte the export stream could carry changes.
+   * The runtime derives it from its existing storage facts (content hashes,
+   * counters), never from an added watermark file, and flushes a live
+   * lease's pending appends first so the token and the export stream share
+   * one cut. Runtimes without a cheap revision source omit the method —
+   * callers (the transfer coordinator) then skip source-consistency
+   * validation.
+   */
+  revision?(sessionId: string): Promise<string | undefined>;
 }

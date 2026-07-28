@@ -154,7 +154,10 @@ const DOMAIN_LAYER = new Map([
   ['sessionStore', 2],
   // `sessionHostRuntime` holds the pathless, workspace-free multi-runtime
   // session contracts (SessionRef, ISessionHostRuntime/ISessionManager,
-  // ISessionRuntimeContext, registry, routing service). It depends only on
+  // ISessionRuntimeContext, registry, routing service) plus the M7
+  // cross-runtime transfer coordinator (export/import data plane, source
+  // revision validation, in-memory journal — never any marker on a Local
+  // source tree). It depends only on
   // `_base` and the persistence/interface contracts; on top of the numeric
   // layer it carries the targeted import bans of Rule 4 (plan §10.1).
   ['sessionHostRuntime', 2],

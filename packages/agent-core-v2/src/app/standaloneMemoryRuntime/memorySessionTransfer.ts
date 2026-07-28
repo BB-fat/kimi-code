@@ -10,6 +10,13 @@
  * runtime/session ids never leak into the stream. Record logs travel as one
  * encoded record per line, the same framing the node-fs JSONL layout uses.
  *
+ * Session-owned cron entries (M7, plan §7.10) ride the same stream as opaque
+ * payloads: this headless runtime has no cron scheduler, so its documented
+ * write-back policy is RETENTION, not scheduling — a `cron` entry commits as
+ * the `cron/<name>` blob of the session namespace, and export re-projects
+ * exactly those blobs back into `cron` entries, so a memory→local transfer
+ * lands the tasks again. The runtime never interprets the payload.
+ *
  * Import is staged: entries are parsed and validated (kind, schema version,
  * checksum, record framing) into local buffers first, and only then handed to
  * the manager for one atomic commit — a failing stream changes nothing and
@@ -27,6 +34,7 @@ import {
   namespaceForOwner,
   ownerOfNamespace,
   isValidIdSegment,
+  sessionNamespaceOf,
   type MemorySessionBackend,
   type MemorySessionEntry,
 } from './memoryBackend';
@@ -35,6 +43,13 @@ const textDecoder = new TextDecoder();
 const textEncoder = new TextEncoder();
 
 const EXPORT_SCHEMA_VERSION = 1;
+
+/**
+ * Blob-key prefix under which session-owned cron entries are retained inside
+ * the session namespace (the memory runtime's cron write-back policy, M7).
+ * Export re-projects exactly these blobs back into `cron` entries.
+ */
+export const CRON_BLOB_PREFIX = 'cron/';
 
 async function* once(bytes: Uint8Array): AsyncIterable<Uint8Array> {
   yield bytes;
@@ -102,7 +117,14 @@ export async function* exportMemorySession(
     }
     for (const key of await backend.blobBytes.list(namespace)) {
       const bytes = await backend.blobBytes.read(namespace, key);
-      if (bytes !== undefined) yield entry('blob', owner, key, bytes);
+      if (bytes === undefined) continue;
+      // Retained cron payloads re-project as `cron` entries (round-trip
+      // fidelity for memory→local transfers); everything else is a blob.
+      if (owner.kind === 'session' && key.startsWith(CRON_BLOB_PREFIX)) {
+        yield entry('cron', owner, key.slice(CRON_BLOB_PREFIX.length), bytes);
+        continue;
+      }
+      yield entry('blob', owner, key, bytes);
     }
   }
 }
@@ -118,6 +140,8 @@ export interface StagedImport {
   readonly documents: readonly StagedWrite[];
   readonly records: readonly StagedRecords[];
   readonly blobs: readonly StagedWrite[];
+  /** Session-owned cron payloads, retained as opaque `cron/<name>` blobs. */
+  readonly crons: readonly StagedWrite[];
 }
 
 interface StagedWrite {
@@ -153,6 +177,7 @@ export async function stageImportEntries(
   const documents: StagedWrite[] = [];
   const records: StagedRecords[] = [];
   const blobs: StagedWrite[] = [];
+  const crons: StagedWrite[] = [];
   for await (const item of entries) {
     if (item.schemaVersion !== EXPORT_SCHEMA_VERSION) {
       throw transferFailed(`unsupported export schema version ${item.schemaVersion}`);
@@ -181,9 +206,16 @@ export async function stageImportEntries(
       case 'blob':
         blobs.push({ owner: item.owner, name: item.name, bytes });
         break;
+      case 'cron': {
+        if (item.owner.kind !== 'session') {
+          throw transferFailed('cron export entries must be session-owned');
+        }
+        crons.push({ owner: item.owner, name: item.name, bytes });
+        break;
+      }
     }
   }
-  return { descriptor, documents, records, blobs };
+  return { descriptor, documents, records, blobs, crons };
 }
 
 function parseDescriptor(value: unknown): StagedDescriptor {
@@ -254,10 +286,66 @@ export async function commitStagedImport(
   await write(staged.blobs, (namespace, name, bytes) =>
     backend.blobBytes.write(namespace, name, bytes, { atomic: true }),
   );
+  // Cron write-back policy of this headless runtime (M7): RETENTION as
+  // opaque `cron/<name>` blobs of the session namespace — never scheduled,
+  // re-exported as `cron` entries so a later transfer lands them again.
+  for (const item of staged.crons) {
+    const namespace = sessionNamespaceOf(sessionId);
+    entry.namespaces.add(namespace);
+    await backend.blobBytes.write(namespace, `${CRON_BLOB_PREFIX}${item.name}`, item.bytes, {
+      atomic: true,
+    });
+  }
   for (const item of staged.records) {
     const namespace = namespaceForOwner(sessionId, item.owner);
     entry.namespaces.add(namespace);
     if (item.owner.kind === 'agent') entry.agents.add(item.owner.agentId);
     backend.logs.replace(namespace, item.name, item.records);
   }
+}
+
+/**
+ * Whole-inventory revision token (plan §3.5): one FNV-1a chain over the
+ * descriptor facts and every namespace's documents, log records and blobs —
+ * anything the export stream could carry. Derived from storage contents
+ * only; no watermark state anywhere.
+ */
+export async function revisionOfEntry(
+  backend: MemorySessionBackend,
+  entry: MemorySessionEntry,
+): Promise<string> {
+  let hash = 0x811c9dc5;
+  const mixBytes = (bytes: Uint8Array): void => {
+    for (const byte of bytes) {
+      hash ^= byte;
+      hash = Math.imul(hash, 0x01000193);
+    }
+  };
+  const mixText = (text: string): void => mixBytes(textEncoder.encode(text));
+  const { current } = entry;
+  mixText(String(entry.revision));
+  mixText(current.updatedAt);
+  mixText(current.status);
+  mixText(JSON.stringify(current.metadata));
+  for (const namespace of [...entry.namespaces].toSorted()) {
+    mixText(namespace);
+    for (const key of await backend.documentBytes.list(namespace)) {
+      const bytes = await backend.documentBytes.read(namespace, key);
+      if (bytes === undefined) continue;
+      mixText(key);
+      mixBytes(bytes);
+    }
+    for (const key of backend.logs.list(namespace)) {
+      mixText(key);
+      for (const record of backend.logs.entries(namespace, key)) mixBytes(record);
+    }
+    for (const key of await backend.blobBytes.list(namespace)) {
+      const bytes = await backend.blobBytes.read(namespace, key);
+      if (bytes === undefined) continue;
+      mixText(key);
+      mixBytes(bytes);
+    }
+  }
+  const unsigned = hash < 0 ? hash + 2 ** 32 : hash;
+  return unsigned.toString(16).padStart(8, '0');
 }

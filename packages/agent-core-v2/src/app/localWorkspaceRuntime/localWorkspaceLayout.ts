@@ -60,6 +60,16 @@ export function agentScopeOf(workspaceId: string, sessionId: string, agentId: st
   return toPersistenceNamespace(`sessions/${workspaceId}/${sessionId}/agents/${agentId}`);
 }
 
+/**
+ * The workspace-level cron scope (`cron/<wd_id>/<taskId>.json`) holding the
+ * session-tagged cron task documents. Cron lives OUTSIDE the session
+ * directory: exports read it (read-only), imports/forks write it with fresh
+ * task ids re-tagged to the new session (plan §7.10).
+ */
+export function cronScopeOf(workspaceId: string) {
+  return toPersistenceNamespace(`cron/${workspaceId}`);
+}
+
 /* ------------------------------------------------------------------------ */
 /* Id validation                                                            */
 /* ------------------------------------------------------------------------ */
@@ -218,6 +228,46 @@ export function initialStateDocument(
     custom: {},
   };
   return metadata === undefined ? base : applyMetadataPatch(base, metadata);
+}
+
+/* ------------------------------------------------------------------------ */
+/* Fork metadata helpers (shared by same-runtime fork and transfer import)   */
+/* ------------------------------------------------------------------------ */
+
+export function readMetadataString(
+  metadata: SessionMetadata | undefined,
+  key: string,
+): string | undefined {
+  const value = metadata?.[key];
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+export function readMetadataRecord(
+  metadata: SessionMetadata | undefined,
+  key: string,
+): Record<string, unknown> | undefined {
+  const value = metadata?.[key];
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/**
+ * Merge custom metadata for a fork, dropping the `goal` key on both sides —
+ * the same rule `sessionLifecycle` applies (goal state never crosses forks).
+ */
+export function forkCustomMetadata(
+  source: Record<string, unknown> | undefined,
+  input: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  const merged = { ...withoutGoal(source), ...withoutGoal(input) };
+  return Object.keys(merged).length === 0 ? undefined : merged;
+}
+
+function withoutGoal(value: Record<string, unknown> | undefined): Record<string, unknown> {
+  if (value === undefined) return {};
+  const { goal: _drop, ...rest } = value as { goal?: unknown; [key: string]: unknown };
+  return rest;
 }
 
 /* ------------------------------------------------------------------------ */

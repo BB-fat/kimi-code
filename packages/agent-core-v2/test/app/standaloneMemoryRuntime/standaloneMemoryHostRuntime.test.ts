@@ -665,7 +665,9 @@ describe('cold read (plan §3.6)', () => {
 describe('same-runtime fork (plan §5.8)', () => {
   it('copies descriptor, documents, records, blobs and artifacts to a new isolated session', async () => {
     const runtime = new StandaloneMemoryHostRuntime({ id: 'rt-x' });
-    const source = await runtime.sessions.create({ metadata: { origin: 'source' } });
+    const source = await runtime.sessions.create({
+      metadata: { origin: 'source', title: 'Origin', custom: { goal: { active: true }, keep: 1 } },
+    });
     const artifact = await seedSession(runtime, source.ref.sessionId, 'S');
 
     const forked = await runtime.sessions.fork(source.ref.sessionId, {
@@ -676,6 +678,15 @@ describe('same-runtime fork (plan §5.8)', () => {
     expect(forked.status).toBe('active');
     expect(forked.revision).toBe('1');
     expect(forked.metadata).toMatchObject({ origin: 'fork' });
+    // The catalog metadata rewrite matches the local runtime's fork and this
+    // runtime's `forkFrom` import branch: `Fork:` default title, `forkedFrom`
+    // provenance, goal state dropped.
+    expect(forked.metadata).toMatchObject({
+      title: 'Fork: Origin',
+      isCustomTitle: false,
+      forkedFrom: source.ref.sessionId,
+    });
+    expect(forked.metadata['custom']).toEqual({ keep: 1 });
 
     const cold = await runtime.sessions.coldRead(forked.ref.sessionId);
     expect(await cold.listAgents()).toEqual([{ agentId: 'main', metadata: {} }]);
@@ -852,6 +863,156 @@ describe('logical export/import (plan §3.5)', () => {
       code: 'session.transfer_failed',
     });
     expect((await runtime.sessions.list()).items).toHaveLength(0);
+  });
+});
+
+describe('cron retention, fork-semantic import and whole-inventory revision (M7)', () => {
+  it('retains cron entries as session-namespace blobs and re-exports them as cron entries', async () => {
+    const runtime = new StandaloneMemoryHostRuntime({ id: 'rt-x' });
+    const created = await runtime.sessions.create({});
+    await seedSession(runtime, created.ref.sessionId, 'C');
+    const cronBytes = enc.encode(
+      JSON.stringify({ id: '01ARZ3NDEKTSV4RRFFQ69G5FAV', cron: '0 * * * *', prompt: 'p', createdAt: 1 }),
+    );
+
+    // Stage an import carrying a cron entry through the SAME staging path a
+    // cross-runtime transfer drives.
+    const imported = await runtime.sessions.import({
+      sessionId: 'dst-1',
+      entries: (async function* () {
+        for await (const entry of runtime.sessions.export(created.ref.sessionId)) yield entry;
+        yield {
+          kind: 'cron',
+          owner: { kind: 'session' },
+          name: '01ARZ3NDEKTSV4RRFFQ69G5FAV.json',
+          schemaVersion: 1,
+          content: bytesOf(dec.decode(cronBytes)),
+        };
+      })(),
+    });
+    expect(imported.ref.sessionId).toBe('dst-1');
+
+    // Retention, not scheduling: the payload sits as an opaque
+    // `cron/<name>` blob of the session namespace, byte-identical.
+    const lease = await runtime.sessions.open('dst-1', {});
+    const sessionNs = lease.persistence.sessionNamespace();
+    expect(
+      await lease.persistence
+        .blobs(sessionNs)
+        .get(sessionNs, 'cron/01ARZ3NDEKTSV4RRFFQ69G5FAV.json'),
+    ).toEqual(cronBytes);
+    await lease.close('explicit');
+
+    // Round-trip fidelity: re-exporting re-projects the blob as a cron entry.
+    const reexported = await collect(runtime.sessions.export('dst-1'));
+    const cronEntries = reexported.filter((entry) => entry.kind === 'cron');
+    expect(cronEntries).toHaveLength(1);
+    expect(cronEntries[0]?.name).toBe('01ARZ3NDEKTSV4RRFFQ69G5FAV.json');
+    expect(cronEntries[0]?.owner).toEqual({ kind: 'session' });
+    expect(await iterableToText(cronEntries[0]!.content)).toBe(dec.decode(cronBytes));
+
+    // Agent-owned cron entries are rejected by staging.
+    async function* agentCron(): AsyncIterable<SessionExportEntry> {
+      yield {
+        kind: 'cron',
+        owner: { kind: 'agent', agentId: 'main' },
+        name: 'x.json',
+        schemaVersion: 1,
+        content: bytesOf('{}'),
+      };
+    }
+    await expect(runtime.sessions.import({ entries: agentCron() })).rejects.toMatchObject({
+      code: 'session.transfer_failed',
+    });
+  });
+
+  it('applies fork identity semantics on import with forkFrom', async () => {
+    const runtime = new StandaloneMemoryHostRuntime({ id: 'rt-x' });
+    const created = await runtime.sessions.create({
+      sessionId: 'src-1',
+      metadata: { title: 'Origin', custom: { goal: { active: true }, keep: 1 } },
+    });
+    // A live engine-style state.json document, so the re-anchor has something
+    // to rewrite.
+    {
+      const lease = await runtime.sessions.open('src-1', {});
+      const sessionNs = lease.persistence.sessionNamespace();
+      await lease.persistence
+        .documents(sessionNs, jsonDocumentCodec)
+        .set(sessionNs, 'state.json', {
+          id: 'src-1',
+          archived: true,
+          title: 'Origin',
+          custom: { goal: { active: true }, keep: 1 },
+        });
+      await lease.flush();
+      await lease.close('explicit');
+    }
+    // Archive the descriptor too: fork semantics must unarchive regardless.
+    await runtime.sessions.update('src-1', { status: 'archived' });
+    // Guarantee the fork's fresh createdAt is distinguishable (ms precision).
+    await new Promise((resolve) => setTimeout(resolve, 2));
+
+    const forked = await runtime.sessions.import({
+      sessionId: 'dst-fork',
+      forkFrom: 'src-1',
+      entries: runtime.sessions.export('src-1'),
+    });
+
+    expect(forked.status).toBe('active');
+    expect(forked.createdAt).not.toBe(created.createdAt);
+    expect(forked.metadata).toMatchObject({
+      forkedFrom: 'src-1',
+      title: 'Fork: Origin',
+      isCustomTitle: false,
+    });
+    // Goal state never crosses forks; unrelated custom metadata does.
+    expect(forked.metadata['custom']).toEqual({ keep: 1 });
+
+    // The imported engine state.json document got the same fork rewrite.
+    const lease = await runtime.sessions.open('dst-fork', {});
+    const sessionNs = lease.persistence.sessionNamespace();
+    const state = await lease.persistence
+      .documents(sessionNs, jsonDocumentCodec)
+      .get(sessionNs, 'state.json');
+    expect(state).toMatchObject({
+      id: 'dst-fork',
+      archived: false,
+      forkedFrom: 'src-1',
+      title: 'Fork: Origin',
+    });
+    expect((state as Record<string, unknown>)['custom']).toEqual({ keep: 1 });
+    await lease.close('explicit');
+  });
+
+  it('derives a whole-inventory revision: stable, content-sensitive, flush-aware', async () => {
+    const runtime = new StandaloneMemoryHostRuntime({ id: 'rt-x' });
+    expect(await runtime.sessions.revision!('missing')).toBeUndefined();
+    const created = await runtime.sessions.create({ sessionId: 'rev-1' });
+    await seedSession(runtime, 'rev-1', 'R');
+
+    const first = await runtime.sessions.revision!('rev-1');
+    expect(first).toMatch(/^[0-9a-f]{8}$/);
+    expect(await runtime.sessions.revision!('rev-1')).toBe(first);
+
+    // A metadata update changes the token.
+    await runtime.sessions.update('rev-1', { metadata: { title: 'renamed' } });
+    const afterUpdate = await runtime.sessions.revision!('rev-1');
+    expect(afterUpdate).not.toBe(first);
+
+    // A pending (unflushed) append joins the token through the internal flush.
+    const lease = await runtime.sessions.open('rev-1', {});
+    const agentNs = lease.persistence.agentNamespace('main');
+    lease.persistence
+      .logs(agentNs, jsonDocumentCodec)
+      .append(agentNs, 'wire.jsonl', { type: 'wire.late', time: 3000, n: 3 });
+    const afterAppend = await runtime.sessions.revision!('rev-1');
+    expect(afterAppend).not.toBe(afterUpdate);
+    // The flush really happened: the cold reader sees the appended record.
+    const cold = await runtime.sessions.coldRead('rev-1');
+    expect(await collect(cold.readRecords({ agentId: 'main', kind: 'wire.late' }))).toHaveLength(1);
+    expect(await runtime.sessions.revision!('rev-1')).toBe(afterAppend);
+    await lease.close('explicit');
   });
 });
 

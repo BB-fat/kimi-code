@@ -88,8 +88,11 @@ import {
 import { localSessionContextContribution } from './localSessionContextSeed';
 import {
   exportLocalSession,
+  collectSessionCronTasks,
   importedStateDocument,
+  revisionOfLocalSession,
   stageLocalImport,
+  writeStagedCronTask,
   writeStagedFile,
   encodeStateDocument,
   type SessionDirFile,
@@ -99,8 +102,11 @@ import {
   assertValidSessionId,
   descriptorOf,
   fnv1aHex,
+  forkCustomMetadata,
   initialStateDocument,
   isValidIdSegment,
+  readMetadataRecord,
+  readMetadataString,
   readStateDocument,
   sessionScopeOf,
   applyMetadataPatch,
@@ -455,13 +461,35 @@ export class LocalWorkspaceSessionManager implements ISessionManager {
     // so the exported stream is a complete cut at the flush boundary.
     await this.leases.get(sessionId)?.flush();
     const files = await this.walkSessionDir(this.sessionDir(sessionId));
+    // Session-tagged cron tasks live OUTSIDE the session directory
+    // (`cron/<wd_id>/`); they join the stream as logical `cron` entries.
+    // Everything here is read-only — no markers, no staging, no metadata
+    // writes into the source tree (plan §7.10).
+    const crons = await collectSessionCronTasks(this.storage, this.workspaceId, sessionId);
     yield* exportLocalSession({
       runtimeId: this.runtimeId,
       sessionId,
       meta: state.meta,
       stateBytes: state.bytes,
       files,
+      crons,
     });
+  }
+
+  /**
+   * Whole-inventory revision token for the transfer coordinator (plan §3.5):
+   * derived from the stored bytes of every file the export stream could
+   * carry (session directory + session-tagged cron tasks) — no watermark
+   * file anywhere (plan §9.5). Flushes a live lease first so the token and
+   * the export stream share one cut; `undefined` when the session is absent.
+   */
+  async revision(sessionId: string): Promise<string | undefined> {
+    this.assertOnline();
+    if ((await this.readStateTolerant(sessionId)) === undefined) return undefined;
+    await this.leases.get(sessionId)?.flush();
+    const files = await this.walkSessionDir(this.sessionDir(sessionId));
+    const crons = await collectSessionCronTasks(this.storage, this.workspaceId, sessionId);
+    return revisionOfLocalSession(files, crons);
   }
 
   async import(input: SessionImportInput): Promise<SessionDescriptor> {
@@ -476,12 +504,22 @@ export class LocalWorkspaceSessionManager implements ISessionManager {
       );
     }
     const staged = await stageLocalImport(input.entries);
+    // Cron files live OUTSIDE the session directory, so the rollback must
+    // cover them explicitly: every cron file written before a commit
+    // failure is deleted again (plan §3.5: no half-committed transfer).
+    const writtenCrons: { readonly scope: string; readonly key: string }[] = [];
     try {
-      // Payload first, state.json LAST: a session is visible to the index
-      // only once its state.json exists, so the intermediate directory is
-      // invisible to list/get (the local equivalent of staging, plan §3.5).
+      // Payload first, then re-scheduled cron tasks, state.json LAST: a
+      // session is visible to the index only once its state.json exists, so
+      // the intermediate directory is invisible to list/get (the local
+      // equivalent of staging, plan §3.5).
       for (const file of staged.files) {
         await writeStagedFile(this.storage, this.workspaceId, sessionId, file);
+      }
+      for (const cron of staged.crons) {
+        writtenCrons.push(
+          await writeStagedCronTask(this.storage, this.workspaceId, sessionId, cron),
+        );
       }
       const meta = importedStateDocument({
         workspaceId: this.workspaceId,
@@ -489,6 +527,7 @@ export class LocalWorkspaceSessionManager implements ISessionManager {
         cwd: this.cwd,
         staged,
         metadata: input.metadata,
+        forkFrom: input.forkFrom,
         now: Date.now(),
       });
       const bytes = encodeStateDocument(meta);
@@ -496,6 +535,9 @@ export class LocalWorkspaceSessionManager implements ISessionManager {
       await this.appendSessionIndexEntry(sessionId);
       return descriptorOf(this.runtimeId, meta, fnv1aHex(bytes));
     } catch (error) {
+      for (const written of writtenCrons) {
+        await this.storage.delete(written.scope, written.key).catch(() => {});
+      }
       await rm(this.sessionDir(sessionId), { recursive: true, force: true }).catch(() => {});
       throw error;
     }
@@ -780,40 +822,4 @@ export class LocalWorkspaceSessionManager implements ISessionManager {
     files.sort((a, b) => a.rel.localeCompare(b.rel));
     return files;
   }
-}
-
-function readMetadataString(
-  metadata: SameRuntimeForkInput['metadata'],
-  key: string,
-): string | undefined {
-  const value = metadata?.[key];
-  return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
-function readMetadataRecord(
-  metadata: SameRuntimeForkInput['metadata'],
-  key: string,
-): Record<string, unknown> | undefined {
-  const value = metadata?.[key];
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-/**
- * Merge custom metadata for a fork, dropping the `goal` key on both sides —
- * the same rule `sessionLifecycle` applies (goal state never crosses forks).
- */
-function forkCustomMetadata(
-  source: Record<string, unknown> | undefined,
-  input: Record<string, unknown> | undefined,
-): Record<string, unknown> | undefined {
-  const merged = { ...withoutGoal(source), ...withoutGoal(input) };
-  return Object.keys(merged).length === 0 ? undefined : merged;
-}
-
-function withoutGoal(value: Record<string, unknown> | undefined): Record<string, unknown> {
-  if (value === undefined) return {};
-  const { goal: _drop, ...rest } = value as { goal?: unknown; [key: string]: unknown };
-  return rest;
 }

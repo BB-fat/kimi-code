@@ -17,8 +17,8 @@
 
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';
 import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
-import { NotImplementedError } from '#/_base/errors/errors';
 
+import { SessionHostRuntimeError, SessionHostRuntimeErrors } from './errors';
 import type {
   CreateSessionInput,
   DeleteSessionOptions,
@@ -35,6 +35,7 @@ import type {
   SessionCloseReason,
   SessionDescriptor,
 } from './sessionRuntimeContext';
+import { ISessionTransferService } from './sessionTransferService';
 
 /* ------------------------------------------------------------------------ */
 /* Global list                                                               */
@@ -131,13 +132,16 @@ class SessionHandle implements ISessionHandle {
  * surface from `require`) and delegates with the runtime-local session id.
  *
  * Registered as an App-scope service but activated on demand: a composition
- * root starts injecting it from M1 on.
+ * root starts injecting it from M1 on. The transfer dependency is optional
+ * in the constructor so bare test rigs can still `new SessionService(registry)`;
+ * the cross-runtime fork branch fails accurately when it is absent.
  */
 export class SessionService implements ISessionService {
   declare readonly _serviceBrand: undefined;
 
   constructor(
     @ISessionHostRuntimeRegistry private readonly registry: ISessionHostRuntimeRegistry,
+    @ISessionTransferService private readonly transfer?: ISessionTransferService,
   ) {}
 
   async create(runtimeId: string, input: CreateSessionInput): Promise<SessionDescriptor> {
@@ -193,9 +197,20 @@ export class SessionService implements ISessionService {
       return runtime.sessions.fork(ref.sessionId, input);
     }
     // Cross-runtime fork goes through the transfer service's export/import
-    // data plane (plan §5.8); the coordinator lands with the transfer
-    // milestone.
-    throw new NotImplementedError('cross-runtime session fork');
+    // data plane (plan §5.8) — never the local directory-copy helpers.
+    if (this.transfer === undefined) {
+      throw new SessionHostRuntimeError(
+        SessionHostRuntimeErrors.codes.SESSION_TRANSFER_FAILED,
+        'cross-runtime session fork requires the session transfer service (not available in this composition)',
+        { details: { runtimeId: ref.runtimeId, targetRuntimeId } },
+      );
+    }
+    return this.transfer.forkAcrossRuntimes({
+      source: ref,
+      targetRuntimeId,
+      sessionId: input.sessionId,
+      metadata: input.metadata,
+    });
   }
 }
 

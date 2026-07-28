@@ -52,9 +52,22 @@ function isSafeEntryName(name: string): boolean {
   return name.split('/').every((segment) => segment.length > 0 && segment !== '.' && segment !== '..');
 }
 
-/** The relative path an export entry materializes to inside the staging dir. */
+/**
+ * The relative path an export entry materializes to inside the staging dir.
+ *
+ * WHITELIST materialization: only the entry kinds that belong to the frozen
+ * v1 ZIP contract (plan §6.1) — `document`, `records` and `blob` payloads —
+ * land in staging. The `descriptor` kind never did (the zip pipeline builds
+ * its own manifest), and transfer-only kinds such as `cron` (M7, plan §7.10)
+ * must NEVER reach the ZIP: session-tagged cron tasks live outside the
+ * session directory, so the pre-M7 baseline ZIP never contained them. Any
+ * future entry kind added for the transfer data plane is excluded here by
+ * default — extending the ZIP contract is an explicit, separate decision.
+ */
 function entryRelativePath(entry: SessionExportEntry): string | undefined {
-  if (entry.kind === 'descriptor') return undefined;
+  if (entry.kind !== 'document' && entry.kind !== 'records' && entry.kind !== 'blob') {
+    return undefined;
+  }
   const name =
     entry.owner.kind === 'session' ? entry.name : `agents/${entry.owner.agentId}/${entry.name}`;
   return isSafeEntryName(name) ? name : undefined;

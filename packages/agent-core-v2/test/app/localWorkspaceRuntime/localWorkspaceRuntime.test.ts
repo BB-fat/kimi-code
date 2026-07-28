@@ -21,8 +21,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
+import { ulid } from 'ulid';
 
 import { encodeWorkDirKey } from '#/_base/utils/workdir-slug';
+import { CRON_SESSION_TAG, type CronTask } from '#/app/cron/cronTask';
 import { LocalWorkspaceProvider } from '#/app/localWorkspaceRuntime/localWorkspaceProvider';
 import { LocalWorkspaceRuntime } from '#/app/localWorkspaceRuntime/localWorkspaceRuntime';
 import type { SessionExportEntry } from '#/app/sessionHostRuntime/sessionManager';
@@ -31,6 +33,7 @@ import type {
   ISessionRuntimeContext,
 } from '#/app/sessionHostRuntime/sessionRuntimeContext';
 import { jsonDocumentCodec } from '#/persistence/backends/node-fs/atomicDocumentStore';
+import { FileStorageService } from '#/persistence/backends/node-fs/fileStorageService';
 import type { IFileSystemStorageService } from '#/persistence/interface/storage';
 import { createWireMetadataRecord, type WireRecord } from '#/wire/record';
 
@@ -1044,61 +1047,61 @@ describe('artifact service', () => {
 /* Logical export / import (plan §3.5/§5.10/§9.1)                           */
 /* ------------------------------------------------------------------------ */
 
-describe('logical export/import', () => {
-  /** An export entry whose content has been buffered for multi-pass assertions. */
-  interface BufferedEntry {
-    readonly kind: SessionExportEntry['kind'];
-    readonly owner: SessionExportEntry['owner'];
-    readonly name: string;
-    readonly schemaVersion: number;
-    readonly checksum?: string;
-    readonly bytes: Uint8Array;
-  }
+/** An export entry whose content has been buffered for multi-pass assertions. */
+interface BufferedEntry {
+  readonly kind: SessionExportEntry['kind'];
+  readonly owner: SessionExportEntry['owner'];
+  readonly name: string;
+  readonly schemaVersion: number;
+  readonly checksum?: string;
+  readonly bytes: Uint8Array;
+}
 
-  async function bufferExport(env: TestEnv, sessionId: string): Promise<BufferedEntry[]> {
-    const buffered: BufferedEntry[] = [];
-    for await (const entry of env.runtime.sessions.export(sessionId)) {
-      buffered.push({
-        kind: entry.kind,
-        owner: entry.owner,
-        name: entry.name,
-        schemaVersion: entry.schemaVersion,
-        checksum: entry.checksum,
-        bytes: mergeChunks(await collect(entry.content)),
-      });
-    }
-    return buffered;
-  }
-
-  /** Rebuild fresh single-pass export entries from a buffered snapshot. */
-  function toEntries(buffered: readonly BufferedEntry[]): SessionExportEntry[] {
-    return buffered.map((entry) => ({
+async function bufferExport(env: TestEnv, sessionId: string): Promise<BufferedEntry[]> {
+  const buffered: BufferedEntry[] = [];
+  for await (const entry of env.runtime.sessions.export(sessionId)) {
+    buffered.push({
       kind: entry.kind,
       owner: entry.owner,
       name: entry.name,
       schemaVersion: entry.schemaVersion,
       checksum: entry.checksum,
-      content: bytesAsIterable(entry.bytes),
-    }));
+      bytes: mergeChunks(await collect(entry.content)),
+    });
   }
+  return buffered;
+}
 
-  async function* bytesAsIterable(bytes: Uint8Array): AsyncIterable<Uint8Array> {
-    yield bytes;
-  }
+/** Rebuild fresh single-pass export entries from a buffered snapshot. */
+function toEntries(buffered: readonly BufferedEntry[]): SessionExportEntry[] {
+  return buffered.map((entry) => ({
+    kind: entry.kind,
+    owner: entry.owner,
+    name: entry.name,
+    schemaVersion: entry.schemaVersion,
+    checksum: entry.checksum,
+    content: bytesAsIterable(entry.bytes),
+  }));
+}
 
-  async function seedExportable(
-    env: TestEnv,
-    sessionId: string,
-  ): Promise<{ readonly artifact: ArtifactRef }> {
-    await env.runtime.sessions.create({ sessionId, metadata: { title: 'exportable' } });
-    const { lease, artifact } = await seedViaLease(env, sessionId, 'xp');
-    await lease.close('explicit');
-    await registerMainAgent(env, sessionId);
-    await mkdir(join(sessionDirOf(env, sessionId), 'logs'), { recursive: true });
-    await writeFile(join(sessionDirOf(env, sessionId), 'logs/kimi-code.log'), 'export-log\n');
-    return { artifact };
-  }
+async function* bytesAsIterable(bytes: Uint8Array): AsyncIterable<Uint8Array> {
+  yield bytes;
+}
 
+async function seedExportable(
+  env: TestEnv,
+  sessionId: string,
+): Promise<{ readonly artifact: ArtifactRef }> {
+  await env.runtime.sessions.create({ sessionId, metadata: { title: 'exportable' } });
+  const { lease, artifact } = await seedViaLease(env, sessionId, 'xp');
+  await lease.close('explicit');
+  await registerMainAgent(env, sessionId);
+  await mkdir(join(sessionDirOf(env, sessionId), 'logs'), { recursive: true });
+  await writeFile(join(sessionDirOf(env, sessionId), 'logs/kimi-code.log'), 'export-log\n');
+  return { artifact };
+}
+
+describe('logical export/import', () => {
   it('exports the full inventory as logical byte-passthrough entries with stable names', async () => {
     const env = await makeEnv({});
     await seedExportable(env, 'exp-src');
@@ -1271,6 +1274,334 @@ describe('logical export/import', () => {
 async function* toIterable(entries: readonly SessionExportEntry[]): AsyncIterable<SessionExportEntry> {
   yield* entries;
 }
+
+/* ------------------------------------------------------------------------ */
+/* M7: cron inventory, fork-semantic import, whole-inventory revision        */
+/* ------------------------------------------------------------------------ */
+
+/** Write a session-tagged cron task into the workspace-level cron scope. */
+async function writeCronTask(
+  env: TestEnv,
+  sessionId: string,
+  prompt: string,
+): Promise<CronTask> {
+  const task: CronTask = {
+    id: ulid(),
+    cron: '0 * * * *',
+    prompt,
+    createdAt: 1_700_000_000_000,
+    recurring: true,
+    tags: { [CRON_SESSION_TAG]: sessionId },
+  };
+  const dir = join(env.homeDir, 'cron', env.workspaceId);
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, `${task.id}.json`), jsonDocumentCodec.encode(task));
+  return task;
+}
+
+async function readCronDir(env: TestEnv): Promise<readonly string[]> {
+  try {
+    return (await readdir(join(env.homeDir, 'cron', env.workspaceId))).toSorted();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+}
+
+describe('session-tagged cron transfer inventory (M7, plan §7.10)', () => {
+  it('exports session-tagged cron tasks as logical cron entries — read-only, other sessions excluded', async () => {
+    const env = await makeEnv({});
+    await seedExportable(env, 'exp-src');
+    const cron = await writeCronTask(env, 'exp-src', 'ping src');
+    const other = await writeCronTask(env, 'other-session', 'ping other');
+    const cronBytes = await readFile(
+      join(env.homeDir, 'cron', env.workspaceId, `${cron.id}.json`),
+      'utf8',
+    );
+
+    const entries = await bufferExport(env, 'exp-src');
+    const cronEntries = entries.filter((entry) => entry.kind === 'cron');
+    expect(cronEntries).toHaveLength(1);
+    expect(cronEntries[0]?.owner).toEqual({ kind: 'session' });
+    // Logical name: the task file name, never the cron/<wd_id>/ physical path.
+    expect(cronEntries[0]?.name).toBe(`${cron.id}.json`);
+    expect(cronEntries[0]?.name).not.toContain(env.workspaceId);
+    expect(cronEntries[0]?.name).not.toContain(env.homeDir);
+    // Byte-passthrough of the stored document.
+    expect(dec.decode(cronEntries[0]!.bytes)).toBe(cronBytes);
+    const { fnv1aHex } = await import('#/app/localWorkspaceRuntime/localWorkspaceLayout');
+    expect(cronEntries[0]?.checksum).toBe(fnv1aHex(cronEntries[0]!.bytes));
+
+    // Read-only: both cron files are byte-identical after the export.
+    expect(await readFile(join(env.homeDir, 'cron', env.workspaceId, `${cron.id}.json`), 'utf8')).toBe(
+      cronBytes,
+    );
+    expect(await readCronDir(env)).toEqual([`${cron.id}.json`, `${other.id}.json`].toSorted());
+  });
+
+  it('re-schedules imported cron entries with a fresh id and the tag re-anchored to the new session', async () => {
+    const env = await makeEnv({});
+    await seedExportable(env, 'exp-src');
+    const cron = await writeCronTask(env, 'exp-src', 'ping import');
+    const entries = await bufferExport(env, 'exp-src');
+
+    const imported = await env.runtime.sessions.import({
+      sessionId: 'exp-dst',
+      entries: toIterable(toEntries(entries)),
+    });
+    expect(imported.ref.sessionId).toBe('exp-dst');
+
+    const cronFiles = await readCronDir(env);
+    // The source task kept its file; the import added a FRESH task id.
+    expect(cronFiles).toHaveLength(2);
+    expect(cronFiles).toContain(`${cron.id}.json`);
+    const landedName = cronFiles.find((name) => name !== `${cron.id}.json`)!;
+    const landed = JSON.parse(
+      await readFile(join(env.homeDir, 'cron', env.workspaceId, landedName), 'utf8'),
+    ) as CronTask;
+    expect(landed.id).not.toBe(cron.id);
+    expect(landed.id).toBe(landedName.replace(/\.json$/, ''));
+    expect(landed.tags?.[CRON_SESSION_TAG]).toBe('exp-dst');
+    expect(landed).toMatchObject({
+      cron: cron.cron,
+      prompt: 'ping import',
+      createdAt: cron.createdAt,
+      recurring: true,
+    });
+    // The source task is untouched.
+    const kept = JSON.parse(
+      await readFile(join(env.homeDir, 'cron', env.workspaceId, `${cron.id}.json`), 'utf8'),
+    ) as CronTask;
+    expect(kept.tags?.[CRON_SESSION_TAG]).toBe('exp-src');
+  });
+
+  it('rejects malformed or invalid cron entries at staging time without writing anything', async () => {
+    const env = await makeEnv({});
+    await seedExportable(env, 'exp-src');
+    const good = toEntries(await bufferExport(env, 'exp-src'));
+    const cronEntry = (bytes: Uint8Array, checksum?: string): SessionExportEntry => ({
+      kind: 'cron',
+      owner: { kind: 'session' },
+      name: 'task.json',
+      schemaVersion: 1,
+      checksum,
+      content: bytesAsIterable(bytes),
+    });
+
+    // Not JSON at all.
+    const garbage = enc.encode('not a cron task');
+    const { fnv1aHex } = await import('#/app/localWorkspaceRuntime/localWorkspaceLayout');
+    await expect(
+      env.runtime.sessions.import({
+        sessionId: 'bad-cron-1',
+        entries: toIterable([...good, cronEntry(garbage, fnv1aHex(garbage))]),
+      }),
+    ).rejects.toMatchObject({ code: 'session.transfer_failed' });
+
+    // Valid JSON but not a valid CronTask.
+    const invalid = enc.encode(JSON.stringify({ id: 'x', nope: true }));
+    await expect(
+      env.runtime.sessions.import({
+        sessionId: 'bad-cron-2',
+        entries: toIterable([...good, cronEntry(invalid, fnv1aHex(invalid))]),
+      }),
+    ).rejects.toMatchObject({ code: 'session.transfer_failed' });
+
+    // An agent-owned cron entry is nonsense and rejected too.
+    await expect(
+      env.runtime.sessions.import({
+        sessionId: 'bad-cron-3',
+        entries: toIterable([
+          ...good,
+          {
+            kind: 'cron',
+            owner: { kind: 'agent', agentId: 'main' },
+            name: 'task.json',
+            schemaVersion: 1,
+            content: bytesOf(JSON.stringify({})),
+          },
+        ]),
+      }),
+    ).rejects.toMatchObject({ code: 'session.transfer_failed' });
+
+    expect(await readdir(join(env.homeDir, 'sessions', env.workspaceId))).toEqual(['exp-src']);
+    expect(await readCronDir(env)).toEqual([]);
+  });
+
+  it('rolls back already-written cron files when the commit fails mid-way (cron lives outside the session directory)', async () => {
+    // A storage wrapper that lets the test flip `state.json` writes to
+    // failing AFTER the seed: the import commit writes payload files first,
+    // then re-scheduled cron tasks, then `state.json` LAST — so a state.json
+    // failure is guaranteed to happen with cron files already on disk.
+    const homeDir = await makeTempDir('lwr-home-');
+    const cwd = await makeTempDir('lwr-ws-');
+    const delegate = new FileStorageService(homeDir, 0o700, 0o600);
+    let failStateWrites = false;
+    const storage: IFileSystemStorageService = {
+      read: (scope, key) => delegate.read(scope, key),
+      readStream: (scope, key, range) => delegate.readStream(scope, key, range),
+      write: async (scope, key, data, options) => {
+        if (failStateWrites && key === 'state.json') {
+          throw new Error('injected commit failure');
+        }
+        return delegate.write(scope, key, data, options);
+      },
+      writeStream: (scope, key, source, options) =>
+        delegate.writeStream(scope, key, source, options),
+      append: (scope, key, data, options) => delegate.append(scope, key, data, options),
+      list: (scope, prefix) => delegate.list(scope, prefix),
+      delete: (scope, key) => delegate.delete(scope, key),
+      flush: () => delegate.flush(),
+      close: () => delegate.close(),
+    } as IFileSystemStorageService;
+    const env = await makeEnv({ homeDir, cwd, storage });
+    await seedExportable(env, 'exp-src');
+    const cron = await writeCronTask(env, 'exp-src', 'ping rollback');
+    const entries = toEntries(await bufferExport(env, 'exp-src'));
+
+    failStateWrites = true;
+    await expect(
+      env.runtime.sessions.import({ sessionId: 'exp-dst', entries: toIterable(entries) }),
+    ).rejects.toThrow('injected commit failure');
+
+    // The staged session directory was removed AND the cron file written
+    // before the failure was deleted again — only the source task remains.
+    expect(await readdir(join(env.homeDir, 'sessions', env.workspaceId))).toEqual(['exp-src']);
+    expect(await readCronDir(env)).toEqual([`${cron.id}.json`]);
+    // The discovery log never learned about the failed import.
+    expect((await readSessionIndex(env.homeDir)).map((entry) => entry['sessionId'])).toEqual([
+      'exp-src',
+    ]);
+    // The source is untouched.
+    expect(await env.runtime.sessions.get('exp-src')).toBeDefined();
+  });
+});
+
+describe('fork-semantic import (M7, plan §5.8)', () => {
+  it('applies the same-runtime fork rewrite to the imported state.json', async () => {
+    const env = await makeEnv({});
+    await seedExportable(env, 'exp-src');
+    // Shape the source like a finished session: archived, titled, goal state —
+    // and a fixed old createdAt so the fork's fresh timestamp is unambiguous.
+    const meta = await readStateJson(env, 'exp-src');
+    meta['archived'] = true;
+    meta['custom'] = { goal: { active: true }, keep: 'yes' };
+    meta['createdAt'] = 1000;
+    await writeStateJson(env, 'exp-src', meta);
+    const entries = await bufferExport(env, 'exp-src');
+
+    const imported = await env.runtime.sessions.import({
+      sessionId: 'exp-fork',
+      forkFrom: 'exp-src',
+      entries: toIterable(toEntries(entries)),
+    });
+    expect(imported.status).toBe('active');
+
+    const state = await readStateJson(env, 'exp-fork');
+    expect(state).toMatchObject({
+      id: 'exp-fork',
+      archived: false,
+      forkedFrom: 'exp-src',
+      title: 'Fork: exportable',
+      isCustomTitle: false,
+      cwd: env.cwd,
+      agents: { main: { type: 'main' } },
+    });
+    // Goal state never crosses forks; unrelated custom metadata does.
+    expect(state['custom']).toEqual({ keep: 'yes' });
+    // Fork timestamps are fresh, not the source's.
+    expect(state['createdAt']).toBeGreaterThan(1000);
+
+    // A caller title wins and marks the title as custom.
+    const titled = await env.runtime.sessions.import({
+      sessionId: 'exp-fork-2',
+      forkFrom: 'exp-src',
+      metadata: { title: 'My fork' },
+      entries: toIterable(toEntries(entries)),
+    });
+    expect(titled.metadata).toMatchObject({ title: 'My fork' });
+    const titledState = await readStateJson(env, 'exp-fork-2');
+    expect(titledState).toMatchObject({ title: 'My fork', isCustomTitle: true });
+  });
+});
+
+describe('whole-inventory revision (M7, plan §3.5)', () => {
+  it('is undefined for unknown sessions, stable across reads, and changes on any inventory byte', async () => {
+    const env = await makeEnv({});
+    expect(await env.runtime.sessions.revision!('missing')).toBeUndefined();
+    await seedExportable(env, 'exp-src');
+    const cron = await writeCronTask(env, 'exp-src', 'ping rev');
+
+    const first = await env.runtime.sessions.revision!('exp-src');
+    expect(first).toMatch(/^[0-9a-f]{8}$/);
+    expect(await env.runtime.sessions.revision!('exp-src')).toBe(first);
+
+    // A metadata update changes the token.
+    await env.runtime.sessions.update('exp-src', { metadata: { title: 'renamed' } });
+    const afterUpdate = await env.runtime.sessions.revision!('exp-src');
+    expect(afterUpdate).not.toBe(first);
+
+    // A new session-directory file changes the token.
+    await writeFile(join(sessionDirOf(env, 'exp-src'), 'extra.txt'), 'x');
+    const afterFile = await env.runtime.sessions.revision!('exp-src');
+    expect(afterFile).not.toBe(afterUpdate);
+
+    // A cron-scope change changes the token too (cron rides the stream).
+    await writeFile(
+      join(env.homeDir, 'cron', env.workspaceId, `${cron.id}.json`),
+      jsonDocumentCodec.encode({ ...cron, prompt: 'edited' }),
+    );
+    expect(await env.runtime.sessions.revision!('exp-src')).not.toBe(afterFile);
+  });
+
+  it('flushes a live lease before deriving the token, so it matches the export cut', async () => {
+    const env = await makeEnv({});
+    await env.runtime.sessions.create({ sessionId: 'exp-src' });
+    const lease = await env.runtime.sessions.open('exp-src', {});
+    const agentNs = lease.persistence.agentNamespace('main');
+    const logs = lease.persistence.logs(agentNs, jsonDocumentCodec);
+    logs.append(agentNs, 'wire.jsonl', createWireMetadataRecord(1000));
+    logs.append(agentNs, 'wire.jsonl', { type: 'wire.test', time: 2000, marker: 'rev', n: 1 });
+    // Not flushed: the pending append still joins the token through the
+    // revision call's internal flush.
+    const revision = await env.runtime.sessions.revision!('exp-src');
+    expect(revision).toMatch(/^[0-9a-f]{8}$/);
+    // The flush really happened: a cold reader sees the appended record.
+    const cold = await env.runtime.sessions.coldRead('exp-src');
+    expect(await collect(cold.readRecords({ agentId: 'main', kind: 'wire.test' }))).toHaveLength(1);
+    // And the token is stable now that nothing new is pending.
+    expect(await env.runtime.sessions.revision!('exp-src')).toBe(revision);
+    await lease.close('explicit');
+  });
+});
+
+describe('import visibility (M7, plan §9.6)', () => {
+  it('keeps an in-flight import invisible to list/get until the staged commit lands', async () => {
+    const env = await makeEnv({});
+    await seedExportable(env, 'exp-src');
+    const entries = toEntries(await bufferExport(env, 'exp-src'));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    async function* gated(): AsyncIterable<SessionExportEntry> {
+      for (const entry of entries) {
+        yield entry;
+        await gate; // staging blocks here — nothing has committed yet
+      }
+    }
+    const pending = env.runtime.sessions.import({ sessionId: 'exp-dst', entries: gated() });
+    // Let the import reach the gate.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect((await env.runtime.sessions.list()).items.map((d) => d.ref.sessionId)).toEqual([
+      'exp-src',
+    ]);
+    expect(await env.runtime.sessions.get('exp-dst')).toBeUndefined();
+    release();
+    await pending;
+    expect(await env.runtime.sessions.get('exp-dst')).toBeDefined();
+  });
+});
 
 /* ------------------------------------------------------------------------ */
 /* Legacy layout compatibility (plan §9.5)                                  */

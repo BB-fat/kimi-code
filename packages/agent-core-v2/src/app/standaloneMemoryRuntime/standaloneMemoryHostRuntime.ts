@@ -48,6 +48,7 @@ import type {
 import type {
   ISessionColdReader,
   SessionDescriptor,
+  SessionMetadata,
   SessionRuntimeContributions,
 } from '#/app/sessionHostRuntime/sessionRuntimeContext';
 import { ErrorCodes } from '#/errors';
@@ -67,6 +68,7 @@ import {
 import {
   commitStagedImport,
   exportMemorySession,
+  revisionOfEntry,
   stageImportEntries,
 } from './memorySessionTransfer';
 
@@ -266,11 +268,7 @@ export class StandaloneMemorySessionManager implements ISessionManager {
         createdAt: now,
         updatedAt: now,
         status: 'active',
-        metadata: {
-          ...structuredClone(source.current.metadata),
-          forkedFrom: sourceSessionId,
-          ...(input.metadata === undefined ? {} : structuredClone(input.metadata)),
-        },
+        metadata: this.forkCatalogMetadata(source.current.metadata, sourceSessionId, input.metadata),
         revision: '1',
       },
       revision: 1,
@@ -334,6 +332,40 @@ export class StandaloneMemorySessionManager implements ISessionManager {
     );
   }
 
+  /**
+   * The catalog-metadata rewrite shared by the same-runtime fork and the
+   * `forkFrom` import branch (plan §5.8) — the SAME rules the local runtime
+   * applies to `state.json` and `reanchorStateDocument` applies to the stored
+   * engine document: the patch merges over the source, the title becomes
+   * `Fork: <source title>` unless the patch names one, `forkedFrom` records
+   * the provenance, and goal state never crosses forks (dropped from the
+   * merged `custom`). Fresh timestamps and the unarchived status are the
+   * caller's business (both fork paths already produce them).
+   */
+  private forkCatalogMetadata(
+    sourceMetadata: SessionMetadata,
+    sourceSessionId: string,
+    patch: SameRuntimeForkInput['metadata'],
+  ): Record<string, unknown> {
+    const metadata: Record<string, unknown> = {
+      ...structuredClone(sourceMetadata),
+      ...(patch === undefined ? {} : structuredClone(patch)),
+    };
+    const titleFromInput = readMetadataString(patch, 'title');
+    const sourceTitle = readMetadataString(sourceMetadata, 'title');
+    metadata['title'] = titleFromInput ?? `Fork: ${sourceTitle ?? sourceSessionId}`;
+    metadata['isCustomTitle'] =
+      titleFromInput !== undefined ? true : metadata['isCustomTitle'] === true;
+    metadata['forkedFrom'] = sourceSessionId;
+    const custom = readMetadataRecord(metadata['custom']);
+    if (custom !== undefined) {
+      const stripped = withoutGoal(custom);
+      if (Object.keys(stripped).length === 0) delete metadata['custom'];
+      else metadata['custom'] = stripped;
+    }
+    return metadata;
+  }
+
   async coldRead(sessionId: string): Promise<ISessionColdReader> {
     this.assertOnline();
     this.requireEntry(sessionId);
@@ -368,16 +400,24 @@ export class StandaloneMemorySessionManager implements ISessionManager {
     }
     const staged = await stageImportEntries(input.entries);
     const now = new Date().toISOString();
+    // Fork identity semantics (plan §5.8): with `forkFrom` the import applies
+    // the same rewrite this runtime's same-runtime fork performs — fresh
+    // timestamps, unarchived, `forkedFrom` provenance, goal state dropped,
+    // default fork title — instead of keeping the source's transfer facts.
+    const forking = input.forkFrom !== undefined;
+    const metadata: Record<string, unknown> = forking
+      ? this.forkCatalogMetadata(staged.descriptor.metadata ?? {}, input.forkFrom!, input.metadata)
+      : {
+          ...structuredClone(staged.descriptor.metadata ?? {}),
+          ...(input.metadata === undefined ? {} : structuredClone(input.metadata)),
+        };
     const entry: MemorySessionEntry = {
       current: {
         ref: { runtimeId: this.runtimeId, sessionId },
-        createdAt: staged.descriptor.createdAt ?? now,
+        createdAt: forking ? now : (staged.descriptor.createdAt ?? now),
         updatedAt: now,
-        status: staged.descriptor.status ?? 'active',
-        metadata: {
-          ...structuredClone(staged.descriptor.metadata ?? {}),
-          ...(input.metadata === undefined ? {} : structuredClone(input.metadata)),
-        },
+        status: forking ? 'active' : (staged.descriptor.status ?? 'active'),
+        metadata,
         revision: '1',
       },
       revision: 1,
@@ -387,8 +427,28 @@ export class StandaloneMemorySessionManager implements ISessionManager {
       lease: undefined,
     };
     await commitStagedImport(this.backend, entry, staged);
+    if (forking) {
+      // Re-anchor the imported engine metadata document (when the stream
+      // carried one) exactly as a same-runtime fork would.
+      await this.reanchorStateDocument(input.forkFrom!, sessionId, {
+        metadata: input.metadata,
+      });
+    }
     this.catalog.set(sessionId, entry);
     return cloneDescriptor(entry.current);
+  }
+
+  /**
+   * Whole-inventory revision token for the transfer coordinator (plan §3.5).
+   * Flushes a live lease first so the token and the export stream share one
+   * cut; `undefined` when the session does not exist here.
+   */
+  async revision(sessionId: string): Promise<string | undefined> {
+    this.assertOnline();
+    const entry = this.catalog.get(sessionId);
+    if (entry === undefined) return undefined;
+    if (entry.lease !== undefined) await entry.lease.flush();
+    return revisionOfEntry(this.backend, entry);
   }
 
   /** Drive the whole runtime offline (plan §5.4): leases lost, data retained. */
