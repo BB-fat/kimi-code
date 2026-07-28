@@ -1,19 +1,21 @@
 /**
- * `skillCatalog` domain (L3) — file-watch helper for file-based skill sources.
+ * `skillCatalog` domain (L3) — file-watch helper for file-based producers.
  *
- * Watches a source's candidate root paths through the os `IHostFsWatchService`,
- * debounces raw fs events into one callback, and lets the owning source re-fire
- * its `onDidChange` so the session catalog reloads just that source. Each
- * candidate is watched recursively, and its parent directory is watched
- * non-recursively as well: chokidar cannot bind a deep watch whose parent is
- * still missing, so a parent event re-binds the recursive watch — this is how
- * a skills root created mid-session (first `.agents/skills` in a project) gets
- * detected. Plain helper constructed and disposed by each file skill source —
- * not a scoped service.
+ * Watches a producer's candidate paths (skill roots, AGENTS.md files) through
+ * the os `IHostFsWatchService`, debounces raw fs events into one callback, and
+ * lets the owner re-fire its change signal. Each candidate is watched
+ * recursively, and its parent directory is watched non-recursively as well:
+ * chokidar cannot bind a deep watch whose parent is still missing, so a
+ * parent event re-binds the recursive watch — this is how a path created
+ * mid-session (first `.agents/skills` in a project, a new `.kimi-code/AGENTS.md`)
+ * gets detected. An optional `filter` confines recursive-handle events to
+ * relevant paths (parent-handle events always pass — they carry the re-bind).
+ * Plain helper constructed and disposed by its owner — not a scoped service.
  */
 
 import { Disposable } from '#/_base/di/lifecycle';
 import {
+  type HostFsChange,
   type IHostFsWatchHandle,
   IHostFsWatchService,
 } from '#/os/interface/hostFsWatch';
@@ -32,6 +34,7 @@ export class SkillSourceWatcher extends Disposable {
   constructor(
     private readonly hostFsWatch: IHostFsWatchService,
     private readonly onChanged: () => void,
+    private readonly filter?: (change: HostFsChange) => boolean,
   ) {
     super();
   }
@@ -51,12 +54,16 @@ export class SkillSourceWatcher extends Disposable {
 
   private watchCandidate(path: string): void {
     const recursive = this.hostFsWatch.watch(path, { recursive: true });
-    recursive.onDidChange(() => this.schedule());
+    recursive.onDidChange((change) => {
+      if (this.filter === undefined || this.filter(change)) this.schedule();
+    });
     const separator = path.includes('\\') ? '\\' : '/';
     const parentPath = path.slice(0, Math.max(0, path.lastIndexOf(separator)));
     const entry: WatchEntry = { recursive, parent: undefined };
     if (parentPath.length > 0 && parentPath !== path) {
       const parent = this.hostFsWatch.watch(parentPath, { recursive: false });
+      // Parent events always pass the filter: they re-bind the recursive watch
+      // so a candidate whose subtree did not exist yet still gets detected.
       parent.onDidChange(() => this.onParentChange(path));
       entry.parent = parent;
     }
@@ -71,7 +78,9 @@ export class SkillSourceWatcher extends Disposable {
     // debounced callback.
     entry.recursive.dispose();
     const recursive = this.hostFsWatch.watch(path, { recursive: true });
-    recursive.onDidChange(() => this.schedule());
+    recursive.onDidChange((change) => {
+      if (this.filter === undefined || this.filter(change)) this.schedule();
+    });
     entry.recursive = recursive;
     this.schedule();
   }

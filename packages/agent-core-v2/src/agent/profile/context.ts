@@ -72,6 +72,30 @@ export async function loadAgentsMd(
   return result.content;
 }
 
+/**
+ * Every AGENTS.md path the loader chain can draw from, in chain order and
+ * without existence filtering — the watch candidates for change detection
+ * (`agentsMdReminder`). Keep in sync with `loadAgentsMdForRoots`.
+ */
+export async function agentsMdCandidatePaths(
+  deps: ProfileContextDeps,
+  brandHome: string | undefined,
+  workDir: string,
+): Promise<readonly string[]> {
+  const realHome = deps.homeDir;
+  const brandDir = brandHome ?? join(realHome, '.kimi-code');
+  const paths: string[] = [join(brandDir, 'AGENTS.md')];
+  const genericDir = join(realHome, '.agents');
+  paths.push(join(genericDir, 'AGENTS.md'), join(genericDir, 'agents.md'));
+
+  const projectRoot = await findProjectRoot(deps, normalize(workDir));
+  for (const dir of dirsRootToLeaf(normalize(workDir), projectRoot)) {
+    paths.push(join(dir, '.kimi-code', 'AGENTS.md'));
+    paths.push(join(dir, 'AGENTS.md'), join(dir, 'agents.md'));
+  }
+  return paths;
+}
+
 interface LoadedAgentsMd {
   readonly content: string;
   readonly warning: string | undefined;

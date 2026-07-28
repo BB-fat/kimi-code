@@ -154,6 +154,35 @@ describe('AgentProfileService.bind', () => {
     });
   });
 
+  it('re-renders the system prompt when cwd changes after binding', async () => {
+    const { profile: svc } = buildContext();
+    await svc.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: MOCK_MODEL, cwd: homeDir });
+    expect(svc.getSystemPrompt()).toContain(`The current working directory is \`${homeDir}\``);
+
+    const nextCwd = await mkdtemp(join(tmpdir(), 'kimi-cwd-next-'));
+    try {
+      svc.update({ cwd: nextCwd });
+      await vi.waitFor(() => {
+        expect(svc.getSystemPrompt()).toContain(
+          `The current working directory is \`${nextCwd}\``,
+        );
+      });
+    } finally {
+      await rm(nextCwd, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the rendered system prompt when cwd is set to its current value', async () => {
+    const { profile: svc } = buildContext();
+    await svc.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: MOCK_MODEL, cwd: homeDir });
+    const before = svc.getSystemPrompt();
+
+    svc.update({ cwd: homeDir });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(svc.getSystemPrompt()).toBe(before);
+  });
+
   it('restores the subagent allowlist from the binding record without catalog resolution', async () => {
     const persistence = new InMemoryWireRecordPersistence();
     ctx = createTestAgent({ persistence }, hostEnvironmentServices(homeDir));

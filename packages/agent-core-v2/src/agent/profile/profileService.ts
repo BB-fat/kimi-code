@@ -261,12 +261,19 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     ) {
       this.activeProfile = undefined;
     }
+    // A cwd change invalidates the whole environment section (cwd, listing,
+    // AGENTS.md chain, project skill roots) — re-render rather than annotate.
+    // Compared before the dispatch, which applies the new cwd to the Model.
+    const cwdChanged = changed.cwd !== undefined && changed.cwd !== this.cwd;
     if (Object.keys(configChanged).length > 0) {
       this.wire.dispatch(configUpdate(this.resolveConfigPayload(configChanged)));
       this.afterConfigDispatch(configChanged);
     }
     if (activeToolNames !== undefined) {
       this.setActiveTools(activeToolNames);
+    }
+    if (cwdChanged) {
+      void this.refreshSystemPrompt();
     }
   }
 

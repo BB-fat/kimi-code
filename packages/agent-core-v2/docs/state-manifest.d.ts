@@ -23,7 +23,7 @@
 // references become '(circular)', and class instances collapse to a '(ClassName)'
 // marker — the wire shape of an entry is the JSON projection of the type here.
 //
-// Index (Session: 28 keys · Agent: 70 keys)
+// Index (Session: 28 keys · Agent: 71 keys)
 //   Session
 //     cron.inFlight                             src/session/cron/sessionCronServiceImpl.ts
 //     cron.lastSeenAt                           src/session/cron/sessionCronServiceImpl.ts
@@ -59,6 +59,7 @@
 //     activityView.lastTurn                           src/agent/activityView/activityViewService.ts
 //     activityView.lifecycle                          src/agent/activityView/activityViewService.ts
 //     activityView.turn                               src/agent/activityView/activityViewService.ts
+//     agentsMdReminder.seededContent                  src/agent/profile/agentsMdReminderService.ts
 //     contextInjector.isNewTurn                       src/agent/contextInjector/contextInjectorService.ts
 //     contextProjector.lastRepairSignature            src/agent/contextProjector/contextProjectorService.ts
 //     contextSize.lastEmittedTokens                   src/agent/contextSize/contextSizeService.ts
@@ -1014,7 +1015,7 @@ export interface AgentStateSnapshot {
   'llmRequester.lastConfigLogSignature': string | undefined;
   'llmRequester.mediaDegradedTurns': Set<number>;
   'llmRequester.mediaStrippedTurns': Map<number, /* MediaStripSnapshot — packages/agent-core-v2/src/agent/contextProjector/contextProjector.ts */ {
-    readonly "__@mediaStripSnapshotBrand@2701": undefined;
+    readonly "__@mediaStripSnapshotBrand@2731": undefined;
   }>;
   'llmRequester.turnConfigs': Map<number, /* TurnRequestConfig — packages/agent-core-v2/src/agent/llmRequester/llmRequesterService.ts */ {
     readonly resolved: /* ProfileModelContext — packages/agent-core-v2/src/agent/profile/profile.ts */ {
@@ -1090,6 +1091,8 @@ export interface AgentStateSnapshot {
   'permissionMode.lastMode': 'manual' | 'yolo' | 'auto' | undefined;
   // src/agent/plan/injection/planModeInjection.ts
   'plan.wasActive': boolean;
+  // src/agent/profile/agentsMdReminderService.ts
+  'agentsMdReminder.seededContent': string | undefined;
   // src/agent/profile/profileService.ts
   'profile.activeToolNamesOverlay': readonly string[] | undefined;
   'profile.agentsMdWarning': string | undefined;
