@@ -258,6 +258,14 @@ const DOMAIN_LAYER = new Map([
   // it sits in L6 beside sessionLifecycle; the Rule 4 bans keep it off the
   // Workspace domain, the bootstrap path builders and every backend.
   ['runtimeSession', 6],
+  // `runtimeSessionHost` (M5b, plan §6.3 preparation) is the composition
+  // layer that makes runtime-activated sessions behaviorally equivalent to
+  // the legacy lifecycle: it routes through the L2 host-runtime contracts,
+  // assembles scopes through `runtimeSession`, and reproduces the App-level
+  // side effects of `sessionLifecycle` (shared hook slots, telemetry,
+  // rollback). Its highest real dependencies are those two L6 domains, so it
+  // sits in L6 beside them.
+  ['runtimeSessionHost', 6],
   // `subagent` drives turns on other agents (`run`) and hosts the
   // requester-side run hook/event surface (`SubagentStart`/`SubagentStop`).
   // Its highest real dependency is `agentLifecycle` (target lookup), so it

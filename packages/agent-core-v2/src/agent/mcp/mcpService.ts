@@ -319,7 +319,14 @@ export class AgentMcpService extends Disposable implements IAgentMcpService {
       const disposable = this._register(
         this.registry.register(
           createMcpTool(qualified, tool, client, {
-            originalsDir: sessionMediaOriginalsDir(this.sessionContext.sessionDir),
+            // A session without a host directory (headless runtime lease)
+            // leaves `originalsDir` undefined: originals then fall back to the
+            // shared tmp cache — joining 'media-originals' onto the empty
+            // sessionDir would resolve RELATIVE to the host process cwd.
+            originalsDir:
+              this.sessionContext.sessionDir === ''
+                ? undefined
+                : sessionMediaOriginalsDir(this.sessionContext.sessionDir),
             telemetry: this.telemetry,
             reconnect: (signal) => this.reconnectForToolCall(serverName, client, signal),
           }),

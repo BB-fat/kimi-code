@@ -188,11 +188,13 @@ export class AgentPlanService extends Disposable implements IAgentPlanService {
     const planFilePath = this.planFilePathFor(id);
     let enterRecorded = false;
     try {
-      await this.ensurePlanDirectory(planFilePath);
+      if (planFilePath !== null) {
+        await this.ensurePlanDirectory(planFilePath);
+      }
       this.wire.dispatch(planModeEnter({ id }));
       this.telemetryContext.set({ mode: 'plan' });
       enterRecorded = true;
-      if (createFile) {
+      if (createFile && planFilePath !== null) {
         await this.writeEmptyPlanFile(planFilePath);
       }
     } catch (error) {
@@ -223,7 +225,11 @@ export class AgentPlanService extends Disposable implements IAgentPlanService {
     const state = this.wire.getModel(PlanModel).current;
     if (!state.active || state.id === undefined) return;
     const id = state.id;
-    const content = await this.hostFs.readText(this.planFilePathFor(id));
+    // No plan file location (headless session): there is no working document
+    // to snapshot, so no revision is recorded.
+    const planFilePath = this.planFilePathFor(id);
+    if (planFilePath === null) return;
+    const content = await this.hostFs.readText(planFilePath);
     const bytes = Buffer.from(content, 'utf8');
     const version = (state.revisionCount?.[id] ?? 0) + 1;
     const scope = this.agentCtx.scope();
@@ -245,10 +251,12 @@ export class AgentPlanService extends Disposable implements IAgentPlanService {
     if (!state.active || state.id === undefined) return null;
     const path = this.planFilePathFor(state.id);
     let content = '';
-    try {
-      content = await this.hostFs.readText(path);
-    } catch (error) {
-      if (!isMissingFileError(error)) throw error;
+    if (path !== null) {
+      try {
+        content = await this.hostFs.readText(path);
+      } catch (error) {
+        if (!isMissingFileError(error)) throw error;
+      }
     }
     return {
       id: state.id,
@@ -257,7 +265,11 @@ export class AgentPlanService extends Disposable implements IAgentPlanService {
     };
   }
 
-  private planFilePathFor(id: string): string {
+  private planFilePathFor(id: string): PlanFilePath {
+    // A session without a host directory (headless runtime lease) has no plan
+    // file location: plan mode stays file-less (`path: null`), and joining
+    // onto the empty sessionDir would resolve RELATIVE to the host cwd.
+    if (this.sessionCtx.sessionDir === '') return null;
     return join(this.sessionCtx.sessionDir, 'agents', this.agentCtx.agentId, 'plans', `${id}.md`);
   }
 
@@ -280,8 +292,9 @@ function isMissingFileError(error: unknown): boolean {
 
 function writesOnlyPlanFile(
   context: ResolvedToolExecutionHookContext,
-  planFilePath: string,
+  planFilePath: PlanFilePath,
 ): boolean {
+  if (planFilePath === null) return false;
   const writeAccesses = (context.execution.accesses ?? []).filter(
     (access): access is ToolFileAccess =>
       access.kind === 'file' &&

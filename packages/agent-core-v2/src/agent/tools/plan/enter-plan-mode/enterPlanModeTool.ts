@@ -66,8 +66,9 @@ registerAgentToolService(IEnterPlanModeTool, EnterPlanModeTool, {
   name: 'EnterPlanMode',
   domain: 'plan',
   // The plan working document is a host file in the legacy session directory
-  // (plan §7.5); runtime leases do not project one until M8 re-roots plan
-  // files in lease artifacts.
+  // (plan §7.5); only runtimes that own one (the Local workspace runtime)
+  // project the transitional capability. Headless leases keep plan mode
+  // file-less and these tools stay gated off.
   requires: ['session.host_files'],
 });
 

@@ -359,6 +359,8 @@ export * from '#/app/runtimeSession/runtimeSessionActivation';
 export * from '#/app/runtimeSession/runtimeSessionActivationService';
 export * from '#/app/runtimeSession/blobBackedStorage';
 export * from '#/app/runtimeSession/leaseOsProjection';
+export * from '#/app/runtimeSessionHost/runtimeSessionHost';
+import '#/app/runtimeSessionHost/runtimeSessionHostService';
 export * from '#/session/interaction/interaction';
 export * from '#/session/interaction/interactionOps';
 export * from '#/session/interaction/interactionService';

@@ -3,7 +3,8 @@ import { createDecorator } from "#/_base/di/instantiation";
 export type PlanData = null | {
   readonly id: string;
   readonly content: string;
-  readonly path: string;
+  /** The plan working document's host path; `null` on sessions without a host directory. */
+  readonly path: PlanFilePath;
 };
 
 export type PlanFilePath = string | null;

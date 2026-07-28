@@ -4,22 +4,22 @@
  *
  * `activate` assembles the Session child scope from the lease alone:
  *
- *  - `ISessionContext` is seeded pathless (plan §7.2): identity and the
- *    persistence scope come from the lease (`ref`, session namespace), `cwd`
- *    from the lease's OS capability when present. `workspaceId`/`sessionDir`
- *    do not exist here — contributions that still need the legacy per-session
- *    host directory for their core function (`sessionLog`, the plan-mode
- *    tools and their working documents) declare the transitional
- *    `session.host_files` requirement no M4 lease projects, so they stay off
- *    this path until M8 re-roots them in lease artifacts (plan §7.5).
- *    TODO(multi-runtime M5): the remaining `sessionDir` readers are NOT
- *    gated — `AgentMcpService` passes `sessionMediaOriginalsDir(sessionDir)`
- *    to every MCP tool, and with the empty `sessionDir` that collapses to the
- *    RELATIVE `media-originals/`, so an MCP tool returning an image would
- *    make `persistOriginalImage` write under the host process cwd. Before
- *    production traffic is wired to this path, re-root originals in lease
- *    artifacts (or gate the writer). Task output display paths degrade to
- *    relative strings the same way, but they are display-only.
+ *  - `ISessionContext` is seeded pathless by default (plan §7.2): identity
+ *    and the persistence scope come from the lease (`ref`, session
+ *    namespace), `cwd` from the lease's OS capability when present.
+ *    `workspaceId`/`sessionDir` do not exist on that seed — but a runtime
+ *    that genuinely owns a per-session host directory (the Local workspace
+ *    runtime) projects the transitional `session.host_files` capability and
+ *    REPLACES this seed through the contribution channel with one carrying
+ *    the legacy facts, so the transitional host-files consumers (sessionLog,
+ *    the plan-mode tools and their working documents, MCP media originals,
+ *    task output display paths, `agents.<id>.homedir` metadata, cron
+ *    addressing) behave exactly like the legacy path on local leases. A
+ *    lease without the capability keeps the pathless seed, and those
+ *    consumers stay gated off (plan §7.4); the empty-`sessionDir` readers
+ *    that remain reachable there (MCP `originalsDir`, the plan service's
+ *    file path) degrade to the no-host-file fallbacks instead of resolving
+ *    relative paths against the host process cwd.
  *  - The typed Stores (`IAtomicDocumentStore` / `IAppendLogStore` /
  *    `IBlobStore`) and the byte-store façade (`IFileSystemStorageService`)
  *    are bound to the lease's persistence context — the Session scope never
@@ -36,9 +36,11 @@
  * Materialization mirrors `sessionLifecycle`: metadata, tool policy and the
  * agent-profile catalog are awaited (the first turn must see file-defined
  * agent types), the skill catalog is kicked fire-and-forget, and MCP is
- * awaited with the caller's servers. The plan-mode auto-enter of the legacy
- * create path is intentionally NOT replicated — plan files are a
- * `session.host_files` concern this path does not have yet (M8).
+ * awaited with the caller's servers. App-level create/resume side effects
+ * (SessionStart hooks, `session_started` telemetry, the plan-mode
+ * auto-enter, failure rollback) are NOT here — they live one layer up in the
+ * `runtimeSessionHost` composition service, which mirrors
+ * `ISessionLifecycleService` branch by branch.
  */
 
 import { IInstantiationService, type ServiceIdentifier } from '#/_base/di/instantiation';

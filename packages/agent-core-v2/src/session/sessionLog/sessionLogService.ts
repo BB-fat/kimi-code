@@ -88,8 +88,10 @@ registerScopedService(
   SessionLogService,
   ScopeActivation.OnScopeCreated,
   'log',
-  // The per-session log file lives in the legacy session directory; runtime
-  // leases do not project one (plan §7.2), so runtime-driven sessions fall
-  // back to the App log service until M8 re-roots session logs in the lease.
+  // The per-session log file lives in the legacy session directory; only
+  // runtimes that own one (the Local workspace runtime) project the
+  // transitional `session.host_files` capability. Headless runtime-driven
+  // sessions keep the pathless context seed and fall back to the App log
+  // service until M8 re-roots session logs in the lease.
   ['session.host_files'],
 );

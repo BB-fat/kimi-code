@@ -85,6 +85,7 @@ import {
   LocalSessionLease,
   type LocalLeaseHandle,
 } from './localSessionContext';
+import { localSessionContextContribution } from './localSessionContextSeed';
 import {
   exportLocalSession,
   importedStateDocument,
@@ -114,6 +115,12 @@ const DEFAULT_CAPABILITIES: ReadonlySet<SessionRuntimeCapability> = new Set([
   'os.terminal',
   'os.watch',
   'os.stdio',
+  // The local runtime genuinely owns the legacy per-session host directory;
+  // it also contributes the `ISessionContext` replacement that backs it
+  // (`localSessionContextSeed.ts`), so the transitional host-files consumers
+  // (session logs, plan files, media originals, cron addressing, the
+  // `agents.<id>.homedir` metadata) behave exactly like the legacy path.
+  'session.host_files',
   'artifact.model_read',
   'session.cold_read',
   'session.export',
@@ -523,6 +530,16 @@ export class LocalWorkspaceSessionManager implements ISessionManager {
         { details: { runtimeId: this.runtimeId, sessionId } },
       );
     }
+    // Per-lease contributions: the caller's set plus the `ISessionContext`
+    // replacement seeding this session's local host facts (gated on the
+    // projected `session.host_files` capability by its own `requires`).
+    const contributions: SessionRuntimeContributions = {
+      ...this.contributions,
+      sessionServices: [
+        ...this.contributions.sessionServices,
+        localSessionContextContribution(this.workspaceId, sessionId, this.homeDir, this.cwd),
+      ],
+    };
     const lease = new LocalSessionLease(
       this.storage,
       this.workspaceId,
@@ -530,7 +547,7 @@ export class LocalWorkspaceSessionManager implements ISessionManager {
       state,
       this.runtimeId,
       this.caps,
-      this.contributions,
+      contributions,
       this.osHandles,
       this.homeDir,
       (closed) => {

@@ -486,7 +486,14 @@ describe('open/resume child lease', () => {
     expect(lease.artifacts).toBeDefined();
     expect(lease.coldReader).toBeDefined();
     expect([...lease.capabilities].toSorted()).toEqual([...env.runtime.capabilities()].toSorted());
-    expect(lease.contributions).toEqual({ sessionServices: [], agentServices: [], tools: [] });
+    // The lease carries the per-session `ISessionContext` replacement seed
+    // (the local host-facts contribution) beside the runtime's own (empty)
+    // contribution set.
+    expect(lease.contributions.agentServices).toEqual([]);
+    expect(lease.contributions.tools).toEqual([]);
+    expect(lease.contributions.sessionServices).toHaveLength(1);
+    const contextContribution = lease.contributions.sessionServices[0]!;
+    expect(contextContribution.requires).toEqual(['session.host_files']);
     // The lease projects the workspace root plus the runtime's shared
     // node-local OS handles (plan §7.4).
     expect(lease.os?.cwd).toBe(env.cwd);

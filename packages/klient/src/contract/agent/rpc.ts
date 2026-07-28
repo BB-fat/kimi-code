@@ -122,7 +122,8 @@ export const planDataSchema = z.union([
   z.object({
     id: z.string(),
     content: z.string(),
-    path: z.string(),
+    /** Plan working document path; `null` on sessions without a host directory. */
+    path: z.string().nullable(),
   }),
 ]);
 

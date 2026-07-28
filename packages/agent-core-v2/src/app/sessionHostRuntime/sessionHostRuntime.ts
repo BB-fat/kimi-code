@@ -34,12 +34,14 @@ export type SessionRuntimeStatus = 'online' | 'offline' | 'degraded';
  * `ISessionOsCapabilities` (plan §7.4); the `session.*` family covers
  * runtime-provided session data planes.
  *
- * `session.host_files` is TRANSITIONAL (M4): it marks contributions that
- * still need the legacy per-session host directory (`logs/`, plan working
- * documents, task output files, media originals). No M4 runtime projects it
- * through a lease, so those contributions stay off the runtime-backed
- * activation path; M8 replaces them with lease artifact/persistence access
- * (plan §7.5) and drops this capability.
+ * `session.host_files` is TRANSITIONAL: it marks contributions that still
+ * need the legacy per-session host directory (`logs/`, plan working
+ * documents, task output files, media originals). The Local workspace runtime
+ * projects it — it owns that directory and contributes the `ISessionContext`
+ * replacement backing it (`localSessionContextSeed.ts`); headless runtimes
+ * (memory/server) never project it, so those contributions stay off their
+ * activation path. M8 re-roots the consumers in lease artifacts (plan §7.5)
+ * and drops this capability.
  */
 export type SessionRuntimeCapability =
   | 'os.filesystem'
