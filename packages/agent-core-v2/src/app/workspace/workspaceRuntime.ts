@@ -31,7 +31,9 @@ import type { ISessionManager } from '#/app/sessionHostRuntime/sessionManager';
  */
 export type WorkspaceCapability =
   /** Sessions live in the local `sessions/<wd_id>/<sessionId>` layout. */
-  | 'workspace.local';
+  | 'workspace.local'
+  /** Sessions are hosted behind a shared remote connection (plan §4.4). */
+  | 'workspace.remote';
 
 /**
  * A long-lived host runtime belonging to the Workspace domain. Everything the

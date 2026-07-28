@@ -391,6 +391,73 @@ describe('server-v2 /api/v1/sessions', () => {
     expect(body.details?.[0]?.path).toBe('metadata.cwd');
   });
 
+  it('reuses ONE registered workspace runtime across cwd/workspace_id creates and session teardown', async () => {
+    const cwd = home as string;
+    const first = await postJson<SessionWire>('/api/v1/sessions', { metadata: { cwd } });
+    expect(first.body.code).toBe(0);
+    const second = await postJson<SessionWire>('/api/v1/sessions', {
+      workspace_id: first.body.data.workspace_id,
+    });
+    expect(second.body.code).toBe(0);
+    // Session teardown (archive) must not unregister the runtime.
+    const archived = await postJson(`/api/v1/sessions/${first.body.data.id}:archive`, {});
+    expect(archived.body.code).toBe(0);
+
+    interface RuntimeSummary {
+      id: string;
+      kind: string;
+      status: string;
+    }
+    const runtimes = await getJson<RuntimeSummary[]>(
+      '/api/v1/debug/sessionHostRuntimeRegistry/list',
+    );
+    expect(runtimes.body.code).toBe(0);
+    const localRuntimes = runtimes.body.data.filter((r) => r.kind === 'local-workspace');
+    // Two creates (plus an archive) produced exactly one long-lived runtime,
+    // keyed by the deterministic local-workspace_<workspaceId> id.
+    expect(localRuntimes).toHaveLength(1);
+    expect(localRuntimes[0]?.id).toBe(`local-workspace_${first.body.data.workspace_id}`);
+    expect(localRuntimes[0]?.status).toBe('online');
+  });
+
+  it('keeps adapter-created sessions listable/gettable/resumable after a server restart', async () => {
+    const cwd = home as string;
+    const created = await postJson<SessionWire>('/api/v1/sessions', {
+      title: 'before restart',
+      metadata: { cwd },
+    });
+    expect(created.body.code).toBe(0);
+    const sessionId = created.body.data.id;
+    const workspaceId = created.body.data.workspace_id;
+
+    // Cold restart on the same home dir: the M2 byte layout (state.json +
+    // session_index.jsonl) is the only persistence involved.
+    await server?.close();
+    server = await startServer({
+      host: '127.0.0.1',
+      port: 0,
+      homeDir: home as string,
+      logLevel: 'silent',
+      debugEndpoints: true,
+    });
+    base = `http://127.0.0.1:${server.port}`;
+
+    const listed = await getJson<PageWire>('/api/v1/sessions');
+    const found = listed.body.data.items.find((s) => s.id === sessionId);
+    expect(found?.title).toBe('before restart');
+    expect(found?.workspace_id).toBe(workspaceId);
+    expect(found?.metadata.cwd).toBe(cwd);
+
+    const got = await getJson<SessionWire>(`/api/v1/sessions/${sessionId}`);
+    expect(got.body.code).toBe(0);
+    expect(got.body.data.metadata.cwd).toBe(cwd);
+
+    // The existing cold-load (resume) path still serves the session.
+    const status = await getJson(`/api/v1/sessions/${sessionId}/status`);
+    expect(status.body.code).toBe(0);
+  });
+
+
   it('lists created sessions', async () => {
     const cwd = home as string;
     const created = await postJson<SessionWire>('/api/v1/sessions', { metadata: { cwd } });

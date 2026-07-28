@@ -263,6 +263,15 @@ const DOMAIN_LAYER = new Map([
   // coordination domains. It is also guarded target-side: only the domain
   // itself may import it (TARGET_IMPORT_ALLOWLIST, plan §10.1).
   ['localWorkspaceRuntime', 6],
+  // `workspaceRegistration` (M3, plan §4.2/§7.7) owns the long-lived
+  // workspace-runtime registration leases: the runtime manager opens a
+  // workspace runtime ONCE via the sanctioned provider (it is the allowed
+  // importer of `localWorkspaceRuntime` beside the domain itself, see
+  // TARGET_IMPORT_ALLOWLIST) and keeps it registered; the Workspace Session
+  // facade delegates to the already-registered `runtime.sessions`. It builds
+  // on the L2 host-runtime + workspace contracts and the L6 local runtime,
+  // so it sits at L6 beside the other coordination domains.
+  ['workspaceRegistration', 6],
   ['interaction', 6],
   ['sessionMetadata', 6],
   // `undo` owns the undo pipeline (quiesce → context.undo → reconcile): it
@@ -444,7 +453,11 @@ const DOMAIN_IMPORT_BANS = new Map([
 const TARGET_IMPORT_ALLOWLIST = new Map([
   [
     'localWorkspaceRuntime',
-    new Set(['localWorkspaceRuntime']),
+    // `workspaceRegistration` (M3) is the sanctioned registration/runtime
+    // management importer (plan §7.7): it instantiates the Local provider to
+    // open long-lived workspace runtimes. Everyone else keeps talking to the
+    // generic contracts.
+    new Set(['localWorkspaceRuntime', 'workspaceRegistration']),
   ],
 ]);
 
