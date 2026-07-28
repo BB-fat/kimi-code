@@ -38,6 +38,10 @@ export interface ITelemetryAppender {
   shutdown?(options?: TelemetryShutdownOptions): Promise<void> | void;
 }
 
+export interface ITelemetryAppenderRegistration extends IDisposable {
+  shutdown(options?: TelemetryShutdownOptions): Promise<void>;
+}
+
 export interface TelemetryServiceOptions {
   readonly appender?: ITelemetryAppender;
   readonly appenders?: readonly ITelemetryAppender[];
@@ -57,9 +61,12 @@ export interface ITelemetryService {
   ): void;
   withContext(patch: TelemetryContextPatch): ITelemetryService;
   setContext(patch: TelemetryContextPatch): void;
-  addAppender(appender: ITelemetryAppender): IDisposable;
-  removeAppender(appender: ITelemetryAppender): void;
-  setAppender(appender: ITelemetryAppender): void;
+  addAppender(appender: ITelemetryAppender): ITelemetryAppenderRegistration;
+  removeAppender(
+    appender: ITelemetryAppender,
+    options?: TelemetryShutdownOptions,
+  ): Promise<void>;
+  setAppender(appender: ITelemetryAppender, options?: TelemetryShutdownOptions): Promise<void>;
   setEnabled(enabled: boolean): void;
   flush(): Promise<void>;
   shutdown(options?: TelemetryShutdownOptions): Promise<void>;
@@ -79,9 +86,9 @@ export const noopTelemetryService: ITelemetryService = {
   track2: () => {},
   withContext: () => noopTelemetryService,
   setContext: () => {},
-  addAppender: () => ({ dispose: () => {} }),
-  removeAppender: () => {},
-  setAppender: () => {},
+  addAppender: () => ({ dispose: () => {}, shutdown: async () => {} }),
+  removeAppender: async () => {},
+  setAppender: async () => {},
   setEnabled: () => {},
   flush: async () => {},
   shutdown: async () => {},

@@ -172,7 +172,11 @@ export async function runV2Print(
         await restorePermission();
       } finally {
         if (telemetryService !== undefined) {
-          await raceWithTimeout(telemetryService.shutdown(), CLI_SHUTDOWN_TIMEOUT_MS);
+          const deadlineMs = Date.now() + CLI_SHUTDOWN_TIMEOUT_MS;
+          await raceWithTimeout(
+            telemetryService.shutdown({ deadlineMs }),
+            PROMPT_CLEANUP_TIMEOUT_MS,
+          );
         }
         app.dispose();
       }
@@ -189,7 +193,7 @@ export async function runV2Print(
     // model is reconciled via setContext once resolved.
     telemetryService = app.accessor.get(ITelemetryService);
     if (telemetryEnabled) {
-      telemetryService.setAppender(
+      await telemetryService.setAppender(
         createCloudAppender(app.accessor, {
           deviceId,
           appName: CLI_USER_AGENT_PRODUCT,

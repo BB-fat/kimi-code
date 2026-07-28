@@ -1,9 +1,8 @@
 /**
- * Cloud telemetry lifecycle tests — exercise the real appender, transport,
- * and file-storage stack while stubbing only the outbound HTTP boundary.
- * Covers batching, durable shutdown, startup replay, privacy, and wire shape.
- * Run with `pnpm --filter @moonshot-ai/agent-core-v2 exec vitest run
- * test/app/telemetry/cloudAppender.test.ts`.
+ * `telemetry` domain (L1) — cloud appender lifecycle integration coverage.
+ *
+ * Exercises batching, durable shutdown, startup replay, privacy, and wire
+ * shape through the real appender, transport, spool, and file-storage stack.
  */
 
 import { getEventListeners } from 'node:events';
@@ -18,7 +17,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   resetUnexpectedErrorHandler,
@@ -27,6 +26,7 @@ import {
 import { FileStorageService } from '#/persistence/backends/node-fs/fileStorageService';
 import { CloudAppender, type CloudAppenderOptions } from '#/app/telemetry/cloudAppender';
 import { CloudTransport } from '#/app/telemetry/cloudTransport';
+import { TelemetrySpoolStore } from '#/app/telemetry/telemetrySpoolStore';
 
 import { stubBootstrap } from '../bootstrap/stubs';
 
@@ -79,11 +79,21 @@ function deferred<T>(): {
 }
 
 function baseOptions(
-  overrides: Partial<CloudAppenderOptions> & { homeDir?: string } = {},
+  overrides: Partial<CloudAppenderOptions> & {
+    homeDir?: string;
+    now?: () => number;
+    spoolMaxFiles?: number;
+  } = {},
 ): CloudAppenderOptions {
-  const { homeDir: dir = '', storage, ...rest } = overrides;
+  const { homeDir: dir = '', now, spool, spoolMaxFiles, ...rest } = overrides;
   return {
-    storage: storage ?? new FileStorageService(dir),
+    spool:
+      spool ??
+      new TelemetrySpoolStore({
+        storage: new FileStorageService(dir),
+        maxFiles: spoolMaxFiles,
+        now,
+      }),
     bootstrap: { ...stubBootstrap(), clientVersion: '1.0.0' },
     deviceId: 'dev',
     appName: 'test-app',
@@ -102,6 +112,16 @@ function readFirstFailedEvent(homeDir: string): Record<string, unknown> {
   const file = listFailedSpoolFiles(homeDir)[0] as string;
   const persisted = readFileSync(join(homeDir, 'telemetry-v2', file), 'utf8');
   return JSON.parse(persisted.trim()) as Record<string, unknown>;
+}
+
+function readAllFailedEvents(homeDir: string): Record<string, unknown>[] {
+  return listFailedSpoolFiles(homeDir).flatMap((file) =>
+    readFileSync(join(homeDir, 'telemetry-v2', file), 'utf8')
+      .trim()
+      .split('\n')
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as Record<string, unknown>),
+  );
 }
 
 describe('CloudAppender', () => {
@@ -436,7 +456,6 @@ describe('CloudAppender', () => {
   it('releases lifecycle abort listeners after a retry backoff completes', async () => {
     let attempts = 0;
     const transport = new CloudTransport({
-      storage: new FileStorageService(homeDir),
       deviceId: 'dev',
       retryBackoffsMs: [0],
       fetchImpl: makeFetch(() => {
@@ -463,6 +482,86 @@ describe('CloudAppender', () => {
 
     expect(attempts).toBe(2);
     expect(getEventListeners(lifecycle.signal, 'abort')).toHaveLength(0);
+  });
+
+  it('shutdown cancellation interrupts token lookup and durably hands off the batch', async () => {
+    const token = deferred<string | null>();
+    const tokenStarted = deferred<void>();
+    let requests = 0;
+    const appender = new CloudAppender(
+      baseOptions({
+        homeDir,
+        getAccessToken: () => {
+          tokenStarted.resolve();
+          return token.promise;
+        },
+        fetchImpl: makeFetch(() => {
+          requests += 1;
+          return okResponse();
+        }),
+      }),
+    );
+    const cancellation = new AbortController();
+    appender.track('token_lookup_cancelled');
+
+    const closing = appender.shutdown({ signal: cancellation.signal });
+    await tokenStarted.promise;
+    cancellation.abort();
+    await closing;
+    token.resolve(null);
+
+    expect(requests).toBe(0);
+    const persisted = readFirstFailedEvent(homeDir);
+    expect(persisted).toMatchObject({
+      event: 'token_lookup_cancelled',
+    });
+
+    let replayedEventId: unknown;
+    const restartedAppender = new CloudAppender(
+      baseOptions({
+        homeDir,
+        fetchImpl: makeFetch((request) => {
+          replayedEventId = request.body.events[0]?.['event_id'];
+          return okResponse();
+        }),
+      }),
+    );
+    restartedAppender.start();
+    await restartedAppender.shutdown();
+
+    expect(replayedEventId).toBe(persisted['event_id']);
+  });
+
+  it('shutdown cancellation interrupts retry sleep and durably hands off the batch', async () => {
+    const sleepStarted = deferred<void>();
+    const sleep = deferred<void>();
+    let attempts = 0;
+    const appender = new CloudAppender(
+      baseOptions({
+        homeDir,
+        fetchImpl: makeFetch(() => {
+          attempts += 1;
+          return statusResponse(500);
+        }),
+        sleep: () => {
+          sleepStarted.resolve();
+          return sleep.promise;
+        },
+      }),
+    );
+    const cancellation = new AbortController();
+    appender.track('retry_sleep_cancelled');
+
+    const closing = appender.shutdown({ signal: cancellation.signal });
+    await sleepStarted.promise;
+    cancellation.abort();
+    await closing;
+    sleep.resolve();
+
+    expect(attempts).toBe(1);
+    expect(readFirstFailedEvent(homeDir)).toMatchObject({
+      event: 'retry_sleep_cancelled',
+    });
   });
 
   it('retries a 401 once without the Authorization header', async () => {
@@ -532,6 +631,105 @@ describe('CloudAppender', () => {
 
     expect(replayed).toBe(1);
     expect(listFailedSpoolFiles(homeDir)).toHaveLength(0);
+  });
+
+  it('flush joins startup replay even when no live events are buffered', async () => {
+    const failingAppender = new CloudAppender(
+      baseOptions({
+        homeDir,
+        fetchImpl: makeFetch(() => statusResponse(500)),
+      }),
+    );
+    failingAppender.track('persisted_before_flush');
+    await failingAppender.flush();
+
+    const replayStarted = deferred<void>();
+    const replayResponse = deferred<Response>();
+    const restartedAppender = new CloudAppender(
+      baseOptions({
+        homeDir,
+        fetchImpl: makeFetch(() => {
+          replayStarted.resolve();
+          return replayResponse.promise;
+        }),
+      }),
+    );
+    restartedAppender.start();
+
+    const settled = vi.fn();
+    const flushing = restartedAppender.flush().then(settled);
+    await replayStarted.promise;
+    await Promise.resolve();
+
+    expect(settled).not.toHaveBeenCalled();
+
+    replayResponse.resolve(okResponse());
+    await flushing;
+    expect(listFailedSpoolFiles(homeDir)).toHaveLength(0);
+  });
+
+  it('startup replay limits the number of recovered files in one lifecycle', async () => {
+    let now = 1;
+    const failingAppender = new CloudAppender(
+      baseOptions({
+        homeDir,
+        now: () => now++,
+        spoolMaxFiles: 10,
+        fetchImpl: makeFetch(() => statusResponse(500)),
+      }),
+    );
+    for (const event of ['first', 'second', 'third']) {
+      failingAppender.track(event);
+      await failingAppender.flush();
+    }
+
+    const replayed: string[] = [];
+    const restartedAppender = new CloudAppender(
+      baseOptions({
+        homeDir,
+        now: () => now,
+        replayMaxFiles: 1,
+        spoolMaxFiles: 10,
+        fetchImpl: makeFetch((request) => {
+          replayed.push(String(request.body.events[0]?.['event']));
+          return okResponse();
+        }),
+      }),
+    );
+
+    restartedAppender.start();
+    restartedAppender.track('live_after_backlog');
+    await restartedAppender.shutdown();
+
+    expect(replayed).toEqual(['kfc_first']);
+    expect(listFailedSpoolFiles(homeDir)).toHaveLength(3);
+    expect(readAllFailedEvents(homeDir).map((event) => event['event'])).toContain(
+      'live_after_backlog',
+    );
+  });
+
+  it('caps the durable spool by file count', async () => {
+    let now = 1;
+    const appender = new CloudAppender(
+      baseOptions({
+        homeDir,
+        now: () => now++,
+        spoolMaxFiles: 2,
+        fetchImpl: makeFetch(() => statusResponse(500)),
+      }),
+    );
+
+    for (const event of ['first', 'second', 'third']) {
+      appender.track(event);
+      await appender.flush();
+    }
+
+    expect(listFailedSpoolFiles(homeDir)).toHaveLength(2);
+    expect(
+      readAllFailedEvents(homeDir)
+        .map((event) => event['event'])
+        .toSorted(),
+    ).toEqual(['first', 'second', 'third']);
   });
 
   it('start leaves legacy telemetry spool files for their owning pipeline', async () => {

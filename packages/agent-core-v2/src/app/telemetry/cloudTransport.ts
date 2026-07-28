@@ -1,16 +1,17 @@
 /**
- * `telemetry` domain (L1) — `CloudTransport`, the HTTP transport behind
- * `CloudAppender`. Posts enriched events to the telemetry endpoint with Bearer
- * auth, retry, and a byte-store fallback for failed events, persisted through
- * the `storage` byte layer (`IFileSystemStorageService`) under an isolated
- * `telemetry-v2` scope.
- * App-scoped; independent of `@moonshot-ai/kimi-telemetry`.
+ * `telemetry` domain (L1) — HTTP delivery transport behind `CloudAppender`.
+ *
+ * Owns authentication, request deadlines, retry, and telemetry wire shaping.
+ * Durable handoff and recovery are coordinated by `CloudAppender` through its
+ * spool store. App-scoped; independent of `@moonshot-ai/kimi-telemetry`.
  */
 
-import { randomBytes } from 'node:crypto';
-
-import { abortable, isAbortError } from '#/_base/utils/abort';
-import type { IFileSystemStorageService } from '#/persistence/interface/storage';
+import {
+  abortable,
+  abortError,
+  createDeadlineAbortSignal,
+  isAbortError,
+} from '#/_base/utils/abort';
 
 export type CloudPrimitive = boolean | number | string | undefined | null;
 
@@ -37,7 +38,6 @@ export interface CloudPayload {
 }
 
 export interface CloudTransportOptions {
-  readonly storage: IFileSystemStorageService;
   readonly deviceId: string;
   readonly endpoint?: string;
   readonly getAccessToken?: () => string | null | Promise<string | null>;
@@ -45,25 +45,16 @@ export interface CloudTransportOptions {
   readonly retryBackoffsMs?: readonly number[];
   readonly requestTimeoutMs?: number;
   readonly sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
-  readonly now?: () => number;
 }
 
 export const TELEMETRY_ENDPOINT = 'https://telemetry-logs.kimi.com/v1/event';
 export const SERVER_EVENT_PREFIX = 'kfc_';
 export const USER_ID_PREFIX = 'kfc_device_id_';
-export const DISK_EVENT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 export const RETRY_BACKOFFS_MS = [1_000, 4_000, 16_000] as const;
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
-const TELEMETRY_SCOPE = 'telemetry-v2';
-const FAILED_PREFIX = 'failed_';
-const JSONL_SUFFIX = '.jsonl';
-
-const textEncoder = new TextEncoder();
-const textDecoder = new TextDecoder();
 
 export class CloudTransport {
-  private readonly storage: IFileSystemStorageService;
   private readonly deviceId: string;
   private readonly endpoint: string;
   private readonly getAccessToken: (() => string | null | Promise<string | null>) | null;
@@ -71,10 +62,8 @@ export class CloudTransport {
   private readonly retryBackoffsMs: readonly number[];
   private readonly requestTimeoutMs: number;
   private readonly sleepImpl: (ms: number, signal?: AbortSignal) => Promise<void>;
-  private readonly now: () => number;
 
   constructor(options: CloudTransportOptions) {
-    this.storage = options.storage;
     this.deviceId = options.deviceId;
     this.endpoint = options.endpoint ?? TELEMETRY_ENDPOINT;
     this.getAccessToken = options.getAccessToken ?? null;
@@ -82,15 +71,15 @@ export class CloudTransport {
     this.retryBackoffsMs = options.retryBackoffsMs ?? RETRY_BACKOFFS_MS;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.sleepImpl = options.sleep ?? abortableSleep;
-    this.now = options.now ?? Date.now;
   }
 
-  async send(events: readonly EnrichedCloudEvent[], signal?: AbortSignal): Promise<void> {
+  async send(
+    events: readonly EnrichedCloudEvent[],
+    signal?: AbortSignal,
+    retryBackoffsMs: readonly number[] = this.retryBackoffsMs,
+  ): Promise<void> {
     if (events.length === 0) return;
-    if (signal?.aborted === true) {
-      await this.saveToDisk(events);
-      return;
-    }
+    if (signal?.aborted === true) throw abortError();
 
     let payload: CloudPayload;
     try {
@@ -99,93 +88,53 @@ export class CloudTransport {
       return;
     }
 
-    for (let attempt = 0; attempt <= this.retryBackoffsMs.length; attempt++) {
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= retryBackoffsMs.length; attempt++) {
       try {
-        const request = this.sendHttp(payload, signal);
-        await (signal === undefined ? request : abortable(request, signal));
+        await this.sendAttempt(payload, signal);
         return;
       } catch (error) {
-        if (isSignalAborted(signal) || isAbortError(error)) {
-          await this.saveToDisk(events);
-          return;
+        if (isSignalAborted(signal) || (isAbortError(error) && !(error instanceof TransientCloudError))) {
+          throw error;
         }
+        lastError = error;
         if (!(error instanceof TransientCloudError)) break;
-        const backoff = this.retryBackoffsMs[attempt];
+        const backoff = retryBackoffsMs[attempt];
         if (backoff === undefined) break;
+        const sleep = Promise.resolve().then(() => this.sleepImpl(backoff, signal));
         try {
-          const sleep = this.sleepImpl(backoff, signal);
           await (signal === undefined ? sleep : abortable(sleep, signal));
         } catch (sleepError) {
-          if (isSignalAborted(signal) || isAbortError(sleepError)) {
-            await this.saveToDisk(events);
-            return;
-          }
+          if (isSignalAborted(signal) || isAbortError(sleepError)) throw sleepError;
+          lastError = sleepError;
           break;
         }
       }
     }
-
-    await this.saveToDisk(events);
+    throw lastError instanceof Error
+      ? lastError
+      : new TransientCloudError('telemetry delivery failed');
   }
 
-  async saveToDisk(events: readonly EnrichedCloudEvent[]): Promise<void> {
-    if (events.length === 0) return;
-    const key = `${FAILED_PREFIX}${this.now()}_${randomBytes(6).toString('hex')}${JSONL_SUFFIX}`;
-    const text = events.map((event) => JSON.stringify(event)).join('\n') + '\n';
-    await this.storage.write(TELEMETRY_SCOPE, key, textEncoder.encode(text));
-  }
-
-  async retryDiskEvents(signal?: AbortSignal): Promise<void> {
-    const keys = await this.storage.list(TELEMETRY_SCOPE, FAILED_PREFIX);
-    const now = this.now();
-    for (const key of keys) {
-      if (signal?.aborted === true) throw abortError();
-      if (!key.startsWith(FAILED_PREFIX) || !key.endsWith(JSONL_SUFFIX)) continue;
-      const createdAt = parseFailedTimestamp(key);
-      if (createdAt === undefined) continue;
-      if (now - createdAt > DISK_EVENT_MAX_AGE_MS) {
-        await this.storage.delete(TELEMETRY_SCOPE, key).catch(() => undefined);
-        continue;
-      }
-
-      let events: EnrichedCloudEvent[];
-      let payload: CloudPayload;
-      try {
-        events = await this.readJsonl(key);
-        payload = buildPayload(events, this.deviceId);
-      } catch (error) {
-        if (error instanceof SyntaxError || error instanceof TypeError) {
-          await this.storage.delete(TELEMETRY_SCOPE, key).catch(() => undefined);
-        }
-        continue;
-      }
-
-      try {
-        const request = this.sendHttp(payload, signal);
-        await (signal === undefined ? request : abortable(request, signal));
-        await this.storage.delete(TELEMETRY_SCOPE, key);
-      } catch (error) {
-        if (isSignalAborted(signal) || isAbortError(error)) throw error;
-        if (error instanceof TransientCloudError) continue;
-      }
+  private async sendAttempt(payload: CloudPayload, signal?: AbortSignal): Promise<void> {
+    const source = signal ?? new AbortController().signal;
+    const deadline = createDeadlineAbortSignal(source, this.requestTimeoutMs);
+    try {
+      await this.sendHttp(payload, deadline.signal);
+    } catch (error) {
+      if (deadline.timedOut()) throw new TransientCloudError('telemetry request timed out');
+      throw error;
+    } finally {
+      deadline.clear();
     }
   }
 
-  private async readJsonl(key: string): Promise<EnrichedCloudEvent[]> {
-    const bytes = await this.storage.read(TELEMETRY_SCOPE, key);
-    if (bytes === undefined) return [];
-    const text = textDecoder.decode(bytes);
-    const events: EnrichedCloudEvent[] = [];
-    for (const line of text.split('\n')) {
-      const trimmed = line.trim();
-      if (trimmed.length === 0) continue;
-      events.push(JSON.parse(trimmed) as EnrichedCloudEvent);
-    }
-    return events;
-  }
-
-  private async sendHttp(payload: CloudPayload, signal?: AbortSignal): Promise<void> {
-    const token = this.getAccessToken === null ? null : await this.getAccessToken();
+  private async sendHttp(payload: CloudPayload, signal: AbortSignal): Promise<void> {
+    const tokenRequest =
+      this.getAccessToken === null
+        ? Promise.resolve(null)
+        : Promise.resolve().then(() => this.getAccessToken?.() ?? null);
+    const token = await abortable(tokenRequest, signal);
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
@@ -206,34 +155,23 @@ export class CloudTransport {
   private async post(
     payload: CloudPayload,
     headers: Record<string, string>,
-    signal?: AbortSignal,
+    signal: AbortSignal,
   ): Promise<Response> {
     try {
-      return await fetchWithTimeout(
-        this.fetchImpl,
-        this.endpoint,
-        {
+      const request = Promise.resolve().then(() =>
+        this.fetchImpl(this.endpoint, {
           method: 'POST',
           headers: { ...headers },
           body: JSON.stringify(payload),
-        },
-        this.requestTimeoutMs,
-        signal,
+          signal,
+        }),
       );
+      return await abortable(request, signal);
     } catch (error) {
-      if (signal?.aborted === true || isAbortError(error)) throw error;
+      if (signal.aborted || isAbortError(error)) throw error;
       throw new TransientCloudError(String(error));
     }
   }
-}
-
-function parseFailedTimestamp(key: string): number | undefined {
-  const rest = key.slice(FAILED_PREFIX.length);
-  const underscore = rest.indexOf('_');
-  if (underscore === -1) return undefined;
-  const raw = rest.slice(0, underscore);
-  const ts = Number(raw);
-  return Number.isFinite(ts) ? ts : undefined;
 }
 
 export class TransientCloudError extends Error {
@@ -306,37 +244,7 @@ function handleStatus(status: number): void {
   if (status >= 500 || status === 429) {
     throw new TransientCloudError(`HTTP ${String(status)}`);
   }
-  if (status >= 400) {
-    return;
-  }
-}
-
-async function fetchWithTimeout(
-  fetchImpl: typeof fetch,
-  url: string,
-  init: RequestInit,
-  timeoutMs: number,
-  externalSignal?: AbortSignal,
-): Promise<Response> {
-  const controller = new AbortController();
-  const abortFromExternal = (): void => {
-    controller.abort(externalSignal?.reason);
-  };
-  const timeout = setTimeout(() => {
-    controller.abort(new Error('telemetry request timed out'));
-  }, timeoutMs);
-  timeout.unref?.();
-  if (externalSignal?.aborted === true) abortFromExternal();
-  externalSignal?.addEventListener('abort', abortFromExternal, { once: true });
-  try {
-    return await fetchImpl(url, {
-      ...init,
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timeout);
-    externalSignal?.removeEventListener('abort', abortFromExternal);
-  }
+  if (status >= 400) return;
 }
 
 function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -358,8 +266,4 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 function isSignalAborted(signal?: AbortSignal): boolean {
   return signal?.aborted === true;
-}
-
-function abortError(): DOMException {
-  return new DOMException('The operation was aborted.', 'AbortError');
 }

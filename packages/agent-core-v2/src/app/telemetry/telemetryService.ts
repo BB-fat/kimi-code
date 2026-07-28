@@ -7,9 +7,9 @@
  * App-scoped root. Has no cross-domain collaborators.
  */
 
-import { type IDisposable, toDisposable } from '#/_base/di/lifecycle';
 import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { onUnexpectedError } from '#/_base/errors/unexpectedError';
+import { BugIndicatingError } from '#/errors';
 
 import type {
   StrictPropertyCheck,
@@ -19,6 +19,7 @@ import type {
 import {
   ITelemetryService,
   type ITelemetryAppender,
+  type ITelemetryAppenderRegistration,
   nullTelemetryAppender,
   type TelemetryContextPatch,
   type TelemetryProperties,
@@ -29,6 +30,12 @@ export class TelemetryService implements ITelemetryService {
   declare readonly _serviceBrand: undefined;
 
   private appenders: ITelemetryAppender[] = [nullTelemetryAppender];
+  private readonly registrations = new Map<
+    ITelemetryAppender,
+    ITelemetryAppenderRegistration
+  >();
+  private readonly retirements = new Map<ITelemetryAppender, Promise<void>>();
+  private shutdownPromise: Promise<void> | null = null;
   private context: TelemetryProperties = {};
   private enabled = true;
 
@@ -40,8 +47,8 @@ export class TelemetryService implements ITelemetryService {
     for (const appender of this.appenders) {
       try {
         appender.track(event, merged);
-      } catch (err) {
-        onUnexpectedError(err);
+      } catch (error) {
+        onUnexpectedError(error);
       }
     }
   }
@@ -64,19 +71,36 @@ export class TelemetryService implements ITelemetryService {
     }
   }
 
-  addAppender(appender: ITelemetryAppender): IDisposable {
+  addAppender(appender: ITelemetryAppender): ITelemetryAppenderRegistration {
+    this.assertOpen();
+    const existing = this.registrations.get(appender);
+    if (existing !== undefined) return existing;
     this.startAppender(appender);
     this.appenders.push(appender);
-    return toDisposable(() => this.removeAppender(appender));
+    return this.createRegistration(appender);
   }
 
-  removeAppender(appender: ITelemetryAppender): void {
+  removeAppender(
+    appender: ITelemetryAppender,
+    options?: TelemetryShutdownOptions,
+  ): Promise<void> {
+    const retirement = this.retirements.get(appender);
+    if (retirement !== undefined) return retirement;
+    if (!this.appenders.includes(appender)) return Promise.resolve();
     this.appenders = this.appenders.filter((a) => a !== appender);
+    return this.removeDetachedAppender(appender, options);
   }
 
-  setAppender(appender: ITelemetryAppender): void {
-    this.startAppender(appender);
+  async setAppender(
+    appender: ITelemetryAppender,
+    options?: TelemetryShutdownOptions,
+  ): Promise<void> {
+    this.assertOpen();
+    if (!this.appenders.includes(appender)) this.startAppender(appender);
+    if (!this.registrations.has(appender)) this.createRegistration(appender);
+    const previous = this.appenders.filter((candidate) => candidate !== appender);
     this.appenders = [appender];
+    await Promise.all(previous.map((candidate) => this.removeDetachedAppender(candidate, options)));
   }
 
   setEnabled(enabled: boolean): void {
@@ -85,18 +109,24 @@ export class TelemetryService implements ITelemetryService {
 
   async flush(): Promise<void> {
     await Promise.all(
-      this.appenders.map((appender) =>
-        Promise.resolve(appender.flush?.()).catch(onUnexpectedError),
-      ),
+      this.appenders.map((appender) => this.invokeAppender(() => appender.flush?.())),
     );
   }
 
-  async shutdown(options?: TelemetryShutdownOptions): Promise<void> {
-    await Promise.all(
-      this.appenders.map((appender) =>
-        Promise.resolve(appender.shutdown?.(options)).catch(onUnexpectedError),
-      ),
-    );
+  shutdown(options?: TelemetryShutdownOptions): Promise<void> {
+    if (this.shutdownPromise === null) {
+      const appenders = this.appenders;
+      this.appenders = [];
+      for (const appender of appenders) {
+        void this.removeDetachedAppender(appender, options);
+      }
+      this.shutdownPromise = Promise.all(this.retirements.values()).then(() => undefined);
+    } else if (options !== undefined) {
+      for (const appender of this.registrations.keys()) {
+        void this.invokeAppender(() => appender.shutdown?.(options));
+      }
+    }
+    return this.shutdownPromise;
   }
 
   private startAppender(appender: ITelemetryAppender): void {
@@ -105,6 +135,38 @@ export class TelemetryService implements ITelemetryService {
     } catch (error) {
       onUnexpectedError(error);
     }
+  }
+
+  private createRegistration(appender: ITelemetryAppender): ITelemetryAppenderRegistration {
+    const registration: ITelemetryAppenderRegistration = {
+      dispose: () => {
+        void this.removeAppender(appender);
+      },
+      shutdown: (options) => this.removeAppender(appender, options),
+    };
+    this.registrations.set(appender, registration);
+    return registration;
+  }
+
+  private assertOpen(): void {
+    if (this.shutdownPromise !== null) {
+      throw new BugIndicatingError('Telemetry service has already shut down');
+    }
+  }
+
+  private removeDetachedAppender(
+    appender: ITelemetryAppender,
+    options?: TelemetryShutdownOptions,
+  ): Promise<void> {
+    const retirement = this.retirements.get(appender);
+    if (retirement !== undefined) return retirement;
+    const pending = this.invokeAppender(() => appender.shutdown?.(options));
+    this.retirements.set(appender, pending);
+    return pending;
+  }
+
+  private invokeAppender(operation: () => Promise<void> | void | undefined): Promise<void> {
+    return Promise.resolve().then(operation).catch(onUnexpectedError);
   }
 }
 
@@ -138,16 +200,22 @@ class TelemetryContextView implements ITelemetryService {
     this.context = { ...this.context, ...patch };
   }
 
-  addAppender(appender: ITelemetryAppender): IDisposable {
+  addAppender(appender: ITelemetryAppender): ITelemetryAppenderRegistration {
     return this.root.addAppender(appender);
   }
 
-  removeAppender(appender: ITelemetryAppender): void {
-    this.root.removeAppender(appender);
+  removeAppender(
+    appender: ITelemetryAppender,
+    options?: TelemetryShutdownOptions,
+  ): Promise<void> {
+    return this.root.removeAppender(appender, options);
   }
 
-  setAppender(appender: ITelemetryAppender): void {
-    this.root.setAppender(appender);
+  setAppender(
+    appender: ITelemetryAppender,
+    options?: TelemetryShutdownOptions,
+  ): Promise<void> {
+    return this.root.setAppender(appender, options);
   }
 
   setEnabled(enabled: boolean): void {
