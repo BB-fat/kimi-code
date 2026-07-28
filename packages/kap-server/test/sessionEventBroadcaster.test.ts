@@ -8,9 +8,13 @@ import { join } from 'node:path';
 
 import type {
   AgentActivityState,
+  IScopeHandle,
+  ISessionStateService,
+  Scope,
   SessionActivityCause,
   SessionActivityChangedEvent,
   SessionActivityState,
+  SessionLifecycleHooks,
 } from '@moonshot-ai/agent-core-v2';
 import {
   ContextSizeModel,
@@ -28,14 +32,13 @@ import {
   ISessionMetadata,
   MAIN_AGENT_ID,
   SessionInteractionService,
-  type IScopeHandle,
-  type SessionLifecycleHooks,
-  type Scope,
+  StateRegistry,
 } from '@moonshot-ai/agent-core-v2';
 import type { AgentEvent } from '../src/transport/ws/v1/events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  type BroadcastDelivery,
   type BroadcastTarget,
   SessionEventBroadcaster,
 } from '../src/transport/ws/v1/sessionEventBroadcaster';
@@ -87,6 +90,10 @@ function injectWriteFailure(): Error {
 // ---------------------------------------------------------------------------
 // Fakes
 // ---------------------------------------------------------------------------
+
+class TestSessionStateService extends StateRegistry implements ISessionStateService {
+  declare readonly _serviceBrand: undefined;
+}
 
 /** The fake bus carries wire agent events and v2-internal ones alike. */
 type FakeBusEvent = { type: string };
@@ -165,7 +172,7 @@ class FakeAgentHandle {
 class FakeLifecycle {
   readonly handles: FakeAgentHandle[] = [];
   /** Real interaction kernel — served at the session accessor. */
-  readonly interactions = new SessionInteractionService();
+  readonly interactions = new SessionInteractionService(new TestSessionStateService());
   /**
    * Mirrors the activity view's publication: every turn boundary re-emits an
    * `agent.activity.updated` on the same bus, nested inside the boundary
@@ -421,9 +428,23 @@ function agentEvent(type: string, extra: Record<string, unknown> = {}): AgentEve
   return { type, ...extra } as unknown as AgentEvent;
 }
 
-function collectingTarget(): { target: BroadcastTarget; envelopes: EventEnvelope[] } {
+function collectingTarget(): {
+  target: BroadcastTarget;
+  envelopes: EventEnvelope[];
+  deliveries: BroadcastDelivery[];
+} {
   const envelopes: EventEnvelope[] = [];
-  return { target: { send: (e) => envelopes.push(e) }, envelopes };
+  const deliveries: BroadcastDelivery[] = [];
+  return {
+    target: {
+      send: (envelope, delivery = 'subscription') => {
+        envelopes.push(envelope);
+        deliveries.push(delivery);
+      },
+    },
+    envelopes,
+    deliveries,
+  };
 }
 
 // A real turn yields the event loop between `turn.started` and `turn.ended`,
@@ -471,7 +492,7 @@ describe('SessionEventBroadcaster', () => {
     const main = lc.addAgent('main');
     sessions.set('s1', lc);
 
-    const { target, envelopes } = collectingTarget();
+    const { target, envelopes, deliveries } = collectingTarget();
     expect(await bc.subscribe('s1', target)).toBe(true);
 
     main.bus.emit(agentEvent('turn.started', { turnId: 1 }));
@@ -504,6 +525,16 @@ describe('SessionEventBroadcaster', () => {
       true,
     );
     expect(durable[0]!.volatile).toBeUndefined();
+    expect(
+      envelopes.flatMap((envelope, index) =>
+        envelope.volatile === true ? [] : [[envelope.type, deliveries[index]]],
+      ),
+    ).toEqual([
+      ['turn.started', 'subscription'],
+      ['event.session.work_changed', 'immediate'],
+      ['turn.ended', 'subscription'],
+      ['event.session.work_changed', 'immediate'],
+    ]);
   });
 
   it('rebuilds subscriptions and the journal writer after a session is released', async () => {
@@ -1067,6 +1098,7 @@ describe('SessionEventBroadcaster', () => {
         type: 'event.session.created',
         session_id: 's1',
       });
+      expect(globalView.deliveries).toEqual(['immediate']);
     });
 
     it('delivers work_changed to a global-only target while a subscriber drives the session', async () => {
@@ -1875,6 +1907,7 @@ describe('SessionEventBroadcaster', () => {
           session_id: 's1',
           payload: { agent_id: 'main', has_more_older: false, snapshot: { items: [] } },
         });
+        expect(view.deliveries).toEqual(['subscription']);
       }
       expect(transcriptEnvelopes(plainView.envelopes)).toHaveLength(0);
 

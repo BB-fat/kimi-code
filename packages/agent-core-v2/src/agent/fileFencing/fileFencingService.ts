@@ -11,9 +11,8 @@
  * Bound at Agent scope.
  */
 
-import { InstantiationType } from '#/_base/di/extensions';
 import { Disposable } from '#/_base/di/lifecycle';
-import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
+import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { unwrapErrorCause } from '#/_base/errors/errors';
 import { fileStatTuplesEqual } from '#/_base/utils/fs';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
@@ -158,6 +157,6 @@ registerScopedService(
   LifecycleScope.Agent,
   IAgentFileFencingService,
   AgentFileFencingService,
-  InstantiationType.Eager,
+  ScopeActivation.OnScopeCreated,
   'fileFencing',
 );

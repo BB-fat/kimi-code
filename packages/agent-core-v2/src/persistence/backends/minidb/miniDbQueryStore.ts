@@ -14,11 +14,11 @@
  * `query`) and held in memory (`valueMode: 'memory'`); durability is
  * `everysec`, which is acceptable for a cache. Writes are atomic per shard;
  * a `batch` spanning shards is best-effort across them — a projector can
- * always replay from its checkpoint. Per-shard writer exclusion is delegated
- * to the injected `ICrossProcessLockService`; `lockAcquireTimeoutMs` is
- * lowered from
- * the 30s default: a cache read must not hang behind a contended shard, and
- * with `lockHoldMs` yields one second is ample for a live writer.
+ * always replay from its checkpoint. Per-shard writer exclusion comes from
+ * minidb's built-in pure-JS lock (see `lockfile.ts` there).
+ * `lockAcquireTimeoutMs` is lowered from the 30s default: a cache read must
+ * not hang behind a contended shard, and with `lockHoldMs` yields one second
+ * is ample for a live writer.
  *
  * The database is opened **lazily** on the first actual IO, not at
  * construction. Construction therefore does no filesystem work — important
@@ -48,20 +48,13 @@ import { promises as fsp } from 'node:fs';
 
 import { join } from 'pathe';
 
-import { type QueryOptions, type TryAcquireFileLock } from '@moonshot-ai/minidb';
+import { type QueryOptions } from '@moonshot-ai/minidb';
 import { ClusterDb } from '@moonshot-ai/minidb/cluster';
 
-import { InstantiationType } from '#/_base/di/extensions';
-import { optional } from '#/_base/di/instantiation';
 import { Disposable, toDisposable } from '#/_base/di/lifecycle';
-import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
+import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { ILogService } from '#/_base/log/log';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
-import {
-  CrossProcessLockError,
-  CrossProcessLockErrorCode,
-  ICrossProcessLockService,
-} from '#/os/interface/crossProcessLock';
 import {
   IQueryStore,
   type Checkpoint,
@@ -93,19 +86,6 @@ function isRebuildable(error: unknown): boolean {
   return error instanceof SyntaxError || (error as { name?: string }).name === 'CorruptFrameError';
 }
 
-function tryAcquireViaLockService(locks: ICrossProcessLockService): TryAcquireFileLock {
-  return async (lockPath) => {
-    try {
-      return await locks.acquire(lockPath);
-    } catch (error) {
-      if (error instanceof CrossProcessLockError && error.code === CrossProcessLockErrorCode.Held) {
-        return undefined;
-      }
-      throw error;
-    }
-  };
-}
-
 export class MiniDbQueryStore extends Disposable implements IQueryStore {
   declare readonly _serviceBrand: undefined;
 
@@ -117,7 +97,6 @@ export class MiniDbQueryStore extends Disposable implements IQueryStore {
   constructor(
     @IBootstrapService private readonly bootstrap: IBootstrapService,
     @ILogService private readonly log: ILogService,
-    @optional(ICrossProcessLockService) private readonly locks?: ICrossProcessLockService,
   ) {
     super();
     this.dir = join(this.bootstrap.cacheDir, STORE_SUBDIR);
@@ -148,8 +127,6 @@ export class MiniDbQueryStore extends Disposable implements IQueryStore {
       valueMode: 'memory',
       fsyncPolicy: 'everysec',
       lockAcquireTimeoutMs: LOCK_ACQUIRE_TIMEOUT_MS,
-      tryAcquireLock:
-        this.locks === undefined ? undefined : tryAcquireViaLockService(this.locks),
     });
   }
 
@@ -308,6 +285,6 @@ registerScopedService(
   LifecycleScope.App,
   IQueryStore,
   MiniDbQueryStore,
-  InstantiationType.Eager,
+  ScopeActivation.OnScopeCreated,
   'storage',
 );

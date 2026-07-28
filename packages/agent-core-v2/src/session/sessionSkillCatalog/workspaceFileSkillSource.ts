@@ -10,10 +10,9 @@
  */
 
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';
-import { InstantiationType } from '#/_base/di/extensions';
 import { Disposable } from '#/_base/di/lifecycle';
 import { Emitter, type Event } from '#/_base/event';
-import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
+import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { IConfigService } from '#/app/config/config';
 import {
   MERGE_ALL_AVAILABLE_SKILLS_SECTION,
@@ -86,6 +85,6 @@ registerScopedService(
   LifecycleScope.Session,
   IWorkspaceFileSkillSource,
   WorkspaceFileSkillSource,
-  InstantiationType.Eager,
+  ScopeActivation.OnScopeCreated,
   'sessionSkillCatalog',
 );

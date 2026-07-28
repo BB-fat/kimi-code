@@ -16,6 +16,7 @@ import { IAgentBlobService } from '#/agent/blob/agentBlobService';
 import { AgentBlobServiceImpl } from '#/agent/blob/agentBlobServiceImpl';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
+import { CHECKPOINTED_MODELS, type Checkpointed } from '#/agent/contextMemory/conversationTime';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { ISessionCronService } from '#/session/cron/sessionCronService';
 import { SessionCronServiceImpl } from '#/session/cron/sessionCronServiceImpl';
@@ -100,6 +101,7 @@ import {
   IAgentContextSizeService,
   IAgentExternalHooksService,
   IExternalHooksRunnerService,
+  IAgentFileFencingService,
   IAgentFullCompactionService,
   IAgentLLMRequesterService,
   ILogService,
@@ -121,13 +123,14 @@ import {
   ITelemetryService,
   IHostTerminalService,
   IAgentToolRegistryService,
-  IAgentBuiltinToolsRegistrar,
+  IAgentToolActivationService,
   IAgentUserToolService,
   IAgentUsageService,
   IStorageWriteAdmission,
   ISessionWorkspaceContext,
   AgentLLMRequesterService,
   LifecycleScope,
+  AgentFileFencingService,
   AgentMcpService,
   AgentPermissionGate,
   AgentPermissionRulesService,
@@ -147,6 +150,7 @@ import {
 import { IEventBus } from '#/app/event/eventBus';
 import { IWireService } from '#/wire/wire';
 import { WireService } from '#/wire/wireService';
+import { promptTurn } from '#/agent/loop/turnOps';
 import { IModelService, type ModelsSection } from '#/kosong/model/model';
 import {
   DEFAULT_MODEL_SECTION,
@@ -364,6 +368,7 @@ interface ResumeStateSnapshot {
   readonly context: {
     readonly history: readonly ContextMessage[];
   };
+  readonly checkpointedModels: Readonly<Record<string, unknown>>;
   readonly permission: Omit<ReturnType<IAgentPermissionGate['data']>, 'rules'>;
   readonly usage: Omit<ReturnType<IAgentUsageService['status']>, 'currentTurn'>;
 }
@@ -545,7 +550,7 @@ export function homeDirServices(homeDir: string | undefined): TestAgentServiceOv
         reg.defineInstance(id, value);
       }
       const file = (): SyncDescriptor<IFileSystemStorageService> =>
-        new SyncDescriptor(FileStorageService, [homeDir, undefined, undefined], true);
+        new SyncDescriptor(FileStorageService, [homeDir, undefined, undefined]);
       reg.defineDescriptor(IFileSystemStorageService, file());
       reg.define(IBlobStore, BlobStoreService);
     }
@@ -1042,7 +1047,7 @@ export class AgentTestContext {
           }
           reg.defineInstance(IHostFsWatchService, fakeHostFsWatch().service);
           const memoryStorage = (): SyncDescriptor<IFileSystemStorageService> =>
-            new SyncDescriptor(InMemoryStorageService, [], true);
+            new SyncDescriptor(InMemoryStorageService, []);
           reg.defineDescriptor(IFileSystemStorageService, memoryStorage());
           reg.define(IBlobStore, BlobStoreService);
           reg.defineInstance(
@@ -1236,6 +1241,14 @@ export class AgentTestContext {
               IAgentPermissionGate,
               new SyncDescriptor(AgentPermissionGate),
             );
+            // Redefine fencing too so scope activation skips both it and the
+            // gate: the harness resolves them explicitly below, in the
+            // production order (gate before fencing) that the veto event's
+            // waitUntil sequencing relies on.
+            reg.defineDescriptor(
+              IAgentFileFencingService,
+              new SyncDescriptor(AgentFileFencingService),
+            );
             reg.defineDescriptor(
               IAgentTaskService,
               new SyncDescriptor(AgentTaskService),
@@ -1352,13 +1365,20 @@ export class AgentTestContext {
     const permissionRules = this.get(IAgentPermissionRulesService);
     const cron = this.get(ISessionCronService);
     const plan = this.get(IAgentPlanService);
-    this.get(IAgentBuiltinToolsRegistrar);
+    // Activate the AgentTool contributions before any profile allowlist is
+    // applied by `configure()` — at this point `activeToolNames` is still
+    // undefined, so every contribution whose `when` holds lands in the
+    // registry, matching the harness's historical all-tools behavior.
+    void this.get(IAgentToolActivationService).activate();
     this.get(IAgentToolDedupeService);
     this.get(IAgentExternalHooksService);
     this.get(IAgentStepRetryService);
     this.get(IAgentLoopContinuationService);
     const tasks = this.get(IAgentTaskService);
     const permission = this.get(IAgentPermissionGate);
+    // Resolve after the gate so its veto listener registers behind the gate's:
+    // the approval round-trip must precede the staleness check.
+    this.get(IAgentFileFencingService);
     const swarm = this.get(IAgentSwarmService);
 
     context.get();
@@ -1475,6 +1495,18 @@ export class AgentTestContext {
     });
   }
 
+  appendUserTurn(text: string): void {
+    this.get(IWireService).dispatch(
+      promptTurn({ input: [{ type: 'text', text }], origin: { kind: 'user' } }),
+    );
+    this.appendMessage({
+      role: 'user',
+      content: [{ type: 'text', text }],
+      toolCalls: [],
+      origin: { kind: 'user' },
+    });
+  }
+
   appendSystemReminder(
     content: string,
     origin: ContextMessage['origin'] = { kind: 'injection', variant: 'system-reminder' },
@@ -1505,9 +1537,9 @@ export class AgentTestContext {
     this.get(IAgentPromptService).clear();
   }
 
-  undoHistory(count: number): number {
+  async undoHistory(count: number): Promise<number> {
     const rpcMethods = this.get(IAgentRPCService);
-    return rpcMethods.undoHistory({ count }) as unknown as number;
+    return rpcMethods.undoHistory({ count });
   }
 
   newEvents(): EventSnapshot {
@@ -1586,6 +1618,16 @@ export class AgentTestContext {
 
   appendExchange(_step: number, userText: string, assistantText: string, tokenTotal: number): void {
     this.appendUserText(userText);
+    this.appendAssistantMessage({
+      role: 'assistant',
+      content: [{ type: 'text', text: assistantText }],
+      toolCalls: [],
+    });
+    this.coverUsage(tokenTotal);
+  }
+
+  appendTurnExchange(userText: string, assistantText: string, tokenTotal?: number): void {
+    this.appendUserTurn(userText);
     this.appendAssistantMessage({
       role: 'assistant',
       content: [{ type: 'text', text: assistantText }],
@@ -2198,6 +2240,12 @@ function resumeStateSnapshot(ctx: AgentTestContext): ResumeStateSnapshot {
   return {
     config: configStateSnapshot(ctx),
     context: resumeContextSnapshot(ctx),
+    checkpointedModels: Object.fromEntries(
+      CHECKPOINTED_MODELS.map((model) => [
+        model.name,
+        (ctx.get(IWireService).getModel(model) as Checkpointed<unknown>).current,
+      ]),
+    ),
     permission: permissionData,
     usage: usageStatus,
   };

@@ -26,9 +26,8 @@
  * value and re-runs overlays. Bound at App scope.
  */
 
-import { InstantiationType } from '#/_base/di/extensions';
 import { Disposable } from '#/_base/di/lifecycle';
-import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
+import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { Emitter, type Event } from '#/_base/event';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { ILogService } from '#/_base/log/log';
@@ -607,13 +606,13 @@ registerScopedService(
   LifecycleScope.App,
   IConfigRegistry,
   ConfigRegistry,
-  InstantiationType.Eager,
+  ScopeActivation.OnScopeCreated,
   'config',
 );
 registerScopedService(
   LifecycleScope.App,
   IConfigService,
   ConfigService,
-  InstantiationType.Eager,
+  ScopeActivation.OnScopeCreated,
   'config',
 );

@@ -29,10 +29,9 @@
  * rejects for a fatal explicit-source error, exactly the case that should
  * fail fast, and on that failure the half-materialized handle is disposed
  * instead of poisoning the session cache (the skill catalog, by contrast, is
- * kicked fire-and-forget). The session-level eager services whose
- * subscriptions must exist before the first agent / turn (external hooks,
- * cron, the secondary-model startup warning) are force-instantiated at the
- * same point.
+ * kicked fire-and-forget). The session-level services whose subscriptions
+ * must exist before the first agent / turn (external hooks, cron, the
+ * secondary-model startup warning) opt into `OnScopeCreated` activation.
  *
  * Every materialization (create/resume/fork-target) first takes the session's
  * cross-process write lease under `session-leases/` and registers that lease
@@ -48,13 +47,13 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'pathe';
 import { ulid } from 'ulid';
 
-import { InstantiationType } from '#/_base/di/extensions';
 import { IInstantiationService } from '#/_base/di/instantiation';
 import { Disposable, type IDisposable } from '#/_base/di/lifecycle';
 import {
   createScopedChildHandle,
   type ISessionScopeHandle,
   LifecycleScope,
+  ScopeActivation,
   registerScopedService,
 } from '#/_base/di/scope';
 import { unwrapErrorCause } from '#/_base/errors/errors';
@@ -93,9 +92,7 @@ import { IAgentTaskService } from '#/agent/task/task';
 import { ensureMainAgent } from '#/session/agentLifecycle/mainAgent';
 import { ISessionMcpService } from '#/session/mcp/sessionMcp';
 import { labelsFromAgentMeta } from '#/session/agentLifecycle/subagentMetadata';
-import { ISessionExternalHooksService } from '#/session/externalHooks/externalHooks';
 import { ISessionContext, sessionContextSeed } from '#/session/sessionContext/sessionContext';
-import { ISessionCronService } from '#/session/cron/sessionCronService';
 import {
   type HeldByPeerDetails,
   HELD_BY_PEER_CREATING_DETAILS,
@@ -105,7 +102,6 @@ import {
   sessionLeaseSeed,
 } from '#/session/sessionLease/sessionLease';
 import { ISessionLeaseContactProvider } from '#/session/sessionLease/sessionLeaseContactProvider';
-import { ISessionSecondaryModelWarningService } from '#/session/subagent/secondaryModelWarning';
 import { ISessionMetadata, type SessionMeta } from '#/session/sessionMetadata/sessionMetadata';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
 import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
@@ -311,9 +307,6 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
       // peer can materialize the target underneath the copy) and the readiness
       // awaits below still see the copied state (tool policy, agent files).
       await beforeReady?.(handle);
-      handle.accessor.get(ISessionExternalHooksService);
-      handle.accessor.get(ISessionCronService);
-      handle.accessor.get(ISessionSecondaryModelWarningService);
       await handle.accessor.get(ISessionMetadata).ready;
       await handle.accessor.get(ISessionToolPolicy).ready;
       void handle.accessor.get(ISessionSkillCatalog).ready;
@@ -1036,7 +1029,7 @@ registerScopedService(
   LifecycleScope.App,
   ISessionLifecycleService,
   SessionLifecycleService,
-  InstantiationType.Eager,
+  ScopeActivation.OnScopeCreated,
   'sessionLifecycle',
 );
 

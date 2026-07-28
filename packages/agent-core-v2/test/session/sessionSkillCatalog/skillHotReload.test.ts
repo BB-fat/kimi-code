@@ -14,22 +14,51 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 
 import { join } from 'pathe';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createScopedTestHost, stubPair, type ScopedTestHost } from '#/_base/di/test';
 import { SyncDescriptor } from '#/_base/di/descriptors';
-import { LifecycleScope, type Scope } from '#/_base/di/scope';
+import {
+  _clearScopedRegistryForTests,
+  LifecycleScope,
+  ScopeActivation,
+  registerScopedService,
+  type Scope,
+} from '#/_base/di/scope';
 import '#/index';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
 import { ILogService } from '#/_base/log/log';
 import { IPluginService } from '#/app/plugin/plugin';
+import { BuiltinSkillSource, IBuiltinSkillSource } from '#/app/skillCatalog/builtinSkillSource';
 import { FileSkillDiscovery } from '#/app/skillCatalog/fileSkillDiscovery';
 import { ISkillDiscovery } from '#/app/skillCatalog/skillDiscovery';
 import { ISkillCatalogRuntimeOptions } from '#/app/skillCatalog/skillCatalogRuntimeOptions';
+import { IUserFileSkillSource, UserFileSkillSource } from '#/app/skillCatalog/userFileSkillSource';
+import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
+import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IHostFsWatchService } from '#/os/interface/hostFsWatch';
 import { HostFsWatchService } from '#/os/backends/node-local/hostFsWatchService';
+import { ISessionStateService } from '#/session/state/sessionState';
+import { SessionStateService } from '#/session/state/sessionStateService';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
+import { SessionSkillCatalogService } from '#/session/sessionSkillCatalog/skillCatalogService';
+import {
+  ExplicitFileSkillSource,
+  IExplicitFileSkillSource,
+} from '#/session/sessionSkillCatalog/explicitFileSkillSource';
+import {
+  ExtraFileSkillSource,
+  IExtraFileSkillSource,
+} from '#/session/sessionSkillCatalog/extraFileSkillSource';
+import {
+  IWorkspaceFileSkillSource,
+  WorkspaceFileSkillSource,
+} from '#/session/sessionSkillCatalog/workspaceFileSkillSource';
+import {
+  IPluginSkillSource,
+  PluginSkillSource,
+} from '#/session/sessionSkillCatalog/pluginSkillSource';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 
 import { stubLog } from '../../_base/log/stubs';
@@ -100,6 +129,33 @@ async function waitFor(cond: () => boolean, label: string, timeoutMs = 20000): P
 describe('skill hot reload', () => {
   const tmpdirs: string[] = [];
   const fixtures: HotReloadFixture[] = [];
+
+  beforeEach(() => {
+    // `import '#/index'` fills the registry with the whole product graph,
+    // including OnScopeCreated services with unstubbed dependencies, so clear
+    // it and re-register only the real services this suite constructs; their
+    // other dependencies are seeded as stubs by `makeHost`.
+    _clearScopedRegistryForTests();
+    registerScopedService(LifecycleScope.App, IBuiltinSkillSource, BuiltinSkillSource);
+    registerScopedService(LifecycleScope.App, IUserFileSkillSource, UserFileSkillSource);
+    registerScopedService(LifecycleScope.App, IHostFileSystem, HostFileSystem);
+    registerScopedService(
+      LifecycleScope.Session,
+      ISessionStateService,
+      SessionStateService,
+      ScopeActivation.OnScopeCreated,
+      'state',
+    );
+    registerScopedService(LifecycleScope.Session, ISessionSkillCatalog, SessionSkillCatalogService);
+    registerScopedService(LifecycleScope.Session, IExplicitFileSkillSource, ExplicitFileSkillSource);
+    registerScopedService(LifecycleScope.Session, IExtraFileSkillSource, ExtraFileSkillSource);
+    registerScopedService(
+      LifecycleScope.Session,
+      IWorkspaceFileSkillSource,
+      WorkspaceFileSkillSource,
+    );
+    registerScopedService(LifecycleScope.Session, IPluginSkillSource, PluginSkillSource);
+  });
 
   async function fixture(
     opts: { readonly extraSkillDirs?: readonly string[]; readonly explicitDirs?: readonly string[] } = {},

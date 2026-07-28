@@ -9,8 +9,7 @@
  * the Agent `EditTool` adapter supplies. Bound at App scope.
  */
 
-import { InstantiationType } from '#/_base/di/extensions';
-import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
+import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { unwrapErrorCause } from '#/_base/errors/errors';
 import { fileStatTuplesEqual } from '#/_base/utils/fs';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
@@ -75,6 +74,6 @@ registerScopedService(
   LifecycleScope.App,
   IFileEditService,
   FileEditService,
-  InstantiationType.Eager,
+  ScopeActivation.OnScopeCreated,
   'edit',
 );

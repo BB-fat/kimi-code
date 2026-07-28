@@ -65,8 +65,7 @@ import { hostname } from 'node:os';
 import { basename, dirname } from 'pathe';
 import { ulid } from 'ulid';
 
-import { InstantiationType } from '#/_base/di/extensions';
-import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
+import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import {
   CrossProcessLockError,
   CrossProcessLockErrorCode,
@@ -579,6 +578,6 @@ registerScopedService(
   LifecycleScope.App,
   ICrossProcessLockService,
   PureJsLockService,
-  InstantiationType.Eager,
+  ScopeActivation.OnScopeCreated,
   'crossProcessLock',
 );

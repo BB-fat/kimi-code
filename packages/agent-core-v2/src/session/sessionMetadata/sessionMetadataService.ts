@@ -5,6 +5,8 @@
  * access-pattern store (`IAtomicDocumentStore`), rooted at the `metaScope`
  * namespace from `sessionContext`. Loads the existing document on
  * construction (creating it on first run), and logs through `log`. The
+ * plain-data state (`data`) is registered into `sessionState`
+ * (`ISessionStateService`) and read/written through it. The
  * document always carries the `agents` / `custom` maps that v1's
  * `Session.resume()` reads unconditionally — seeded at creation, backfilled
  * and persisted on load for documents written before the seeding existed
@@ -27,15 +29,16 @@
  * read-model miss that `FileSessionIndex` backfills on first read.
  */
 
-import { InstantiationType } from '#/_base/di/extensions';
 import { Disposable } from '#/_base/di/lifecycle';
-import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
+import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { Emitter, type Event } from '#/_base/event';
 import { ILogService } from '#/_base/log/log';
+import { defineState } from '#/_base/state/stateRegistry';
 import { IFlagService } from '#/app/flag/flag';
 import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
 import { IQueryStore } from '#/persistence/interface/queryStore';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import { ISessionStateService } from '#/session/state/sessionState';
 
 import {
   ISessionMetadata,
@@ -50,6 +53,11 @@ const META_KEY = 'state.json';
 const SESSION_COLLECTION = 'session';
 const READ_MODEL_FLAG = 'persistence_minidb_readmodel';
 
+export const sessionMetadataDataKey = defineState<SessionMeta | undefined>(
+  'sessionMetadata.data',
+  () => undefined,
+);
+
 export class SessionMetadata extends Disposable implements ISessionMetadata {
   declare readonly _serviceBrand: undefined;
   readonly ready: Promise<void>;
@@ -60,9 +68,9 @@ export class SessionMetadata extends Disposable implements ISessionMetadata {
   );
   private readonly scope: string;
   private updateQueue: Promise<void> = Promise.resolve();
-  private data!: SessionMeta;
 
   constructor(
+    @ISessionStateService private readonly states: ISessionStateService,
     @ISessionContext private readonly ctx: ISessionContext,
     @IAtomicDocumentStore private readonly store: IAtomicDocumentStore,
     @ILogService private readonly log: ILogService,
@@ -70,9 +78,18 @@ export class SessionMetadata extends Disposable implements ISessionMetadata {
     @IFlagService private readonly flags: IFlagService,
   ) {
     super();
+    this.states.register(sessionMetadataDataKey);
     this.scope = ctx.metaScope;
     this.onDidChangeMetadata = this._onDidChangeMetadata.event;
     this.ready = this.load();
+  }
+
+  private get data(): SessionMeta {
+    return this.states.get(sessionMetadataDataKey) as SessionMeta;
+  }
+
+  private set data(value: SessionMeta) {
+    this.states.set(sessionMetadataDataKey, value);
   }
 
   async read(): Promise<SessionMeta> {
@@ -225,6 +242,6 @@ registerScopedService(
   LifecycleScope.Session,
   ISessionMetadata,
   SessionMetadata,
-  InstantiationType.Eager,
+  ScopeActivation.OnScopeCreated,
   'sessionMetadata',
 );

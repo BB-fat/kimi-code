@@ -11,13 +11,19 @@ import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 
 import { join } from 'pathe';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
 import { createScopedTestHost, stubPair } from '#/_base/di/test';
-import { LifecycleScope } from '#/_base/di/scope';
+import {
+  _clearScopedRegistryForTests,
+  LifecycleScope,
+  ScopeActivation,
+  registerScopedService,
+} from '#/_base/di/scope';
 import { Emitter, type Event } from '#/_base/event';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IPluginService } from '#/app/plugin/plugin';
+import { PluginService } from '#/app/plugin/pluginService';
 import type { ReloadSummary } from '#/app/plugin/types';
 import { IProviderService } from '#/kosong/provider/provider';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
@@ -27,13 +33,22 @@ import {
   MERGE_ALL_AVAILABLE_SKILLS_SECTION,
 } from '#/app/skillCatalog/configSection';
 import { ISkillCatalogRuntimeOptions } from '#/app/skillCatalog/skillCatalogRuntimeOptions';
-import '#/index';
+import { BuiltinSkillSource, IBuiltinSkillSource } from '#/app/skillCatalog/builtinSkillSource';
+import { IUserFileSkillSource, UserFileSkillSource } from '#/app/skillCatalog/userFileSkillSource';
 import { InMemorySkillDiscovery } from '#/app/skillCatalog/inMemorySkillDiscovery';
 import type { SkillContribution } from '#/app/skillCatalog/skillSource';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
-import { IPluginSkillSource } from '#/session/sessionSkillCatalog/pluginSkillSource';
+import { SessionSkillCatalogService } from '#/session/sessionSkillCatalog/skillCatalogService';
+import { ExplicitFileSkillSource, IExplicitFileSkillSource } from '#/session/sessionSkillCatalog/explicitFileSkillSource';
+import { ExtraFileSkillSource, IExtraFileSkillSource } from '#/session/sessionSkillCatalog/extraFileSkillSource';
+import { IWorkspaceFileSkillSource, WorkspaceFileSkillSource } from '#/session/sessionSkillCatalog/workspaceFileSkillSource';
+import { IPluginSkillSource, PluginSkillSource } from '#/session/sessionSkillCatalog/pluginSkillSource';
+import { ISessionStateService } from '#/session/state/sessionState';
+import { SessionStateService } from '#/session/state/sessionStateService';
 import { ISkillDiscovery } from '#/app/skillCatalog/skillDiscovery';
 import type { SkillRoot } from '#/app/skillCatalog/types';
+import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
+import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IHostFsWatchService } from '#/os/interface/hostFsWatch';
 
 import { stubBootstrap } from '../../app/bootstrap/stubs';
@@ -62,6 +77,7 @@ function makeHost(
     stubPair(IConfigService, config),
     stubPair(ISkillCatalogRuntimeOptions, runtimeOptions),
     stubPair(IPluginService, pluginStub(pluginRoots, pluginReloadEmitter)),
+    stubPair(IHostFileSystem, new HostFileSystem()),
     stubPair(IHostFsWatchService, fakeHostFsWatch().service),
   ]);
   const session = host.child(LifecycleScope.Session, 's1', [stubPair(ISessionWorkspaceContext, ws)]);
@@ -106,6 +122,28 @@ async function withSkillCatalogWorkspace(
 }
 
 describe('SessionSkillCatalogService', () => {
+  beforeEach(() => {
+    // Keep the scoped registry limited to the catalog chain these tests
+    // exercise so unrelated OnScopeCreated registrations do not run; every
+    // other dependency arrives as a seeded stub via `createScopedTestHost`.
+    _clearScopedRegistryForTests();
+    registerScopedService(
+      LifecycleScope.Session,
+      ISessionStateService,
+      SessionStateService,
+      ScopeActivation.OnScopeCreated,
+      'state',
+    );
+    registerScopedService(LifecycleScope.App, IBuiltinSkillSource, BuiltinSkillSource);
+    registerScopedService(LifecycleScope.App, IUserFileSkillSource, UserFileSkillSource);
+    registerScopedService(LifecycleScope.App, IPluginService, PluginService);
+    registerScopedService(LifecycleScope.Session, ISessionSkillCatalog, SessionSkillCatalogService);
+    registerScopedService(LifecycleScope.Session, IExplicitFileSkillSource, ExplicitFileSkillSource);
+    registerScopedService(LifecycleScope.Session, IExtraFileSkillSource, ExtraFileSkillSource);
+    registerScopedService(LifecycleScope.Session, IWorkspaceFileSkillSource, WorkspaceFileSkillSource);
+    registerScopedService(LifecycleScope.Session, IPluginSkillSource, PluginSkillSource);
+  });
+
   it('merges global and project skills; project wins on name collision', async () => {
     const store = new InMemorySkillDiscovery();
     store.setUserSkills([
@@ -238,7 +276,8 @@ describe('SessionSkillCatalogService', () => {
       stubPair(IConfigService, config),
       stubPair(ISkillCatalogRuntimeOptions, runtimeOptions),
       stubPair(IPluginService, pluginStub()),
-      stubPair(IHostFsWatchService, fakeHostFsWatch().service),
+      stubPair(IHostFileSystem, new HostFileSystem()),
+    stubPair(IHostFsWatchService, fakeHostFsWatch().service),
     ]);
     const session = host.child(LifecycleScope.Session, 's1', [stubPair(ISessionWorkspaceContext, ws)]);
 
@@ -278,7 +317,8 @@ describe('SessionSkillCatalogService', () => {
       stubPair(IConfigService, config),
       stubPair(ISkillCatalogRuntimeOptions, runtimeOptions),
       stubPair(IPluginService, pluginStub()),
-      stubPair(IHostFsWatchService, fakeHostFsWatch().service),
+      stubPair(IHostFileSystem, new HostFileSystem()),
+    stubPair(IHostFsWatchService, fakeHostFsWatch().service),
     ]);
     const session = host.child(LifecycleScope.Session, 's1', [stubPair(ISessionWorkspaceContext, ws)]);
 
@@ -496,7 +536,8 @@ describe('SessionSkillCatalogService', () => {
         _serviceBrand: undefined,
       } as unknown as ISkillCatalogRuntimeOptions),
       stubPair(IPluginService, pluginStub()),
-      stubPair(IHostFsWatchService, fakeHostFsWatch().service),
+      stubPair(IHostFileSystem, new HostFileSystem()),
+    stubPair(IHostFsWatchService, fakeHostFsWatch().service),
     ]);
     const session = host.child(LifecycleScope.Session, 's1', [
       stubPair(ISessionWorkspaceContext, ws),
@@ -556,7 +597,8 @@ describe('SessionSkillCatalogService', () => {
         _serviceBrand: undefined,
       } as unknown as ISkillCatalogRuntimeOptions),
       stubPair(IPluginService, pluginService),
-      stubPair(IHostFsWatchService, fakeHostFsWatch().service),
+      stubPair(IHostFileSystem, new HostFileSystem()),
+    stubPair(IHostFsWatchService, fakeHostFsWatch().service),
     ]);
     const session = host.child(LifecycleScope.Session, 's1', [
       stubPair(ISessionWorkspaceContext, ws),
@@ -615,7 +657,8 @@ describe('SessionSkillCatalogService', () => {
         _serviceBrand: undefined,
       } as unknown as ISkillCatalogRuntimeOptions),
       stubPair(IProviderService, stubProviderService()),
-      stubPair(IHostFsWatchService, fakeHostFsWatch().service),
+      stubPair(IHostFileSystem, new HostFileSystem()),
+    stubPair(IHostFsWatchService, fakeHostFsWatch().service),
     ]);
     const { stub: ws } = workspaceStub('/work');
     const session = host.child(LifecycleScope.Session, 's1', [

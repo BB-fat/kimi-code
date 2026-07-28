@@ -12,8 +12,7 @@
  * written by other engine versions are preserved. Bound at App scope.
  */
 
-import { InstantiationType } from '#/_base/di/extensions';
-import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
+import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
 
 import type { Workspace } from './workspace';
@@ -124,6 +123,6 @@ registerScopedService(
   LifecycleScope.App,
   IWorkspacePersistence,
   FileWorkspacePersistence,
-  InstantiationType.Eager,
+  ScopeActivation.OnScopeCreated,
   'workspace',
 );
