@@ -2,9 +2,8 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 
 import { getEmbeddedNativeAssetManifest, getNativePackageRoot } from './native-assets';
-import { loadKernelFileLockNativeBinding } from './kernel-file-lock';
 
-const smokePackages = ['@mariozechner/clipboard', '@moonshot-ai/pi-tui', 'fs-native-extensions'];
+const smokePackages = ['@mariozechner/clipboard', '@moonshot-ai/pi-tui'];
 
 // Verify pi-tui's native helper can actually be loaded through the module hook.
 // pi-tui computes native helper paths from process.execPath and require()s them;
@@ -35,13 +34,6 @@ function smokePiTuiNativeLoad(): void {
   }
 }
 
-function smokeKernelFileLockNativeLoad(): void {
-  const binding = loadKernelFileLockNativeBinding();
-  if (binding === undefined) {
-    throw new Error('fs-native-extensions binding is unavailable.');
-  }
-}
-
 export function runNativeAssetSmokeIfRequested(): boolean {
   if (process.env['KIMI_CODE_NATIVE_ASSET_SMOKE'] !== '1') return false;
 
@@ -57,7 +49,6 @@ export function runNativeAssetSmokeIfRequested(): boolean {
       }
     }
     smokePiTuiNativeLoad();
-    smokeKernelFileLockNativeLoad();
     process.stdout.write(`Native asset smoke passed: ${manifest.target}\n`);
     process.exit(0);
   } catch (error) {

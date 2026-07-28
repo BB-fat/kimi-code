@@ -9,13 +9,8 @@
 //     shards are skipped (shard-affinity workloads).
 //   read  <dir> <shards> <prefix> <n>
 
-import { tryAcquireKernelFileLock } from '@moonshot-ai/kernel-file-lock';
 import { ClusterDb } from '../src/cluster/index.js';
-import { LockError, setDefaultTryAcquireFileLock } from '../src/lockfile.js';
-
-// Multi-process benchmark: install the shared lock default in this worker so
-// contending writers really exclude each other (see test/setup-lock.ts).
-setDefaultTryAcquireFileLock(tryAcquireKernelFileLock);
+import { LockError } from '../src/lockfile.js';
 
 const [, , mode, ...rest] = process.argv;
 

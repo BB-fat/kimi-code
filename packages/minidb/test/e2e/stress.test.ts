@@ -188,7 +188,7 @@ test(
 // ===========================================================================
 
 test(
-  'stress: a kernel lock admits exactly one process per acquisition wave',
+  'stress: the write lock admits exactly one process per acquisition wave',
   { timeout: 180_000 },
   async () => {
     const dir = await tmpDir('minidb-stress-lock-');

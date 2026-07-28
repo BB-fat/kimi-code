@@ -1,9 +1,9 @@
 /**
  * `sessionLease` domain — unit tests for the per-session write lease.
  *
- * Runs against the real node-local lock service (the `LOCK_IMPL`-selected
- * implementation) rooted at a mkdtemp home, asserting loss notification,
- * write admission/draining, and release.
+ * Runs against the real node-local lock service (the pure-JS implementation)
+ * rooted at a mkdtemp home, asserting loss notification, write
+ * admission/draining, and release.
  */
 
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -54,8 +54,8 @@ describe('SessionLease', () => {
   it('fires the loss notification once and then fails closed', async () => {
     const onLost = vi.fn();
     const lease = await acquire('s1', onLost);
-    // Replacing the sentinel fails the kernel handle's dev/ino identity
-    // check, driving the loss path through the real gate.
+    // Replacing the lock file fails the handle's dev/ino identity check,
+    // driving the loss path through the real gate.
     rmSync(sessionLeasePath(tmpDir, 's1'));
     writeFileSync(sessionLeasePath(tmpDir, 's1'), '');
     expect(thrownError(() => lease.assertWritable()).code).toBe(ErrorCodes.SESSION_LEASE_LOST);

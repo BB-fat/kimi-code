@@ -84,17 +84,28 @@ test('expired keys are removed from secondary indexes', async () => {
   }
 });
 
-test('editing the sentinel payload cannot create a successor generation', async () => {
+test('a tampered lock payload abandons the lock: a successor takes over and the fenced old writer fails closed', async () => {
   const dir = await tmpDir();
   try {
     const oldWriter = await MiniDb.open({ dir, valueCodec: 'string', autoCompact: false });
     await oldWriter.set('generation', 'old');
 
+    // Overwrite the lock file in place with garbage: unparsable content is
+    // treated as abandoned (same as a dead PID), so a successor takes the
+    // lock over through the bid-rename, replacing the inode...
     await fs.writeFile(path.join(dir, 'db.lock'), 'successor-generation');
-    await assert.rejects(() => MiniDb.open({ dir, valueCodec: 'string', autoCompact: false }), /locked/);
-    await oldWriter.set('generation', 'old-again');
-    assert.equal(oldWriter.get('generation'), 'old-again');
+    const successor = await MiniDb.open({ dir, valueCodec: 'string', autoCompact: false });
+    try {
+      // ...and the old writer's fence (dev/ino recorded at its own acquire)
+      // fails closed on its next write instead of silently double-writing.
+      await assert.rejects(() => oldWriter.set('generation', 'old-again'), /lock was lost/);
+      await successor.set('generation', 'new');
+      assert.equal(successor.get('generation'), 'new');
+    } finally {
+      await successor.close();
+    }
 
+    // The old writer's close must not unlink the successor's lock.
     await oldWriter.close();
   } finally {
     await fs.rm(dir, { recursive: true, force: true });

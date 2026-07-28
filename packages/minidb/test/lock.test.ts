@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -69,17 +70,26 @@ test("onLockFail: 'readonly' degrades instead of throwing", async () => {
   }
 });
 
-test('pre-existing sentinel contents do not imply ownership', async () => {
+test('a pre-existing lock file whose owner pid is dead is taken over', async () => {
   const dir = await tmpDir();
   const lockPath = path.join(dir, 'db.lock');
-  await fs.writeFile(lockPath, JSON.stringify({ pid: process.pid, lock_id: 'legacy' }));
+  // A corpse left by a crashed holder: the recorded pid is certainly dead
+  // (the child already exited by the time spawnSync returned).
+  const deadPid = spawnSync(process.execPath, ['-e', '']).pid;
+  await fs.writeFile(lockPath, JSON.stringify({ pid: deadPid, lock_id: 'legacy' }));
 
   const db = await MiniDb.open({ dir, valueCodec: 'string' });
   await db.set('a', '1');
   assert.equal(db.get('a'), '1');
+  // The takeover replaced the corpse through the bid-rename: the lock file now
+  // carries this process's live pid and its own token.
+  const content = JSON.parse(await fs.readFile(lockPath, 'utf8')) as { pid?: number; token?: string };
+  assert.equal(content.pid, process.pid);
+  assert.equal(typeof content.token, 'string');
   await db.close();
 
-  assert.equal(await fs.readFile(lockPath, 'utf8'), JSON.stringify({ pid: process.pid, lock_id: 'legacy' }));
+  // Release deletes the lock file (there is no permanent sentinel).
+  assert.equal(await fs.readFile(lockPath, 'utf8').then(() => 'present', () => 'absent'), 'absent');
   assert.equal((await fs.readdir(dir)).some((entry) => entry.includes('.stale.')), false);
   await cleanup(dir);
 });

@@ -7,13 +7,11 @@
  * `test/` (not `src/`) so test-support code stays out of the production tree.
  * Import from a relative path (`./stubs` or `../os/stubs`).
  *
- * `realCrossProcessLock()` is the A/B experiment (branch lock-control-purejs)
- * switch point: lock-related suites run twice, once per `KIMI_LOCK_IMPL`
- * value, and construct the implementation under test through this factory so
- * the primitive is the only changed variable.
+ * `realCrossProcessLock()` constructs the real implementation (the pure-JS
+ * protocol) for suites that exercise actual lock files in a temporary
+ * directory.
  */
 
-import { CrossProcessLockService } from '#/os/backends/node-local/crossProcessLockService';
 import { PureJsLockService } from '#/os/backends/node-local/pureJsLockService';
 import {
   CrossProcessLockError,
@@ -24,13 +22,10 @@ import {
   type ICrossProcessLockService,
 } from '#/os/interface/crossProcessLock';
 
-/** The lock implementation under test: 'kernel' unless KIMI_LOCK_IMPL=purejs. */
-export const LOCK_IMPL = process.env['KIMI_LOCK_IMPL'] === 'purejs' ? ('purejs' as const) : ('kernel' as const);
-
 export function realCrossProcessLock(
   deps: CrossProcessLockServiceDeps = {},
 ): ICrossProcessLockService {
-  return LOCK_IMPL === 'purejs' ? new PureJsLockService(deps) : new CrossProcessLockService(deps);
+  return new PureJsLockService(deps);
 }
 
 export function stubCrossProcessLock(): ICrossProcessLockService {

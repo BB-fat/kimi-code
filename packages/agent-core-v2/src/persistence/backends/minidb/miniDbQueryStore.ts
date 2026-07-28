@@ -15,8 +15,8 @@
  * `everysec`, which is acceptable for a cache. Writes are atomic per shard;
  * a `batch` spanning shards is best-effort across them — a projector can
  * always replay from its checkpoint. Per-shard writer exclusion is delegated
- * to the injected `ICrossProcessLockService` (whichever primitive
- * `KIMI_LOCK_IMPL` selected); `lockAcquireTimeoutMs` is lowered from
+ * to the injected `ICrossProcessLockService`; `lockAcquireTimeoutMs` is
+ * lowered from
  * the 30s default: a cache read must not hang behind a contended shard, and
  * with `lockHoldMs` yields one second is ample for a live writer.
  *

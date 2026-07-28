@@ -1,26 +1,23 @@
 /**
- * `crossProcessLock` domain (L1) — pure-JS `ICrossProcessLockService` implementation.
+ * `crossProcessLock` domain (L1) — the `ICrossProcessLockService`
+ * implementation. Bound at App scope.
  *
- * A/B experiment (branch `lock-control-purejs`): the historical pre-kernel
- * lock protocol from `packages/minidb` (removed when the kernel-lock PR
- * landed), ported faithfully and adapted to the `ICrossProcessLockService`
- * contract, so the kernel-backed `CrossProcessLockService` can be swapped for
- * it via `KIMI_LOCK_IMPL=purejs` with the lock primitive as the only changed
- * variable. The DI binding in `crossProcessLockService.ts` reads the env var;
- * delete this file and revert that binding when the experiment ends. Bound at
- * App scope.
+ * A pure-Node.js cross-process lock built on atomic filesystem primitives
+ * (zero native addons): the lock file itself carries the lock state as JSON
+ * `{token, pid, hostname, createdAt}` — present means held (or a corpse left
+ * by a crashed holder), absent means free, and release deletes it. A separate
+ * owner-metadata sidecar (`<lock>.owner.json`) carries the same
+ * diagnostic/routing payload the contract defines and is likewise never
+ * consulted for lock correctness.
  *
- * Protocol (identical to the historical minidb `LockFile`). Acquisition
- * registers a `watch-<pid>-<seq>` sidecar BEFORE touching the lock — every
- * contender is visible to every other for its whole attempt, regardless of
- * where the scheduler stalls it — and reaps sidecars whose owner pid died.
- * It then publishes the lock file atomically (tmp write + hard link,
- * EEXIST-safe); the file carries JSON `{token, pid, hostname, createdAt}`.
- * The `pid` is always the REAL process pid: it is the liveness identity the
- * exclusion rests on, exactly like the kernel implementation's exclusion
- * identity is the real process's open fd (the injectable `selfPid` only feeds
- * the diagnostic owner metadata, on both sides). A held lock is taken over
- * only when that recorded pid is DEAD (`process.kill(pid, 0)`: ESRCH or a
+ * Protocol. Acquisition registers a `watch-<pid>-<seq>` sidecar BEFORE
+ * touching the lock — every contender is visible to every other for its whole
+ * attempt, regardless of where the scheduler stalls it — and reaps sidecars
+ * whose owner pid died. It then publishes the lock file atomically (tmp write
+ * + hard link, EEXIST-safe). The `pid` is always the REAL process pid: it is
+ * the liveness identity the exclusion rests on (the injectable `selfPid` only
+ * feeds the diagnostic owner metadata). A held lock is taken over only when
+ * that recorded pid is DEAD (`process.kill(pid, 0)`: ESRCH or a
  * missing/garbage pid = dead, EPERM = alive) — never merely because it is
  * old. Takeover replaces the corpse through an atomic bid-rename (never
  * unlink-then-create, which left a window where a loser could delete the
@@ -32,34 +29,32 @@
  * and re-verifies both that the file still carries its own bid token and that
  * no live foreign watch remains (a contender still in flight registered that
  * watch before its attempt, so waiting for it is what makes exactly-one-winner
- * a construction rather than a timing bet). Residual, inherent to file-based
- * takeover: a bidder whose bid write is delayed past the winner's final
- * verify can still double-win; the watch sweep shrinks the window to
- * "competitor had not even started writing its bid yet", effectively a
- * process-level pause. Held handles are released on `beforeExit` as a
- * safety net.
+ * a construction rather than a timing bet). Held handles are released on
+ * `beforeExit` as a safety net.
  *
  * Adaptation to the service contract: `checkHeld()` compares the lock file's
  * dev/ino recorded at acquisition against the current stat (a sentinel that
  * was taken over, replaced, or removed fails closed); `release()` is
- * idempotent, deletes the owner metadata first and the lock file second
- * (the kernel implementation's order), and touches neither once the inode is
- * no longer ours; `inspect()` is a pure advisory read that classifies a
- * dead-pid lock file as 'free' (the next acquire would take it over,
- * mirroring the kernel probe succeeding on a lock the OS already released)
- * and never creates, replaces, or deletes anything; `acquireWithWait` and
- * `withLock` reproduce the kernel implementation's deadline semantics. The
- * protocol's internal waits (rename-retry jitter, adaptive settle) are
- * wall-clock logic and always use real timers; only the acquireWithWait
- * deadline bookkeeping uses the injected clock.
+ * idempotent, deletes the owner metadata first and the lock file second, and
+ * touches neither once the inode is no longer ours; `inspect()` is a pure
+ * advisory read that classifies a dead-pid lock file as 'free' (the next
+ * acquire would take it over) and never creates, replaces, or deletes
+ * anything; `acquireWithWait` and `withLock` implement the contract's
+ * deadline semantics. The protocol's internal waits (rename-retry jitter,
+ * adaptive settle) are wall-clock logic and always use real timers; only the
+ * acquireWithWait deadline bookkeeping uses the injected clock.
  *
- * Differences from the kernel implementation, by construction: the lock file
- * is DELETED on release (there is no permanent sentinel); exclusion
- * ultimately rests on PID liveness, which misjudges a reused PID; and a
- * crashed holder leaves the lock file (and possibly sidecars) behind for the
- * next acquirer's takeover path. The owner-metadata sidecar
- * (`<lock>.owner.json`) carries the same diagnostic/routing payload as the
- * kernel implementation and is likewise never consulted for lock correctness.
+ * Known boundaries, by construction: exclusion ultimately rests on PID
+ * liveness, which is only meaningful for processes in the SAME pid namespace
+ * — a lock path shared across hosts (NFS) or containers (separate namespaces)
+ * makes a live holder look dead, so such topologies are unsupported and the
+ * home directory must stay host-local; a reused PID misjudges a corpse as
+ * held (the lock then waits for the unrelated process to exit — safe
+ * direction); a crashed holder leaves the lock file (and possibly sidecars)
+ * behind for the next acquirer's takeover path; and a bidder whose bid write
+ * is delayed past the winner's final verify can still double-win — the watch
+ * sweep shrinks that window to "competitor had not even started writing its
+ * bid yet", effectively a process-level pause.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -70,6 +65,8 @@ import { hostname } from 'node:os';
 import { basename, dirname } from 'pathe';
 import { ulid } from 'ulid';
 
+import { InstantiationType } from '#/_base/di/extensions';
+import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
 import {
   CrossProcessLockError,
   CrossProcessLockErrorCode,
@@ -577,3 +574,11 @@ export class PureJsLockService implements ICrossProcessLockService {
     }
   }
 }
+
+registerScopedService(
+  LifecycleScope.App,
+  ICrossProcessLockService,
+  PureJsLockService,
+  InstantiationType.Eager,
+  'crossProcessLock',
+);

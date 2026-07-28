@@ -46,8 +46,5 @@
     "bench": "node --import tsx bench/bench.ts",
     "bench:cluster": "node --import tsx bench/cluster.ts",
     "clean": "rm -rf dist"
-  },
-  "devDependencies": {
-    "@moonshot-ai/kernel-file-lock": "workspace:^"
   }
 }

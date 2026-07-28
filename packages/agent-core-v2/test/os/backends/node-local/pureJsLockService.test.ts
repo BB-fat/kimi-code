@@ -2,11 +2,10 @@
  * `crossProcessLock` domain — node-local lock integration tests.
  *
  * Exercises acquisition, diagnostic owner metadata, fail-fast and waiting
- * acquisition, takeover, and release behavior against a real temporary
- * directory. The suite runs twice, once per `KIMI_LOCK_IMPL` value (see
- * `LOCK_IMPL` in the os stubs): contract cases are implementation-agnostic,
- * while the primitive-specific shapes (permanent sentinel vs deleted lock
- * file, PID-liveness takeover) are pinned in per-implementation describes.
+ * acquisition, takeover, and release behavior of the pure-JS lock service
+ * against a real temporary directory: contract cases first, then the
+ * primitive-specific shapes (lock file deleted on release, PID-liveness
+ * takeover).
  */
 
 import { spawnSync } from 'node:child_process';
@@ -23,7 +22,7 @@ import {
   type ICrossProcessLockService,
 } from '#/os/interface/crossProcessLock';
 
-import { LOCK_IMPL, realCrossProcessLock } from '../../stubs';
+import { realCrossProcessLock } from '../../stubs';
 
 let tmpDir: string;
 let lockPath: string;
@@ -63,7 +62,7 @@ afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
-describe('CrossProcessLockService contract', () => {
+describe('crossProcessLock contract', () => {
   it('rejects a second holder in the same process', async () => {
     const first = await service('alpha', 1001).acquire(lockPath);
     handles.push(first);
@@ -114,19 +113,7 @@ describe('CrossProcessLockService contract', () => {
   });
 });
 
-// Pins the release-shape contrast between the two primitives: the kernel
-// sentinel is permanent, the pure-JS lock file is deleted on release.
-describe.skipIf(LOCK_IMPL !== 'kernel')('kernel-specific', () => {
-  it('release keeps the permanent sentinel and drops owner metadata', async () => {
-    const handle = await service('alpha', 1001).acquire(lockPath);
-    handle.release();
-
-    expect(existsSync(lockPath)).toBe(true);
-    expect(existsSync(ownerPath())).toBe(false);
-  });
-});
-
-describe.skipIf(LOCK_IMPL !== 'purejs')('pure-JS-specific', () => {
+describe('pure-JS primitive shape', () => {
   it('release deletes the lock file and owner metadata', async () => {
     const handle = await service('alpha', 1001).acquire(lockPath);
     handle.release();
@@ -138,7 +125,11 @@ describe.skipIf(LOCK_IMPL !== 'purejs')('pure-JS-specific', () => {
   it('takes over a lock whose owner pid is dead', async () => {
     writeFileSync(
       lockPath,
-      JSON.stringify({ pid: deadPid(), hostname: 'example.test', createdAt: new Date().toISOString() }),
+      JSON.stringify({
+        pid: deadPid(),
+        hostname: 'example.test',
+        createdAt: new Date().toISOString(),
+      }),
     );
 
     const lock = service('alpha', 1001);
@@ -156,7 +147,7 @@ describe.skipIf(LOCK_IMPL !== 'purejs')('pure-JS-specific', () => {
     expect(inspection.ownerMetadata).toMatchObject({ instanceId: 'alpha', pid: 1001 });
   });
 
-  it('leaves a live owner\'s lock untouched', async () => {
+  it("leaves a live owner's lock untouched", async () => {
     const corpse = JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() });
     writeFileSync(lockPath, corpse);
 
@@ -166,7 +157,7 @@ describe.skipIf(LOCK_IMPL !== 'purejs')('pure-JS-specific', () => {
     expect(readFileSync(lockPath, 'utf8')).toBe(corpse);
   });
 
-  it('a dead owner\'s lock is taken over by exactly one racer', async () => {
+  it("a dead owner's lock is taken over by exactly one racer", async () => {
     writeFileSync(lockPath, JSON.stringify({ pid: deadPid() }));
 
     const [a, b] = await Promise.allSettled([

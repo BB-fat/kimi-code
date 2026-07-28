@@ -1,16 +1,11 @@
 // test/e2e/helpers/lock-racer.ts
 //
-// Child-side counterpart of the kernel-lock stress test. Sits in a loop;
+// Child-side counterpart of the multi-process lock stress test. Sits in a loop;
 // for each round it waits for `go-<round>` to appear in the gate directory,
 // then races to acquire the lock and prints "R<round> <pid> <0|1>".
 
 import fs from 'node:fs';
-import { tryAcquireKernelFileLock } from '@moonshot-ai/kernel-file-lock';
-import { LockFile, setDefaultTryAcquireFileLock } from '../../../src/lockfile.js';
-
-// Spawned outside vitest: install the shared lock default in this process
-// (see test/setup-lock.ts).
-setDefaultTryAcquireFileLock(tryAcquireKernelFileLock);
+import { LockFile } from '../../../src/lockfile.js';
 
 const lockPath = process.argv[2]!;
 const gateDir = process.argv[3]!;

@@ -39,15 +39,6 @@ const piTuiNativeFileByTarget = Object.freeze({
   'win32-x64': ['native/win32/prebuilds/win32-x64/win32-console-mode.node'],
 });
 
-const fsNativeExtensionsFileByTarget = Object.freeze(
-  Object.fromEntries(
-    SUPPORTED_TARGETS.map((target) => [
-      target,
-      [`prebuilds/${target}/fs-native-extensions.node`],
-    ]),
-  ),
-);
-
 export function isSupportedTarget(target) {
   return SUPPORTED_TARGETS.includes(target);
 }
@@ -92,13 +83,6 @@ export const nativeDeps = Object.freeze([
     collect: 'native-file-only',
     parent: null,
     nativeFileRelatives: (target) => piTuiNativeFileByTarget[target] ?? [],
-  },
-  {
-    id: 'fs-native-extensions',
-    name: () => 'fs-native-extensions',
-    collect: 'native-file-only',
-    parent: null,
-    nativeFileRelatives: (target) => fsNativeExtensionsFileByTarget[target] ?? [],
   },
 ]);
 

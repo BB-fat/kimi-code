@@ -67,7 +67,6 @@
         ./packages/agent-core-v2
         ./packages/kap-server
         ./packages/kaos
-        ./packages/kernel-file-lock
         ./packages/klient
         ./packages/kosong
         ./packages/migration-legacy
@@ -94,7 +93,6 @@
         "@moonshot-ai/agent-core-v2"
         "@moonshot-ai/kap-server"
         "@moonshot-ai/kaos"
-        "@moonshot-ai/kernel-file-lock"
         "@moonshot-ai/kosong"
         "@moonshot-ai/migration-legacy"
         "@moonshot-ai/minidb"

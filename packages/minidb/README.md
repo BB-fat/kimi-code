@@ -53,7 +53,7 @@ src/
   query.ts          jq-like value query engine
   text-index.ts     full-text index (in-RAM dictionary + on-disk postings)
   text-postings.ts  on-disk postings file for the full-text index
-  lockfile.ts       writer-exclusion hook (host-injected lock primitive)
+  lockfile.ts       built-in pure-JS writer lock (+ injectable lock primitive)
   server.ts         optional RESP TCP server
 ```
 
@@ -418,14 +418,15 @@ source-code study behind each choice.
 
 ## Concurrency & multi-process
 
-minidb is **single-writer**, and the write-lock primitive is **injected by the
-host** (`OpenOptions.tryAcquireLock`, `ClusterOpenOptions.tryAcquireLock`) —
-minidb itself ships no locking implementation and stays dependency-free. When a
-`tryAcquireLock` function is installed, opening a directory for writing takes
-the exclusive lock on `db.lock` through it; a second writer is rejected with a
-`LockError`. When no acquirer is installed (the default), the database simply
-assumes a single writer and nothing is protected — only use that where the
-embedding application guarantees exclusivity itself.
+minidb is **single-writer**. Opening a directory for writing takes the
+built-in pure-JS cross-process lock on `db.lock` (zero dependencies — see
+`src/lockfile.ts` for the protocol); a second writer is rejected with a
+`LockError`. The primitive is **invertible**: a host or test suite can inject
+its own (`OpenOptions.tryAcquireLock`, `ClusterOpenOptions.tryAcquireLock`,
+or the process-wide `setDefaultTryAcquireFileLock`), and an explicit
+`tryAcquireLock: null` opts out — the database then simply assumes a single
+writer and nothing is protected, so only use that where the embedding
+application guarantees exclusivity itself.
 
 ```js
 // second process: throws LockError
@@ -479,9 +480,9 @@ await db.close();
   `search` merge per-shard results (text scores are per-shard). Index
   management acquires every shard writer — run it from one process, off the
   hot path.
-- Crash recovery is per shard: process exit drops the shard's write lock
-  through whatever primitive the host injected, so the next opener can
-  acquire `db.lock` exactly like single MiniDb.
+- Crash recovery is per shard: a crashed process leaves `db.lock` behind as a
+  corpse, and the next opener takes it over through the lock protocol exactly
+  like single MiniDb.
 
 `crossShard: '2pc'` is reserved for a future two-phase commit and is rejected
 today. Performance numbers across process/shard counts: run

@@ -36,7 +36,7 @@ import {
 } from '#/persistence/interface/storage';
 
 import { stubLog } from '../../_base/log/stubs';
-import { LOCK_IMPL, realCrossProcessLock } from '../../os/stubs';
+import { realCrossProcessLock } from '../../os/stubs';
 import { stubBootstrap } from '../bootstrap/stubs';
 
 const realSleep = (ms: number): Promise<void> =>
@@ -118,9 +118,9 @@ describe('ConfigService config.toml lock-in-RMW', () => {
 
     expect(readFileSync(configPath, 'utf8')).toContain('[alpha_section]');
     expect(existsSync(join(homeDir, 'custom.toml'))).toBe(false);
-    // Kernel: the sentinel stays permanently. Pure-JS: the lock file only
-    // exists while held and was deleted when set() released it.
-    expect(existsSync(`${configPath}.lock`)).toBe(LOCK_IMPL === 'kernel');
+    // The lock file only exists while held and was deleted when set()
+    // released it.
+    expect(existsSync(`${configPath}.lock`)).toBe(false);
   });
 
   it('fails set() with storage.locked while another holder is stuck, leaving config.toml intact', async () => {
@@ -156,7 +156,7 @@ describe('ConfigService config.toml lock-in-RMW', () => {
     } finally {
       handle.release();
     }
-    // Kernel: the sentinel is permanent. Pure-JS: release deletes the lock file.
-    expect(existsSync(lockPath)).toBe(LOCK_IMPL === 'kernel');
+    // Release deletes the lock file (there is no permanent sentinel).
+    expect(existsSync(lockPath)).toBe(false);
   });
 });

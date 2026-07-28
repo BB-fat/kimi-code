@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { tryAcquireKernelFileLock } from '@moonshot-ai/kernel-file-lock';
 
 import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -68,7 +67,7 @@ import {
   CrossProcessLockErrorCode,
   ICrossProcessLockService,
 } from '#/os/interface/crossProcessLock';
-import { stubCrossProcessLock, LOCK_IMPL, realCrossProcessLock } from '../../os/stubs';
+import { stubCrossProcessLock, realCrossProcessLock } from '../../os/stubs';
 import { stubFlag } from '../flag/stubs';
 import { stubLog } from '../../_base/log/stubs';
 import { recordingTelemetry, type TelemetryRecord } from '../../app/telemetry/stubs';
@@ -1453,13 +1452,9 @@ describe('SessionLifecycleService', () => {
     }
 
     async function expectLeaseReleased(root: string, sessionId: string): Promise<void> {
-      // Kernel: the sentinel is permanent. Pure-JS: release deletes the lock
-      // file. Both drop the owner metadata.
-      if (LOCK_IMPL === 'kernel') {
-        await expect(stat(leaseFile(root, sessionId))).resolves.toBeDefined();
-      } else {
-        await expect(stat(leaseFile(root, sessionId))).rejects.toThrow();
-      }
+      // Release deletes the lock file (there is no permanent sentinel); the
+      // owner metadata is dropped either way.
+      await expect(stat(leaseFile(root, sessionId))).rejects.toThrow();
       await expect(stat(leaseOwnerFile(root, sessionId))).rejects.toThrow();
     }
 
@@ -1511,48 +1506,26 @@ describe('SessionLifecycleService', () => {
       }
     });
 
-    it.skipIf(LOCK_IMPL !== 'kernel')(
-      'reports the creating phase while the kernel holder publishes owner metadata',
-      async () => {
-        const root = await makeTmpRoot();
-        const handle = tryAcquireKernelFileLock(leaseFile(root, 's1'))!;
-        try {
-          const svc = build(realInstanceSeeds(root));
-          const error = await createError(svc, 's1');
-          expect(error.code).toBe(ErrorCodes.SESSION_HELD_BY_PEER);
-          expect(error.details).toEqual({
-            kind: 'held-by-peer',
-            phase: 'creating',
-            retry_after_ms: 1000,
-          });
-        } finally {
-          handle.release();
-        }
-      },
-    );
-
-    it.skipIf(LOCK_IMPL !== 'purejs')(
-      'reports the creating phase while the pure-JS holder publishes owner metadata',
-      async () => {
-        const root = await makeTmpRoot();
-        // A live-pid lock file with no owner metadata yet: the pure-JS
-        // equivalent of the kernel probe window above.
-        await mkdir(join(root, 'session-leases'), { recursive: true });
-        await writeFile(leaseFile(root, 's1'), JSON.stringify({ pid: process.pid }));
-        try {
-          const svc = build(realInstanceSeeds(root));
-          const error = await createError(svc, 's1');
-          expect(error.code).toBe(ErrorCodes.SESSION_HELD_BY_PEER);
-          expect(error.details).toEqual({
-            kind: 'held-by-peer',
-            phase: 'creating',
-            retry_after_ms: 1000,
-          });
-        } finally {
-          await rm(leaseFile(root, 's1'), { force: true });
-        }
-      },
-    );
+    it('reports the creating phase while the holder publishes owner metadata', async () => {
+      const root = await makeTmpRoot();
+      // A live-pid lock file with no owner metadata yet: the holder won the
+      // primitive but has not published the owner document, so the session is
+      // reported in the retryable 'creating' phase.
+      await mkdir(join(root, 'session-leases'), { recursive: true });
+      await writeFile(leaseFile(root, 's1'), JSON.stringify({ pid: process.pid }));
+      try {
+        const svc = build(realInstanceSeeds(root));
+        const error = await createError(svc, 's1');
+        expect(error.code).toBe(ErrorCodes.SESSION_HELD_BY_PEER);
+        expect(error.details).toEqual({
+          kind: 'held-by-peer',
+          phase: 'creating',
+          retry_after_ms: 1000,
+        });
+      } finally {
+        await rm(leaseFile(root, 's1'), { force: true });
+      }
+    });
 
     it('close returns with the just-appended journal tail durable and the lease released', async () => {
       const root = await makeTmpRoot();
