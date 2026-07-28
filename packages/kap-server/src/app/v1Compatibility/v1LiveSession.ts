@@ -14,10 +14,11 @@
  *      {@link v1LiveSessionFailureEnvelope} (`40401` / `50001`, no new
  *      fields, no candidates).
  *   2. Live lookup FIRST, runtime resume SECOND: `ISessionLifecycleService`
- *      is the process-wide live lookup — its own map plus every
- *      runtime-activated session the host publishes through
- *      `trackActivated`. A hit is returned as-is, so an already-active
- *      session is NEVER re-activated (no double scope). Only a miss goes to
+ *      is the process-wide live lookup — every runtime-activated session
+ *      the host publishes through `trackActivated` (M8a: it is the ONLY
+ *      source; the facade activates nothing itself). A hit is returned
+ *      as-is, so an already-active session is NEVER re-activated (no
+ *      double scope). Only a miss goes to
  *      `IRuntimeSessionHostService.resume(ref)`, the runtime `open/resume`
  *      path that cold-loads the session from its owner runtime.
  *
@@ -87,10 +88,11 @@ export async function ensureV1LiveSession(
   resolution: V1SessionRefResolution,
 ): Promise<V1LiveSessionResult> {
   const sessionId = resolution.ref.sessionId;
-  // The process-wide live lookup covers BOTH maps: sessions the legacy
-  // lifecycle activated itself (the in-process CLI / debug-RPC paths) and
-  // every runtime-activated session the host tracks. A hit means the session
-  // is already active — returning it avoids a double activation.
+  // The process-wide live lookup is fed by `trackActivated` alone (M8a):
+  // every session the runtime session host activated — including the ones
+  // the in-process SDK/klient facade and the debug-RPC path activated
+  // through it — is published here. A hit means the session is already
+  // active — returning it avoids a double activation.
   const live = core.accessor.get(ISessionLifecycleService).get(sessionId);
   if (live !== undefined) {
     return { kind: 'live', handle: live, resolution };

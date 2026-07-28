@@ -551,10 +551,11 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
       try {
         const { session_id } = req.params;
         // M5c: ensure the session is live through the resolver + runtime
-        // open/resume FIRST (plan §6.3); the legacy service's internal
-        // `lifecycle.resume` below then hits the already-active handle, so
-        // the cross-domain `agent_config` patch and its wire projection run
-        // unchanged.
+        // open/resume FIRST (plan §6.3); the legacy service's
+        // `lifecycle.resume` below then resolves to the already-active
+        // handle through the process-wide live lookup (M8a: the facade's
+        // tracked view), so the cross-domain `agent_config` patch and its
+        // wire projection run unchanged.
         const live = await resolveV1LiveSession(core, session_id);
         if (live.kind !== 'live') {
           reply.send(v1LiveSessionFailureEnvelope(live, session_id, req.id));

@@ -23,10 +23,11 @@ export interface ISessionContext {
 
   readonly sessionId: string;
   /**
-   * The owning runtime's id when the session was activated through a runtime
-   * lease (multi-runtime refactor M6) — the internal `SessionRef`'s other
-   * half. Absent for legacy-activated sessions; internal identity only,
-   * never projected onto the v1 wire.
+   * The owning runtime's id — the internal `SessionRef`'s other half
+   * (multi-runtime refactor M6). Every runtime-lease activation seeds it,
+   * and M8a made that the only activation path; the field stays optional
+   * because the context seed is plain data (tests construct it directly).
+   * Internal identity only, never projected onto the v1 wire.
    */
   readonly runtimeId?: string;
   readonly workspaceId: string;

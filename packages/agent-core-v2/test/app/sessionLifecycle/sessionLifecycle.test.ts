@@ -1,12 +1,33 @@
+/**
+ * M8a tests — `SessionLifecycleService` as the thin v1-compatibility facade
+ * over `IRuntimeSessionHostService` (multi-runtime refactor, plan §15).
+ *
+ * The activation machine itself is covered by the `runtimeSessionHost`
+ * branch tests and the legacy/runtime black-box parity test in
+ * `test/app/runtimeSessionHost/`. These tests pin the FACADE contract:
+ *
+ *  - `create` resolves the workDir through the Workspace catalog and the
+ *    workspace's long-lived runtime (`ensureRegistered`, reused when
+ *    already registered), then delegates to `host.create`;
+ *  - `resume` / `fork` resolve a bare id through the live lookup first,
+ *    then the `sessionIndex` read model + the runtime manager's discovery
+ *    catch-up, and delegate;
+ *  - `close` / `archive` act on live sessions only and delegate by the
+ *    tracked ref;
+ *  - the process-wide live lookup is fed ONLY by `trackActivated`, and the
+ *    bare-id projection answers unique matches only (plan §1.3 rule 5);
+ *  - the facade's lifecycle events fire exactly once per operation;
+ *  - the shared hook slots (`onDidCreateSession` / `onWillCloseSession`)
+ *    stay available on the facade for the Session-scoped external-hooks
+ *    adapter.
+ *
+ * Run with `pnpm --filter @moonshot-ai/agent-core-v2 exec vitest run
+ * test/app/sessionLifecycle/sessionLifecycle.test.ts`.
+ */
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
-
-import { Disposable } from '#/_base/di/lifecycle';
 import {
-  type IAgentScopeHandle,
   type ISessionScopeHandle,
   LifecycleScope,
   ScopeActivation,
@@ -15,420 +36,237 @@ import {
 } from '#/_base/di/scope';
 import { type ScopedTestHost, createScopedTestHost, stubPair } from '#/_base/di/test';
 import { Event } from '#/_base/event';
-import { IBootstrapService } from '#/app/bootstrap/bootstrap';
-import { IConfigService } from '#/app/config/config';
-import { IHostEnvironment } from '#/os/interface/hostEnvironment';
-import { IHostFileSystem } from '#/os/interface/hostFileSystem';
-import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
-import { IEventService } from '#/app/event/event';
 import {
-  IAgentLifecycleService,
-  MAIN_AGENT_ID,
-} from '#/session/agentLifecycle/agentLifecycle';
-import { ISessionMcpService } from '#/session/mcp/sessionMcp';
-import { IAgentPlanService } from '#/agent/plan/plan';
-import { ISessionCronService } from '#/session/cron/sessionCronService';
-import { ISessionSecondaryModelWarningService } from '#/session/subagent/secondaryModelWarning';
-import { ICronTaskPersistence } from '#/app/cron/cronTaskPersistence';
-import { CRON_SESSION_TAG, type CronTask } from '#/app/cron/cronTask';
+  IRuntimeSessionHostService,
+  type RuntimeSessionHostCreateOptions,
+  type RuntimeSessionHostForkOptions,
+} from '#/app/runtimeSessionHost/runtimeSessionHost';
+import type { IRuntimeSessionScope } from '#/app/runtimeSession/runtimeSessionActivation';
+import {
+  CHILD_SESSION_KIND,
+  CHILD_SESSION_KIND_KEY,
+  ISessionIndex,
+  PARENT_SESSION_ID_KEY,
+  type SessionSummary,
+} from '#/app/sessionIndex/sessionIndex';
 import { ISessionLifecycleService } from '#/app/sessionLifecycle/sessionLifecycle';
 import { SessionLifecycleService } from '#/app/sessionLifecycle/sessionLifecycleService';
-import { IAgentActivityView } from '#/agent/activityView/activityView';
-import { ISessionExternalHooksService } from '#/session/externalHooks/externalHooks';
-import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
-import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
-import { ISessionToolPolicy } from '#/session/sessionToolPolicy/sessionToolPolicy';
-import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
-import { ISessionIndex, type SessionSummary } from '#/app/sessionIndex/sessionIndex';
-import { IAppendLogStore } from '#/persistence/interface/appendLogStore';
-import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
-import { IProjectLocalConfigService } from '#/app/projectLocalConfig/projectLocalConfig';
-import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
-import { SessionWorkspaceContextService } from '#/session/workspaceContext/workspaceContextService';
-import { ISessionStateService } from '#/session/state/sessionState';
-import { SessionStateService } from '#/session/state/sessionStateService';
+import { sessionRefKey, type SessionRef } from '#/app/sessionHostRuntime/sessionRef';
+import { IWorkspaceRuntimeManager } from '#/app/workspaceRegistration/workspaceRuntimeManager';
+import type { IWorkspaceRuntime } from '#/app/workspace/workspaceRuntime';
 import { IWorkspaceService, type Workspace } from '#/app/workspace/workspace';
-import { encodeWorkDirKey } from '#/_base/utils/workdir-slug';
-import { ISessionContext } from '#/session/sessionContext/sessionContext';
-import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { Error2, ErrorCodes } from '#/errors';
-import { recordingTelemetry, type TelemetryRecord } from '../../app/telemetry/stubs';
+import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 
-function bootstrapStub(): IBootstrapService {
+const RUNTIME_ID = 'local-workspace_ws-1';
+const WORKSPACE: Workspace = { id: 'ws-1', root: '/tmp/proj' } as Workspace;
+
+/* ------------------------------------------------------------------------ */
+/* Stubs                                                                     */
+/* ------------------------------------------------------------------------ */
+
+function fakeHandle(id: string, metadata?: ISessionMetadata): ISessionScopeHandle {
   return {
-    sessionsDir: '/tmp/sessions',
-    homeDir: '/tmp',
-    sessionScope: (workspaceId: string, sessionId: string) =>
-      `sessions/${workspaceId}/${sessionId}`,
-    agentScope: (workspaceId: string, sessionId: string, agentId: string) =>
-      `sessions/${workspaceId}/${sessionId}/agents/${agentId}`,
-    sessionDir: (workspaceId: string, sessionId: string) =>
-      `/tmp/sessions/${workspaceId}/${sessionId}`,
-  } as IBootstrapService;
+    id,
+    kind: LifecycleScope.Session,
+    accessor: {
+      get: (token: unknown) => {
+        if (token === ISessionMetadata) return metadata;
+        throw new Error('unexpected accessor.get in facade test');
+      },
+    },
+    dispose: () => {},
+  } as unknown as ISessionScopeHandle;
 }
 
-function tmpBootstrapStub(root: string): IBootstrapService {
-  return {
-    sessionsDir: join(root, 'sessions'),
-    homeDir: root,
-    sessionScope: (workspaceId: string, sessionId: string) =>
-      `sessions/${workspaceId}/${sessionId}`,
-    agentScope: (workspaceId: string, sessionId: string, agentId: string) =>
-      `sessions/${workspaceId}/${sessionId}/agents/${agentId}`,
-    sessionDir: (workspaceId: string, sessionId: string) =>
-      join(root, 'sessions', workspaceId, sessionId),
-  } as IBootstrapService;
-}
-
-function cronStoreStub(
-  initial: readonly CronTask[] = [],
-): ICronTaskPersistence & { readonly docs: Map<string, CronTask> } {
-  const docs = new Map(initial.map((task) => [task.id, task]));
+function metadataStub(initial: { title?: string; archived?: boolean } = {}): ISessionMetadata & {
+  readonly setArchivedCalls: boolean[];
+} {
+  const setArchivedCalls: boolean[] = [];
   return {
     _serviceBrand: undefined,
-    docs,
-    get: (_workspaceId, taskId) => Promise.resolve(docs.get(taskId)),
-    list: () => Promise.resolve([...docs.values()]),
-    save: (_workspaceId, task) => {
-      docs.set(task.id, task);
-      return Promise.resolve();
-    },
-    delete: (_workspaceId, taskId) => {
-      docs.delete(taskId);
-      return Promise.resolve();
-    },
-  };
-}
-
-function metadataStub(): ISessionMetadata {
-  return {
-    _serviceBrand: undefined,
+    setArchivedCalls,
     ready: Promise.resolve(),
-    onDidChangeMetadata: () => ({ dispose: () => {} }),
-    read: () => Promise.resolve({} as never),
+    onDidChangeMetadata: Event.None,
+    read: () =>
+      Promise.resolve({ title: initial.title, archived: initial.archived === true }) as never,
     update: () => Promise.resolve(),
     setTitle: () => Promise.resolve(),
-    setArchived: () => Promise.resolve(),
+    setArchived: (archived: boolean) => {
+      setArchivedCalls.push(archived);
+      return Promise.resolve();
+    },
     registerAgent: () => Promise.resolve(),
-  };
+  } as unknown as ISessionMetadata & { setArchivedCalls: boolean[] };
 }
 
-function eventStub(): IEventService {
-  return {
-    _serviceBrand: undefined,
-    onDidPublish: () => ({ dispose: () => {} }),
-    publish: () => {},
-    subscribe: () => ({ dispose: () => {} }),
-  };
+interface HostStub {
+  readonly createCalls: RuntimeSessionHostCreateOptions[];
+  readonly resumeCalls: SessionRef[];
+  readonly forkCalls: { ref: SessionRef; opts: RuntimeSessionHostForkOptions | undefined }[];
+  readonly closeCalls: SessionRef[];
+  readonly archiveCalls: SessionRef[];
+  readonly service: IRuntimeSessionHostService;
+  /** Mirror of the real host: publishing an activation into the facade. */
+  activate(ref: SessionRef, handle: ISessionScopeHandle): IRuntimeSessionScope;
+  /** Control an in-flight resume (the inflight-fold tests). */
+  deferResume(): void;
+  resolveDeferred(scope: IRuntimeSessionScope | undefined): void;
 }
 
-function hostEnvironmentStub(): IHostEnvironment {
-  return {
-    _serviceBrand: undefined,
-    osKind: 'Linux',
-    osArch: 'x86_64',
-    osVersion: 'test',
-    shellName: 'bash',
-    shellPath: '/bin/bash',
-    pathClass: 'posix',
-    homeDir: '/home',
-    ready: Promise.resolve(),
-  };
-}
+function hostStub(
+  lifecycle: () => ISessionLifecycleService,
+  handleFor: (sessionId: string) => ISessionScopeHandle = fakeHandle,
+): HostStub {
+  const createCalls: RuntimeSessionHostCreateOptions[] = [];
+  const resumeCalls: SessionRef[] = [];
+  const forkCalls: { ref: SessionRef; opts: RuntimeSessionHostForkOptions | undefined }[] = [];
+  const closeCalls: SessionRef[] = [];
+  const archiveCalls: SessionRef[] = [];
+  const trackings = new Map<string, { dispose: () => void }>();
+  let deferred: { resolve: (scope: IRuntimeSessionScope | undefined) => void } | undefined;
 
-function skillCatalogStub(): ISessionSkillCatalog {
-  return {
+  const activate = (ref: SessionRef, handle: ISessionScopeHandle): IRuntimeSessionScope => {
+    trackings.set(sessionRefKey(ref), lifecycle().trackActivated(ref, handle));
+    return { ref, handle, lease: undefined as never } as unknown as IRuntimeSessionScope;
+  };
+
+  const service = {
     _serviceBrand: undefined,
-    catalog: {
-      getSkill: () => undefined,
-      getPluginSkill: () => undefined,
-      renderSkillPrompt: () => '',
-      listSkills: () => [],
-      listInvocableSkills: () => [],
-      getSkillRoots: () => [],
-      getSkippedByPolicy: () => [],
-      getModelSkillListing: () => '',
+    onDidActivateSession: Event.None,
+    onDidCloseSession: Event.None,
+    onDidArchiveSession: Event.None,
+    onDidForkSession: Event.None,
+    create: (opts: RuntimeSessionHostCreateOptions) => {
+      createCalls.push(opts);
+      const ref = { runtimeId: opts.runtimeId, sessionId: opts.sessionId ?? 'session_minted' };
+      return Promise.resolve(activate(ref, handleFor(ref.sessionId)));
     },
-    ready: Promise.resolve(),
-    onDidChange: () => ({ dispose: () => {} }),
-    load: () => Promise.resolve(),
-    reload: () => Promise.resolve(),
-  };
-}
-
-function agentProfileCatalogStub(): ISessionAgentProfileCatalog {
-  return {
-    _serviceBrand: undefined,
-    ready: Promise.resolve(),
-    onDidChange: () => ({ dispose: () => {} }),
     get: () => undefined,
-    getDefault: () => {
-      throw new Error('not implemented');
-    },
     list: () => [],
-    load: () => Promise.resolve(),
-    reload: () => Promise.resolve(),
+    resume: (ref: SessionRef) => {
+      resumeCalls.push(ref);
+      if (deferred !== undefined) {
+        return new Promise<IRuntimeSessionScope | undefined>((resolve) => {
+          deferred = { resolve };
+        });
+      }
+      return Promise.resolve(activate(ref, handleFor(ref.sessionId)));
+    },
+    restore: (ref: SessionRef) =>
+      Promise.resolve(activate(ref, handleFor(ref.sessionId))),
+    fork: (ref: SessionRef, opts?: RuntimeSessionHostForkOptions) => {
+      forkCalls.push({ ref, opts });
+      const targetRef = {
+        runtimeId: ref.runtimeId,
+        sessionId: opts?.newSessionId ?? 'session_fork_minted',
+      };
+      return Promise.resolve(activate(targetRef, handleFor(targetRef.sessionId)));
+    },
+    close: (ref: SessionRef) => {
+      closeCalls.push(ref);
+      trackings.get(sessionRefKey(ref))?.dispose();
+      trackings.delete(sessionRefKey(ref));
+      return Promise.resolve();
+    },
+    archive: (ref: SessionRef) => {
+      archiveCalls.push(ref);
+      trackings.get(sessionRefKey(ref))?.dispose();
+      trackings.delete(sessionRefKey(ref));
+      return Promise.resolve();
+    },
+  } as unknown as IRuntimeSessionHostService;
+
+  return {
+    createCalls,
+    resumeCalls,
+    forkCalls,
+    closeCalls,
+    archiveCalls,
+    service,
+    activate,
+    deferResume: () => {
+      deferred = { resolve: () => {} };
+    },
+    resolveDeferred: (scope) => deferred?.resolve(scope),
   };
+}
+
+function indexStub(summaries: Record<string, SessionSummary | undefined> = {}): ISessionIndex {
+  return {
+    _serviceBrand: undefined,
+    list: () => Promise.resolve({ items: [] }),
+    get: (id: string) => Promise.resolve(summaries[id]),
+    countActive: () => Promise.resolve(0),
+  };
+}
+
+function summaryOf(sessionId: string, workspaceId = WORKSPACE.id): SessionSummary {
+  return {
+    id: sessionId,
+    workspaceId,
+    createdAt: 1,
+    updatedAt: 1,
+    archived: false,
+  };
+}
+
+interface RuntimeManagerStub {
+  readonly runtime: IWorkspaceRuntime;
+  readonly ensureRegisteredCalls: { workspaceId: string; root: string }[];
+  /** Discovery catch-up registers the runtime (the resolvable-bucket case). */
+  letDiscovered: boolean;
+  service: IWorkspaceRuntimeManager;
+}
+
+function runtimeManagerStub(startRegistered = true): RuntimeManagerStub {
+  const runtime = { id: RUNTIME_ID, kind: 'local-workspace' } as IWorkspaceRuntime;
+  const stub: RuntimeManagerStub = {
+    runtime,
+    ensureRegisteredCalls: [],
+    letDiscovered: false,
+    service: undefined as never,
+  };
+  let registered = startRegistered;
+  stub.service = {
+    _serviceBrand: undefined,
+    getRuntime: () => (registered ? runtime : undefined),
+    requireRuntime: () => runtime,
+    ensureRegistered: (ref: { workspaceId: string; root: string }) => {
+      stub.ensureRegisteredCalls.push(ref);
+      registered = true;
+      return Promise.resolve(runtime);
+    },
+    ensureDiscovered: () => {
+      if (stub.letDiscovered) registered = true;
+      return Promise.resolve([]);
+    },
+    registerProvider: () => {},
+    unregister: () => Promise.resolve(),
+    list: () => [],
+  } as unknown as IWorkspaceRuntimeManager;
+  return stub;
 }
 
 function workspaceStub(): IWorkspaceService {
   return {
     _serviceBrand: undefined,
-    list: () => Promise.resolve([]),
-    get: () => Promise.resolve(undefined),
-    createOrTouch: (root, name) =>
-      Promise.resolve<Workspace>({
-        id: 'wd_stub',
-        root,
-        name: name ?? 'stub',
-        createdAt: 0,
-        lastOpenedAt: 0,
-      }),
+    get: (id: string) => Promise.resolve(id === WORKSPACE.id ? WORKSPACE : undefined),
+    list: () => Promise.resolve([WORKSPACE]),
+    createOrTouch: (root: string) => Promise.resolve({ ...WORKSPACE, root }),
     update: () => Promise.resolve(undefined),
     delete: () => Promise.resolve(),
-  };
+  } as unknown as IWorkspaceService;
 }
 
-function projectLocalConfigStub(
-  localDirs: readonly string[] = [],
-): IProjectLocalConfigService {
-  return {
-    _serviceBrand: undefined,
-    readAdditionalDirs: (workDir: string) =>
-      Promise.resolve({
-        projectRoot: workDir,
-        configPath: `${workDir}/.kimi-code/local.toml`,
-        additionalDirs: [...localDirs],
-      }),
-    resolveAdditionalDirs: (baseDir: string, dirs: readonly string[]) =>
-      Promise.resolve(dirs.map((d) => (isAbsolute(d) ? resolve(d) : resolve(baseDir, d)))),
-    appendAdditionalDir: () => Promise.reject(new Error('not implemented')),
-  };
-}
+/* ------------------------------------------------------------------------ */
+/* Harness                                                                   */
+/* ------------------------------------------------------------------------ */
 
-function persistentWorkspaceStub(): IWorkspaceService {
-  const workspaces = new Map<string, Workspace>();
-  return {
-    _serviceBrand: undefined,
-    list: () => Promise.resolve([...workspaces.values()]),
-    get: (id) => Promise.resolve(workspaces.get(id)),
-    createOrTouch: (root, name) => {
-      const id = encodeWorkDirKey(root);
-      const now = 1;
-      const existing = workspaces.get(id);
-      const workspace: Workspace =
-        existing !== undefined
-          ? { ...existing, lastOpenedAt: now }
-          : {
-              id,
-              root,
-              name: name ?? 'proj',
-              createdAt: now,
-              lastOpenedAt: now,
-            };
-      workspaces.set(id, workspace);
-      return Promise.resolve(workspace);
-    },
-    update: () => Promise.resolve(undefined),
-    delete: () => Promise.resolve(),
-  };
-}
-
-function sessionIndexStub(): ISessionIndex {
-  return {
-    _serviceBrand: undefined,
-    list: () => Promise.resolve({ items: [], total: 0, hasMore: false }),
-    get: () => Promise.resolve(undefined),
-    countActive: () => Promise.resolve(0),
-  };
-}
-
-function sessionIndexWithSummary(
-  sessionId: string,
-  workDir: string,
-  workspaceId = encodeWorkDirKey(workDir),
-): ISessionIndex {
-  const summary = {
-    id: sessionId,
-    workspaceId,
-    cwd: workDir,
-    createdAt: 1,
-    updatedAt: 1,
-    archived: false,
-  };
-  return {
-    _serviceBrand: undefined,
-    list: () => Promise.resolve({ items: [summary], total: 1, hasMore: false }),
-    get: (id) => Promise.resolve(id === sessionId ? summary : undefined),
-    countActive: () => Promise.resolve(1),
-  };
-}
-
-function appendLogStoreStub(): IAppendLogStore {
-  return {
-    _serviceBrand: undefined,
-    append: () => {},
-    read: async function* () {},
-    rewrite: () => Promise.resolve(),
-    flush: () => Promise.resolve(),
-    close: () => Promise.resolve(),
-    acquire: () => ({ dispose: () => {} }),
-  };
-}
-
-function atomicDocumentStoreStub(): IAtomicDocumentStore {
-  return {
-    _serviceBrand: undefined,
-    get: () => Promise.resolve(undefined),
-    set: () => Promise.resolve(),
-    delete: () => Promise.resolve(),
-    list: () => Promise.resolve([]),
-    watch: () => (_listener) => ({ dispose: () => {} }),
-    acquire: () => ({ dispose: () => {} }),
-  };
-}
-
-function sessionToolPolicyStub(): ISessionToolPolicy {
-  return {
-    _serviceBrand: undefined,
-    ready: Promise.resolve(),
-    onDidChange: () => ({ dispose: () => {} }),
-    disabledTools: () => [],
-    setDisabledTools: () => Promise.resolve(),
-  };
-}
-
-function agentLifecycleStub(): IAgentLifecycleService {
-  return {
-    _serviceBrand: undefined,
-    onDidCreate: () => ({ dispose: () => {} }),
-    onDidDispose: () => ({ dispose: () => {} }),
-    create: () => Promise.reject(new Error('not implemented')),
-    fork: () => Promise.reject(new Error('not implemented')),
-    get: () => undefined,
-    list: () => [],
-    remove: () => Promise.resolve(),
-    broadcastPermissionMode: () => {},
-  };
-}
-
-function sessionMcpServiceStub(
-  ensureMcpReady: () => Promise<void> = () => Promise.resolve(),
-): ISessionMcpService {
-  return {
-    _serviceBrand: undefined,
-    ensureMcpReady,
-    connectionManager: () => {
-      throw new Error('not implemented');
-    },
-  };
-}
-
-function agentLifecycleWithMainStub(): IAgentLifecycleService {
-  const main = {
-    id: MAIN_AGENT_ID,
-    kind: LifecycleScope.Agent,
-    accessor: {
-      get: () => {
-        throw new Error('unexpected main agent service access');
-      },
-    },
-    dispose: () => {},
-  } as IAgentScopeHandle;
-  return {
-    ...agentLifecycleStub(),
-    get: (id) => (id === MAIN_AGENT_ID ? main : undefined),
-  };
-}
-
-function configStub(values: Record<string, unknown> = {}): IConfigService {
-  return {
-    get: (domain: string) => values[domain],
-    getAll: () => ({ ...values }),
-    onDidChangeConfiguration: () => ({ dispose: () => {} }),
-    onDidSectionChange: () => ({ dispose: () => {} }),
-  } as unknown as IConfigService;
-}
-
-function agentLifecycleCapturingPlanSpy(opts: { mainPreexists?: boolean } = {}): {
-  lifecycle: IAgentLifecycleService;
-  enter: ReturnType<typeof vi.fn>;
-  create: ReturnType<typeof vi.fn>;
-} {
-  const enter = vi.fn(() => Promise.resolve());
-  const planService = {
-    enter,
-    cancel: vi.fn(),
-    clear: vi.fn(() => Promise.resolve()),
-    exit: vi.fn(),
-    status: vi.fn(() => Promise.resolve(null)),
-  };
-  const makeMain = (agentId: string): IAgentScopeHandle =>
-    ({
-      id: agentId,
-      kind: LifecycleScope.Agent,
-      accessor: {
-        get: (token: unknown) => (token === IAgentPlanService ? planService : {}),
-      },
-      dispose: () => {},
-    }) as IAgentScopeHandle;
-  let mainHandle: IAgentScopeHandle | undefined = opts.mainPreexists
-    ? makeMain(MAIN_AGENT_ID)
-    : undefined;
-  const create = vi.fn((args: { agentId: string }) => {
-    mainHandle = makeMain(args.agentId);
-    return Promise.resolve(mainHandle);
-  });
-  const lifecycle: IAgentLifecycleService = {
-    ...agentLifecycleStub(),
-    get: (id: string) => (id === MAIN_AGENT_ID ? mainHandle : undefined),
-    create,
-  };
-  return { lifecycle, enter, create };
-}
-
-function tick(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 0));
-}
-
-class NoopSessionExternalHooksService implements ISessionExternalHooksService {
-  declare readonly _serviceBrand: undefined;
-}
-
-let recordedSessionHookEvents: string[] = [];
-
-class RecordingSessionExternalHooksService
-  extends Disposable
-  implements ISessionExternalHooksService
-{
-  declare readonly _serviceBrand: undefined;
-
-  constructor(@ISessionLifecycleService lifecycle: ISessionLifecycleService) {
-    super();
-    this._register(
-      lifecycle.hooks.onDidCreateSession.register('test', async (event, next) => {
-        recordedSessionHookEvents.push(`create:${event.source}:${event.sessionId}`);
-        await next();
-      }),
-    );
-    this._register(
-      lifecycle.hooks.onWillCloseSession.register('test', async (event, next) => {
-        recordedSessionHookEvents.push(`close:${event.reason}:${event.sessionId}`);
-        await next();
-      }),
-    );
-  }
-}
-
-describe('SessionLifecycleService', () => {
+describe('SessionLifecycleService (M8a facade)', () => {
   let host: ScopedTestHost | undefined;
-  let telemetryRecords: TelemetryRecord[];
-  let tmpRoots: string[];
 
   beforeEach(() => {
-    recordedSessionHookEvents = [];
-    telemetryRecords = [];
-    tmpRoots = [];
     _clearScopedRegistryForTests();
     registerScopedService(
       LifecycleScope.App,
@@ -437,1012 +275,331 @@ describe('SessionLifecycleService', () => {
       ScopeActivation.OnDemand,
       'sessionLifecycle',
     );
-    registerScopedService(
-      LifecycleScope.Session,
-      ISessionExternalHooksService,
-      NoopSessionExternalHooksService,
-      ScopeActivation.OnScopeCreated,
-      'externalHooks',
-    );
-    registerScopedService(
-      LifecycleScope.App,
-      IHostFileSystem,
-      HostFileSystem,
-      ScopeActivation.OnDemand,
-      'hostFs',
-    );
   });
 
-  afterEach(async () => {
+  afterEach(() => {
     host?.dispose();
     host = undefined;
-    await Promise.all(tmpRoots.map((root) => rm(root, { recursive: true, force: true })));
   });
 
-  function build(extra: ReturnType<typeof stubPair>[] = []): ISessionLifecycleService {
+  function build(
+    input: {
+      readonly summaries?: Record<string, SessionSummary | undefined>;
+      readonly runtimeManager?: RuntimeManagerStub;
+      readonly handleFor?: (sessionId: string) => ISessionScopeHandle;
+    } = {},
+  ) {
+    const runtimeManager = input.runtimeManager ?? runtimeManagerStub();
+    let facade!: ISessionLifecycleService;
+    const runtime = hostStub(() => facade, input.handleFor);
     host = createScopedTestHost([
-      stubPair(IBootstrapService, bootstrapStub()),
-      stubPair(ISessionMetadata, metadataStub()),
-      stubPair(IHostEnvironment, hostEnvironmentStub()),
-      stubPair(ISessionSkillCatalog, skillCatalogStub()),
-      stubPair(ISessionToolPolicy, sessionToolPolicyStub()),
-      stubPair(ISessionAgentProfileCatalog, agentProfileCatalogStub()),
+      stubPair(IRuntimeSessionHostService, runtime.service),
+      stubPair(ISessionIndex, indexStub(input.summaries)),
       stubPair(IWorkspaceService, workspaceStub()),
-      stubPair(ISessionIndex, sessionIndexStub()),
-      stubPair(IAppendLogStore, appendLogStoreStub()),
-      stubPair(IAtomicDocumentStore, atomicDocumentStoreStub()),
-      stubPair(IEventService, eventStub()),
-      stubPair(IAgentLifecycleService, agentLifecycleStub()),
-      stubPair(ISessionMcpService, sessionMcpServiceStub()),
-      stubPair(IConfigService, configStub()),
-      stubPair(ISessionCronService, { _serviceBrand: undefined } as unknown as ISessionCronService),
-      stubPair(ISessionSecondaryModelWarningService, {
-        _serviceBrand: undefined,
-        getSecondaryModelWarning: () => undefined,
-      } as ISessionSecondaryModelWarningService),
-      stubPair(IProjectLocalConfigService, projectLocalConfigStub()),
-      stubPair(ITelemetryService, recordingTelemetry(telemetryRecords)),
-      stubPair(ICronTaskPersistence, cronStoreStub()),
-      ...extra,
+      stubPair(IWorkspaceRuntimeManager, runtimeManager.service),
     ]);
-    return host.app.accessor.get(ISessionLifecycleService);
+    facade = host.app.accessor.get(ISessionLifecycleService);
+    return { facade, runtime, runtimeManager };
   }
 
-  async function makeTmpRoot(): Promise<string> {
-    const root = await mkdtemp(join(tmpdir(), 'kimi-fork-test-'));
-    tmpRoots.push(root);
-    return root;
-  }
+  /* ---------------------------------------------------------------------- */
+  /* Create                                                                  */
+  /* ---------------------------------------------------------------------- */
 
-  it('create / get / list / close', async () => {
-    const svc = build();
-    const h = await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
-    expect(h.id).toBe('s1');
-    expect(svc.get('s1')).toBe(h);
-    expect(svc.list()).toEqual([h]);
+  it('create resolves the workspace, reuses its runtime, delegates and announces', async () => {
+    const { facade, runtime, runtimeManager } = build();
+    const created: string[] = [];
+    facade.onDidCreateSession((event) => created.push(`${event.source}:${event.sessionId}`));
 
-    await svc.close('s1');
-    expect(svc.get('s1')).toBeUndefined();
-  });
+    const handle = await facade.create({ sessionId: 's1', workDir: '/tmp/proj' });
 
-  it('observes externally activated sessions in the live lookup (M5c trackActivated bridge)', async () => {
-    const svc = build();
-    const external = {
-      id: 'ext-1',
-      kind: LifecycleScope.Session,
-      accessor: { get: () => undefined },
-      dispose: () => undefined,
-    } as unknown as ISessionScopeHandle;
-
-    expect(svc.get('ext-1')).toBeUndefined();
-    const ref = { runtimeId: 'rt-ext', sessionId: 'ext-1' };
-    const tracking = svc.trackActivated(ref, external);
-    // get / getByRef / list / resume all observe the tracked session — a
-    // resume NEVER re-materializes it through the legacy path.
-    expect(svc.get('ext-1')).toBe(external);
-    expect(svc.getByRef(ref)).toBe(external);
-    expect(svc.getByRef({ runtimeId: 'rt-other', sessionId: 'ext-1' })).toBeUndefined();
-    expect(svc.list()).toEqual([external]);
-    await expect(svc.resume('ext-1')).resolves.toBe(external);
-
-    // Ownership stays with the registrar: close/archive (own-map operations)
-    // are no-ops for a tracked session.
-    await svc.close('ext-1');
-    await svc.archive('ext-1');
-    expect(svc.get('ext-1')).toBe(external);
-
-    // Detach is idempotent and identity-checked; afterwards the session is
-    // gone from every lookup.
-    tracking.dispose();
-    tracking.dispose();
-    expect(svc.get('ext-1')).toBeUndefined();
-    expect(svc.list()).toEqual([]);
-  });
-
-  it('keeps two same-named tracked sessions apart by SessionRef (M6)', async () => {
-    const svc = build();
-    const handleOf = (id: string): ISessionScopeHandle =>
-      ({
-        id,
-        kind: LifecycleScope.Session,
-        accessor: { get: () => undefined },
-        dispose: () => undefined,
-      }) as unknown as ISessionScopeHandle;
-    // Two runtimes hosting a live session with the SAME bare id: both fit in
-    // the ref-keyed tracked map (M5c's bare-keyed map would overwrite one).
-    const refA = { runtimeId: 'rt-a', sessionId: 'same-id' };
-    const refB = { runtimeId: 'rt-b', sessionId: 'same-id' };
-    const a = handleOf('same-id');
-    const b = handleOf('same-id');
-    const trackingA = svc.trackActivated(refA, a);
-    const trackingB = svc.trackActivated(refB, b);
-
-    // The ref-addressed lookup is exact…
-    expect(svc.getByRef(refA)).toBe(a);
-    expect(svc.getByRef(refB)).toBe(b);
-    // …while the bare-id projection refuses to guess (plan §1.3 rule 5)…
-    expect(svc.get('same-id')).toBeUndefined();
-    // …and list still surfaces both.
-    expect(svc.list()).toEqual([a, b]);
-
-    // Detaching one leaves the other's ref lookup intact; the bare projection
-    // becomes unique again and answers.
-    trackingA.dispose();
-    expect(svc.getByRef(refA)).toBeUndefined();
-    expect(svc.getByRef(refB)).toBe(b);
-    expect(svc.get('same-id')).toBe(b);
-    trackingB.dispose();
-    expect(svc.list()).toEqual([]);
-  });
-
-  it('create seeds identity and materializes metadata', async () => {
-    const svc = build();
-    const h = await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
-    expect(h.kind).toBe(LifecycleScope.Session);
-  });
-
-  it('create forwards caller-supplied MCP servers to the session MCP initial load', async () => {
-    const ensureMcpReady = vi.fn(() => Promise.resolve());
-    const svc = build([
-      stubPair(ISessionMcpService, sessionMcpServiceStub(ensureMcpReady)),
+    expect(handle.id).toBe('s1');
+    expect(runtimeManager.ensureRegisteredCalls).toEqual([
+      { workspaceId: WORKSPACE.id, root: '/tmp/proj' },
     ]);
-    const mcpServers = { docs: { transport: 'http', url: 'https://mcp.example.com' } } as const;
-    await svc.create({ sessionId: 's1', workDir: '/tmp/proj', mcpServers });
-    expect(ensureMcpReady).toHaveBeenCalledWith(mcpServers);
-  });
-
-  it('create appends the session to the shared session_index.jsonl', async () => {
-    const appended: unknown[] = [];
-    const svc = build([
-      stubPair(IAppendLogStore, {
-        ...appendLogStoreStub(),
-        append: (scope: string, key: string, record: unknown) => {
-          appended.push({ scope, key, record });
-        },
-      }),
-    ]);
-
-    const handle = await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
-
-    // The index entry addresses the session under the registry-resolved
-    // workspace id — the same id seeding the session's storage scope — not a
-    // recomputed encodeWorkDirKey, so the v1 reader finds it in the bucket it
-    // was materialized into.
-    const workspaceId = handle.accessor.get(ISessionContext).workspaceId;
-    expect(appended).toEqual([
+    expect(runtime.createCalls).toEqual([
       {
-        scope: '',
-        key: 'session_index.jsonl',
-        record: {
-          sessionId: 's1',
-          sessionDir: `/tmp/sessions/${workspaceId}/s1`,
-          workDir: '/tmp/proj',
-        },
-      },
-    ]);
-  });
-
-  it('does not index and removes a fresh session when initial agent binding fails', async () => {
-    const appended: unknown[] = [];
-    const remove = vi.fn(() => Promise.resolve());
-    const create = vi.fn(() => Promise.reject(new Error('Unknown agent profile')));
-    const svc = build([
-      stubPair(IAppendLogStore, {
-        ...appendLogStoreStub(),
-        append: (_scope: string, _key: string, record: unknown) => appended.push(record),
-      }),
-      stubPair(IHostFileSystem, { remove } as unknown as IHostFileSystem),
-      stubPair(IAgentLifecycleService, {
-        ...agentLifecycleStub(),
-        create,
-      }),
-    ]);
-
-    await expect(
-      svc.create({
+        runtimeId: RUNTIME_ID,
         sessionId: 's1',
-        workDir: '/tmp/proj',
-        mainAgentBinding: { profile: 'missing', model: 'mock' },
-      }),
-    ).rejects.toThrow('Unknown agent profile');
-
-    expect(appended).toEqual([]);
-    expect(svc.get('s1')).toBeUndefined();
-    expect(remove).toHaveBeenCalledOnce();
-  });
-
-  it('indexes the session under the registry-resolved id when the workDir is an alias spelling', async () => {
-    const appended: unknown[] = [];
-    const svc = build([
-      stubPair(IAppendLogStore, {
-        ...appendLogStoreStub(),
-        append: (scope: string, key: string, record: unknown) => {
-          appended.push({ scope, key, record });
-        },
-      }),
-      stubPair(IWorkspaceService, {
-        ...workspaceStub(),
-        // As the real registry does after folding: the id minted for the
-        // first-seen spelling is reused for the alias.
-        createOrTouch: (root: string, name?: string) =>
-          Promise.resolve({
-            id: 'wd_first_spelling',
-            root,
-            name: name ?? 'proj',
-            createdAt: 0,
-            lastOpenedAt: 0,
-          }),
-      }),
-    ]);
-
-    const handle = await svc.create({ sessionId: 's1', workDir: 'c:\\users\\foo\\proj' });
-
-    expect(handle.accessor.get(ISessionContext).workspaceId).toBe('wd_first_spelling');
-    expect(appended).toEqual([
-      {
-        scope: '',
-        key: 'session_index.jsonl',
-        record: {
-          sessionId: 's1',
-          sessionDir: '/tmp/sessions/wd_first_spelling/s1',
-          workDir: 'c:\\users\\foo\\proj',
-        },
+        mcpServers: undefined,
+        mainAgentBinding: undefined,
+        additionalDirs: undefined,
       },
     ]);
+    expect(created).toEqual(['startup:s1']);
+    // The activation was published into the live lookup by the host.
+    expect(facade.get('s1')).toBe(handle);
+    expect(facade.getByRef({ runtimeId: RUNTIME_ID, sessionId: 's1' })).toBe(handle);
+    expect(facade.list()).toEqual([handle]);
   });
 
-  it('registers the workspace during create so a cold resume can resolve the workdir', async () => {
-    const workDir = '/tmp/proj';
-    const workspaces = persistentWorkspaceStub();
-    const sessionIndex = sessionIndexWithSummary('s1', workDir);
-    const first = build([
-      stubPair(IWorkspaceService, workspaces),
-      stubPair(ISessionIndex, sessionIndex),
-    ]);
+  /* ---------------------------------------------------------------------- */
+  /* Live lookup                                                             */
+  /* ---------------------------------------------------------------------- */
 
-    await first.create({ sessionId: 's1', workDir });
-    await expect(workspaces.get(encodeWorkDirKey(workDir))).resolves.toMatchObject({
-      root: workDir,
+  it('the live lookup reflects only tracked sessions and detaches on dispose', () => {
+    const { facade } = build();
+    const handle = fakeHandle('s1');
+    const ref = { runtimeId: RUNTIME_ID, sessionId: 's1' };
+
+    const tracking = facade.trackActivated(ref, handle);
+    expect(facade.get('s1')).toBe(handle);
+    expect(facade.getByRef(ref)).toBe(handle);
+    expect(facade.getByRef({ runtimeId: 'other', sessionId: 's1' })).toBeUndefined();
+
+    tracking.dispose();
+    expect(facade.get('s1')).toBeUndefined();
+    expect(facade.getByRef(ref)).toBeUndefined();
+    expect(facade.list()).toEqual([]);
+  });
+
+  it('bare get answers undefined for a same-named pair hosted by two runtimes (M6)', () => {
+    const { facade } = build();
+    const handleA = fakeHandle('shared');
+    const handleB = fakeHandle('shared');
+    facade.trackActivated({ runtimeId: 'rt-a', sessionId: 'shared' }, handleA);
+    facade.trackActivated({ runtimeId: 'rt-b', sessionId: 'shared' }, handleB);
+
+    // Ambiguous bare id: never guessed (plan §1.3 rule 5).
+    expect(facade.get('shared')).toBeUndefined();
+    // Ref-addressed lookups stay exact.
+    expect(facade.getByRef({ runtimeId: 'rt-a', sessionId: 'shared' })).toBe(handleA);
+    expect(facade.getByRef({ runtimeId: 'rt-b', sessionId: 'shared' })).toBe(handleB);
+    expect(facade.list()).toEqual([handleA, handleB]);
+  });
+
+  /* ---------------------------------------------------------------------- */
+  /* Resume                                                                  */
+  /* ---------------------------------------------------------------------- */
+
+  it('resume returns the live entry without re-activating', async () => {
+    const { facade, runtime } = build();
+    const handle = fakeHandle('s1');
+    facade.trackActivated({ runtimeId: RUNTIME_ID, sessionId: 's1' }, handle);
+
+    const resumed = await facade.resume('s1');
+    expect(resumed).toBe(handle);
+    expect(runtime.resumeCalls).toEqual([]);
+  });
+
+  it('resume resolves a cold session through the index and the runtime manager', async () => {
+    const { facade, runtime } = build({ summaries: { s1: summaryOf('s1') } });
+    const created: string[] = [];
+    facade.onDidCreateSession((event) => created.push(`${event.source}:${event.sessionId}`));
+
+    const resumed = await facade.resume('s1');
+    expect(resumed?.id).toBe('s1');
+    expect(runtime.resumeCalls).toEqual([{ runtimeId: RUNTIME_ID, sessionId: 's1' }]);
+    expect(created).toEqual(['resume:s1']);
+    // Now live: a second resume must not re-activate.
+    expect(await facade.resume('s1')).toBe(resumed);
+    expect(runtime.resumeCalls).toHaveLength(1);
+  });
+
+  it('resume runs the discovery catch-up when the runtime is not registered yet', async () => {
+    const runtimeManager = runtimeManagerStub(false);
+    runtimeManager.letDiscovered = true;
+    const { facade, runtime } = build({
+      summaries: { s1: summaryOf('s1') },
+      runtimeManager,
     });
-    host?.dispose();
-    host = undefined;
 
-    const second = build([
-      stubPair(IWorkspaceService, workspaces),
-      stubPair(ISessionIndex, sessionIndex),
-      stubPair(IAgentLifecycleService, agentLifecycleWithMainStub()),
-    ]);
-    const resumed = await second.resume('s1');
-
+    const resumed = await facade.resume('s1');
     expect(resumed?.id).toBe('s1');
-    expect(resumed?.accessor.get(ISessionContext).cwd).toBe(workDir);
+    expect(runtime.resumeCalls).toEqual([{ runtimeId: RUNTIME_ID, sessionId: 's1' }]);
   });
 
-  it('resumes from the persisted cwd when the workspace registry entry is missing', async () => {
-    const workDir = '/tmp/proj';
-    const svc = build([
-      stubPair(IWorkspaceService, persistentWorkspaceStub()),
-      stubPair(ISessionIndex, sessionIndexWithSummary('s1', workDir)),
-      stubPair(IAgentLifecycleService, agentLifecycleWithMainStub()),
-    ]);
-
-    const resumed = await svc.resume('s1');
-
-    expect(resumed?.id).toBe('s1');
-    expect(resumed?.accessor.get(ISessionContext).workspaceId).toBe(encodeWorkDirKey(workDir));
+  it('resume returns undefined for an unknown session', async () => {
+    const { facade, runtime } = build();
+    expect(await facade.resume('ghost')).toBeUndefined();
+    expect(runtime.resumeCalls).toEqual([]);
   });
 
-  it('does not cache a session whose tool policy fails to initialize', async () => {
-    const svc = build([
-      stubPair(ISessionIndex, sessionIndexWithSummary('s1', '/tmp/proj')),
-      stubPair(ISessionToolPolicy, {
-        ...sessionToolPolicyStub(),
-        ready: Promise.reject(new Error('invalid tool policy')),
-      }),
-    ]);
-
-    await expect(svc.resume('s1')).rejects.toThrow('invalid tool policy');
-    expect(svc.get('s1')).toBeUndefined();
-    await expect(svc.resume('s1')).rejects.toThrow('invalid tool policy');
+  it('resume returns undefined when no runtime owns the bucket', async () => {
+    const { facade, runtime } = build({
+      summaries: { s1: summaryOf('s1', 'ws-gone') },
+      runtimeManager: runtimeManagerStub(false),
+    });
+    expect(await facade.resume('s1')).toBeUndefined();
+    expect(runtime.resumeCalls).toEqual([]);
   });
 
-  it('resumes with the persisted cwd and indexed workspace id when the registry root is stale', async () => {
-    const workDir = '/tmp/proj';
-    const staleRoot = '/tmp/stale';
-    const indexedWorkspaceId = 'wd_indexed';
-    const workspaces: IWorkspaceService = {
-      _serviceBrand: undefined,
-      list: () => Promise.resolve([]),
-      get: (id) =>
-        Promise.resolve(
-          id === indexedWorkspaceId
-            ? {
-                id: indexedWorkspaceId,
-                root: staleRoot,
-                name: 'stale',
-                createdAt: 1,
-                lastOpenedAt: 1,
-              }
-            : undefined,
-        ),
-        createOrTouch: (root, name) =>
-        Promise.resolve({
-          id: encodeWorkDirKey(root),
-          root,
-          name: name ?? 'proj',
-          createdAt: 1,
-          lastOpenedAt: 1,
-        }),
-      update: () => Promise.resolve(undefined),
-      delete: () => Promise.resolve(),
-    };
-    const svc = build([
-      stubPair(IWorkspaceService, workspaces),
-      stubPair(ISessionIndex, sessionIndexWithSummary('s1', workDir, indexedWorkspaceId)),
-      stubPair(IAgentLifecycleService, agentLifecycleWithMainStub()),
-    ]);
+  it('concurrent resumes fold into one activation and one announcement', async () => {
+    const { facade, runtime } = build({ summaries: { s1: summaryOf('s1') } });
+    runtime.deferResume();
+    const created: string[] = [];
+    facade.onDidCreateSession((event) => created.push(`${event.source}:${event.sessionId}`));
 
-    const resumed = await svc.resume('s1');
-    const ctx = resumed?.accessor.get(ISessionContext);
+    const first = facade.resume('s1');
+    const second = facade.resume('s1');
+    // Hidden while the resume is in flight (legacy semantics).
+    expect(facade.get('s1')).toBeUndefined();
+    expect(facade.list()).toEqual([]);
 
-    expect(ctx?.cwd).toBe(workDir);
-    expect(ctx?.workspaceId).toBe(indexedWorkspaceId);
-    expect(ctx?.sessionDir).toBe(`/tmp/sessions/${indexedWorkspaceId}/s1`);
+    // Wait until the facade's delegation reached the (deferred) host resume.
+    await vi.waitFor(() => expect(runtime.resumeCalls).toHaveLength(1));
+    const scope = runtime.activate({ runtimeId: RUNTIME_ID, sessionId: 's1' }, fakeHandle('s1'));
+    runtime.resolveDeferred(scope);
+    const [handleA, handleB] = await Promise.all([first, second]);
+    expect(handleA).toBe(handleB);
+    expect(runtime.resumeCalls).toHaveLength(1);
+    expect(created).toEqual(['resume:s1']);
+    expect(facade.get('s1')).toBe(handleA);
   });
 
-  it('archive flags metadata, removes agents, publishes the event, and disposes the session', async () => {
-    let archived: boolean | undefined;
-    const removed: string[] = [];
-    const published: { type: string; payload: unknown }[] = [];
-    const agentHandle = {
-      id: 'main',
-      kind: LifecycleScope.Agent,
-      accessor: { get: () => ({}) },
-      dispose: () => {},
-    } as unknown as IAgentScopeHandle;
-    const svc = build([
-      stubPair(ISessionMetadata, {
-        ...metadataStub(),
-        setArchived: (value: boolean) => {
-          archived = value;
-          return Promise.resolve();
-        },
-      }),
-      stubPair(IAgentLifecycleService, {
-        ...agentLifecycleStub(),
-        _serviceBrand: undefined,
-        list: () => [agentHandle],
-        remove: (id: string) => {
-          removed.push(id);
-          return Promise.resolve();
-        },
-      } as unknown as IAgentLifecycleService),
-      stubPair(IEventService, {
-        ...eventStub(),
-        publish: (event: { type: string; payload: unknown }) => published.push(event),
-      }),
-    ]);
+  /* ---------------------------------------------------------------------- */
+  /* Restore                                                                 */
+  /* ---------------------------------------------------------------------- */
 
-    await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
-    await svc.archive('s1');
+  it('restore resumes and clears the archived flag', async () => {
+    const metadata = metadataStub({ archived: true });
+    const { facade } = build({
+      summaries: { s1: summaryOf('s1') },
+      handleFor: (sessionId) => fakeHandle(sessionId, metadata),
+    });
 
-    expect(archived).toBe(true);
-    expect(removed).toEqual(['main']);
-    expect(published).toEqual([
-      { type: 'event.session.archived', payload: { sessionId: 's1' } },
-    ]);
-    expect(svc.get('s1')).toBeUndefined();
-  });
-
-  it('restore clears the archived flag when the session exists on disk', async () => {
-    let archived: boolean | undefined;
-    const svc = build([
-      stubPair(ISessionIndex, sessionIndexWithSummary('s1', '/tmp/proj')),
-      stubPair(IAgentLifecycleService, agentLifecycleWithMainStub()),
-      stubPair(ISessionMetadata, {
-        ...metadataStub(),
-        setArchived: (value: boolean) => {
-          archived = value;
-          return Promise.resolve();
-        },
-      }),
-    ]);
-
-    const restored = await svc.restore('s1');
-
+    const restored = await facade.restore('s1');
     expect(restored?.id).toBe('s1');
-    expect(archived).toBe(false);
+    expect(metadata.setArchivedCalls).toEqual([false]);
   });
 
-  it('forks successfully even while the source has a busy agent (crash-equivalent copy)', async () => {
-    const busyAgent = {
-      id: MAIN_AGENT_ID,
-      kind: LifecycleScope.Agent,
-      accessor: {
-        get: (token: unknown) => {
-          if (token === IAgentActivityView) {
-            return {
-              state: () => ({
-                lifecycle: 'ready',
-                turn: { turnId: 0 },
-                background: [],
-              }),
-            };
-          }
-          throw new Error('unexpected service access');
-        },
-      },
-      dispose: () => {},
-    } as unknown as IAgentScopeHandle;
-    const svc = build([
-      stubPair(IWorkspaceService, {
-        ...workspaceStub(),
-        get: () =>
-          Promise.resolve({
-            id: 'wd_stub',
-            root: '/tmp/proj',
-            name: 'stub',
-            createdAt: 0,
-            lastOpenedAt: 0,
-          }),
-      }),
-      stubPair(IAgentLifecycleService, {
-        ...agentLifecycleStub(),
-        list: () => [busyAgent],
-      }),
-    ]);
+  /* ---------------------------------------------------------------------- */
+  /* Fork                                                                    */
+  /* ---------------------------------------------------------------------- */
 
-    await svc.create({ sessionId: 'src', workDir: '/tmp/proj' });
-
-    // Fork never gates on activity: a mid-work copy is crash-equivalent, and
-    // replay already normalizes that on restore.
-    const target = await svc.fork({ sourceSessionId: 'src', newSessionId: 'dst' });
-    expect(target.id).toBe('dst');
-  });
-
-  it('fires onDidCreateSession with the new handle', async () => {
-    const svc = build();
-    let captured: { readonly sessionId: string } | undefined;
-    svc.onDidCreateSession((e) => {
-      captured = e;
-    });
-    const h = await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
-    expect(captured).toMatchObject({ sessionId: 's1', handle: h, source: 'startup' });
-  });
-
-  it('emits session_started with resumed: false and the bound session id on create', async () => {
-    const svc = build();
-    await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
-    expect(telemetryRecords).toContainEqual({
-      event: 'session_started',
-      properties: { sessionId: 's1', resumed: false },
-    });
-  });
-
-  it('keeps telemetry session context isolated when multiple sessions emit interleaved events', async () => {
-    const svc = build();
-    const first = await svc.create({ sessionId: 'first', workDir: '/tmp/proj' });
-    const second = await svc.create({ sessionId: 'second', workDir: '/tmp/proj' });
-    telemetryRecords.length = 0;
-
-    first.accessor.get(ITelemetryService).track('test_event', { marker: 'first-before' });
-    second.accessor.get(ITelemetryService).track('test_event', { marker: 'second' });
-    first.accessor.get(ITelemetryService).track('test_event', { marker: 'first-after' });
-
-    expect(telemetryRecords).toEqual([
-      {
-        event: 'test_event',
-        properties: { sessionId: 'first', marker: 'first-before' },
-      },
-      {
-        event: 'test_event',
-        properties: { sessionId: 'second', marker: 'second' },
-      },
-      {
-        event: 'test_event',
-        properties: { sessionId: 'first', marker: 'first-after' },
-      },
-    ]);
-  });
-
-  it('emits session_started with resumed: true and the bound session id on resume', async () => {
-    const workDir = '/tmp/proj';
-    const svc = build([
-      stubPair(IWorkspaceService, persistentWorkspaceStub()),
-      stubPair(ISessionIndex, sessionIndexWithSummary('s1', workDir)),
-      stubPair(IAgentLifecycleService, agentLifecycleWithMainStub()),
-    ]);
-
-    await svc.resume('s1');
-
-    expect(telemetryRecords).toContainEqual({
-      event: 'session_started',
-      properties: { sessionId: 's1', resumed: true },
-    });
-  });
-
-  it('emits session_load_failed with the bound session id and the error code when resume fails, then rethrows', async () => {
-    const svc = build([
-      stubPair(ISessionIndex, {
-        ...sessionIndexStub(),
-        get: () => Promise.reject(new Error2(ErrorCodes.SESSION_NOT_FOUND, 'index read failed')),
-      }),
-    ]);
-
-    await expect(svc.resume('s1')).rejects.toMatchObject({ code: ErrorCodes.SESSION_NOT_FOUND });
-    expect(telemetryRecords).toContainEqual({
-      event: 'session_load_failed',
-      properties: { sessionId: 's1', reason: ErrorCodes.SESSION_NOT_FOUND },
-    });
-  });
-
-  it('emits session_load_failed with the bound session id and the error name for plain errors', async () => {
-    const svc = build([
-      stubPair(ISessionIndex, {
-        ...sessionIndexStub(),
-        get: () => Promise.reject(new TypeError('bad index')),
-      }),
-    ]);
-
-    await expect(svc.resume('s1')).rejects.toBeInstanceOf(TypeError);
-    expect(telemetryRecords).toContainEqual({
-      event: 'session_load_failed',
-      properties: { sessionId: 's1', reason: 'TypeError' },
-    });
-  });
-
-  it('runs constructor-registered session lifecycle hooks before returning create and close', async () => {
-    registerScopedService(
-      LifecycleScope.Session,
-      ISessionExternalHooksService,
-      RecordingSessionExternalHooksService,
-      ScopeActivation.OnScopeCreated,
-      'externalHooks',
+  it('fork resolves a live source and delegates, firing fork + create events', async () => {
+    const { facade, runtime } = build();
+    const created: string[] = [];
+    const forked: string[] = [];
+    facade.onDidCreateSession((event) => created.push(`${event.source}:${event.sessionId}`));
+    facade.onDidForkSession((event) =>
+      forked.push(`${event.sourceSessionId}->${event.sessionId}`),
     );
-    const svc = build();
+    facade.trackActivated({ runtimeId: RUNTIME_ID, sessionId: 'src' }, fakeHandle('src'));
 
-    await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
-    await svc.close('s1');
+    const target = await facade.fork({ sourceSessionId: 'src', newSessionId: 'dst', title: 'T' });
 
-    expect(recordedSessionHookEvents).toEqual(['create:startup:s1', 'close:exit:s1']);
-  });
-
-  it('waits for MCP initialization before create returns', async () => {
-    let resolveMcpReady: (() => void) | undefined;
-    const mcpReady = new Promise<void>((resolve) => {
-      resolveMcpReady = resolve;
-    });
-    const svc = build([
-      stubPair(ISessionMcpService, sessionMcpServiceStub(() => mcpReady)),
+    expect(target.id).toBe('dst');
+    expect(runtime.forkCalls).toEqual([
+      { ref: { runtimeId: RUNTIME_ID, sessionId: 'src' }, opts: { newSessionId: 'dst', title: 'T', metadata: undefined } },
     ]);
-
-    let settled = false;
-    const create = svc.create({ sessionId: 's1', workDir: '/tmp/proj' }).then(() => {
-      settled = true;
-    });
-
-    await tick();
-    expect(settled).toBe(false);
-
-    resolveMcpReady?.();
-    await create;
-    expect(settled).toBe(true);
+    expect(forked).toEqual(['src->dst']);
+    expect(created).toEqual(['fork:dst']);
   });
 
-  it('hides a session from get/list until its resume finishes', async () => {
-    let resolveMcpReady: (() => void) | undefined;
-    const mcpReady = new Promise<void>((resolve) => {
-      resolveMcpReady = resolve;
-    });
-    const svc = build([
-      stubPair(ISessionIndex, sessionIndexWithSummary('s1', '/tmp/proj')),
-      stubPair(IAgentLifecycleService, agentLifecycleWithMainStub()),
-      stubPair(ISessionMcpService, sessionMcpServiceStub(() => mcpReady)),
+  it('fork resolves a cold source through the index', async () => {
+    const { facade, runtime } = build({ summaries: { src: summaryOf('src') } });
+    await facade.fork({ sourceSessionId: 'src', newSessionId: 'dst' });
+    expect(runtime.forkCalls).toEqual([
+      { ref: { runtimeId: RUNTIME_ID, sessionId: 'src' }, opts: { newSessionId: 'dst', title: undefined, metadata: undefined } },
     ]);
-
-    const resumed = svc.resume('s1');
-    await tick();
-
-    expect(svc.get('s1')).toBeUndefined();
-    expect(svc.list()).toEqual([]);
-
-    resolveMcpReady?.();
-    const handle = await resumed;
-
-    expect(handle?.id).toBe('s1');
-    expect(svc.get('s1')).toBe(handle);
-    expect(svc.list()).toEqual([handle]);
   });
 
-  it('fires onDidCloseSession when a session is closed', async () => {
-    const svc = build();
+  it('fork throws SESSION_NOT_FOUND for an unknown source', async () => {
+    const { facade } = build();
+    const error = await facade.fork({ sourceSessionId: 'ghost' }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error2);
+    expect((error as Error2).code).toBe(ErrorCodes.SESSION_NOT_FOUND);
+  });
+
+  it('createChild applies the default title and the child markers', async () => {
+    const { facade, runtime } = build();
+    const parentMeta = metadataStub({ title: 'Parent Title' });
+    facade.trackActivated(
+      { runtimeId: RUNTIME_ID, sessionId: 'parent' },
+      fakeHandle('parent', parentMeta),
+    );
+
+    await facade.createChild({ sourceSessionId: 'parent', newSessionId: 'child' });
+    expect(runtime.forkCalls).toEqual([
+      {
+        ref: { runtimeId: RUNTIME_ID, sessionId: 'parent' },
+        opts: {
+          newSessionId: 'child',
+          title: 'Child: Parent Title',
+          metadata: {
+            [PARENT_SESSION_ID_KEY]: 'parent',
+            [CHILD_SESSION_KIND_KEY]: CHILD_SESSION_KIND,
+          },
+        },
+      },
+    ]);
+  });
+
+  /* ---------------------------------------------------------------------- */
+  /* Close / archive                                                         */
+  /* ---------------------------------------------------------------------- */
+
+  it('close delegates by the tracked ref and fires onDidCloseSession', async () => {
+    const { facade, runtime } = build();
     const closed: string[] = [];
-    svc.onDidCloseSession((e) => closed.push(e.sessionId));
-    await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
-    await svc.close('s1');
+    facade.onDidCloseSession((event) => closed.push(event.sessionId));
+    runtime.activate({ runtimeId: RUNTIME_ID, sessionId: 's1' }, fakeHandle('s1'));
+
+    await facade.close('s1');
+    expect(runtime.closeCalls).toEqual([{ runtimeId: RUNTIME_ID, sessionId: 's1' }]);
     expect(closed).toEqual(['s1']);
+    expect(facade.get('s1')).toBeUndefined();
+
+    // Cold: a no-op (legacy semantics).
+    await facade.close('s1');
+    expect(runtime.closeCalls).toHaveLength(1);
   });
 
-  it('fires onDidArchiveSession when a session is archived', async () => {
-    const svc = build([
-      stubPair(IAgentLifecycleService, {
-        ...agentLifecycleStub(),
-        _serviceBrand: undefined,
-        list: () => [],
-        remove: () => Promise.resolve(),
-      } as unknown as IAgentLifecycleService),
-    ]);
+  it('archive delegates by the tracked ref and fires onDidArchiveSession', async () => {
+    const { facade, runtime } = build();
     const archived: string[] = [];
-    svc.onDidArchiveSession((e) => archived.push(e.sessionId));
-    await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
-    await svc.archive('s1');
+    facade.onDidArchiveSession((event) => archived.push(event.sessionId));
+    runtime.activate({ runtimeId: RUNTIME_ID, sessionId: 's1' }, fakeHandle('s1'));
+
+    await facade.archive('s1');
+    expect(runtime.archiveCalls).toEqual([{ runtimeId: RUNTIME_ID, sessionId: 's1' }]);
     expect(archived).toEqual(['s1']);
+
+    // Cold: a no-op (legacy semantics).
+    await facade.archive('s1');
+    expect(runtime.archiveCalls).toHaveLength(1);
   });
 
-  describe('additional dirs', () => {
-    beforeEach(() => {
-      registerScopedService(
-        LifecycleScope.Session,
-        ISessionStateService,
-        SessionStateService,
-        ScopeActivation.OnScopeCreated,
-        'state',
-      );
-      registerScopedService(
-        LifecycleScope.Session,
-        ISessionWorkspaceContext,
-        SessionWorkspaceContextService,
-        ScopeActivation.OnDemand,
-        'workspaceContext',
-      );
-    });
+  it('close/archive never guess between a same-named pair (M6)', async () => {
+    const { facade, runtime } = build();
+    runtime.activate({ runtimeId: 'rt-a', sessionId: 'shared' }, fakeHandle('shared'));
+    runtime.activate({ runtimeId: 'rt-b', sessionId: 'shared' }, fakeHandle('shared'));
 
-    function dirsOf(handle: { accessor: { get<T>(id: unknown): T } }): readonly string[] {
-      return (handle.accessor.get(ISessionWorkspaceContext) as ISessionWorkspaceContext)
-        .additionalDirs;
-    }
-
-    it('loads project-local additional dirs into the session workspace on create', async () => {
-      const svc = build([
-        stubPair(IProjectLocalConfigService, projectLocalConfigStub(['/tmp/extra'])),
-      ]);
-      const h = await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
-      expect(dirsOf(h)).toEqual(['/tmp/extra']);
-    });
-
-    it('merges caller additionalDirs and resolves relative paths against workDir', async () => {
-      const svc = build();
-      const h = await svc.create({
-        sessionId: 's1',
-        workDir: '/tmp/proj',
-        additionalDirs: ['../sibling', '/abs/dir'],
-      });
-      expect(dirsOf(h)).toEqual(['/tmp/sibling', '/abs/dir']);
-    });
-
-    it('deduplicates project-local and caller dirs after resolving', async () => {
-      const svc = build([
-        stubPair(IProjectLocalConfigService, projectLocalConfigStub(['/tmp/shared'])),
-      ]);
-      const h = await svc.create({
-        sessionId: 's1',
-        workDir: '/tmp/proj',
-        additionalDirs: ['../shared', '/tmp/other'],
-      });
-      expect(dirsOf(h)).toEqual(['/tmp/shared', '/tmp/other']);
-    });
-
-    it('supports multiple project-local and caller additionalDirs', async () => {
-      const svc = build([
-        stubPair(IProjectLocalConfigService, projectLocalConfigStub(['/tmp/a', '/tmp/b'])),
-      ]);
-      const h = await svc.create({
-        sessionId: 's1',
-        workDir: '/tmp/proj',
-        additionalDirs: ['/tmp/c', '/tmp/d'],
-      });
-      expect(dirsOf(h)).toEqual(['/tmp/a', '/tmp/b', '/tmp/c', '/tmp/d']);
-    });
-
-    it('loads project-local dirs when resuming a closed session', async () => {
-      const mainHandle = {
-        id: MAIN_AGENT_ID,
-        kind: LifecycleScope.Agent,
-        accessor: { get: () => ({}) },
-        dispose: () => {},
-      } as unknown as IAgentScopeHandle;
-      const summary = { id: 's1', workspaceId: 'wd_stub' } as SessionSummary;
-      const svc = build([
-        stubPair(IProjectLocalConfigService, projectLocalConfigStub(['/tmp/extra'])),
-        stubPair(ISessionIndex, {
-          ...sessionIndexStub(),
-          get: () => Promise.resolve(summary),
-        }),
-        stubPair(IWorkspaceService, {
-          ...workspaceStub(),
-          get: () =>
-            Promise.resolve({
-              id: 'wd_stub',
-              root: '/tmp/proj',
-              name: 'stub',
-              createdAt: 0,
-              lastOpenedAt: 0,
-            }),
-        }),
-        stubPair(IAgentLifecycleService, {
-          ...agentLifecycleStub(),
-          get: () => mainHandle,
-        }),
-      ]);
-
-      const h = await svc.resume('s1');
-
-      expect(h).toBeDefined();
-      expect(dirsOf(h!)).toEqual(['/tmp/extra']);
-    });
-
-    it('fork inherits project-local dirs', async () => {
-      const svc = build([
-        stubPair(IProjectLocalConfigService, projectLocalConfigStub(['/tmp/extra'])),
-        stubPair(IWorkspaceService, {
-          ...workspaceStub(),
-          get: () =>
-            Promise.resolve({
-              id: 'wd_stub',
-              root: '/tmp/proj',
-              name: 'stub',
-              createdAt: 0,
-              lastOpenedAt: 0,
-            }),
-        }),
-      ]);
-
-      await svc.create({ sessionId: 'src', workDir: '/tmp/proj' });
-      const target = await svc.fork({ sourceSessionId: 'src', newSessionId: 'dst' });
-
-      expect(dirsOf(target)).toEqual(['/tmp/extra']);
-    });
-
-    it('create mints a session_-prefixed lowercase id when none is supplied', async () => {
-      const svc = build();
-      const h = await svc.create({ workDir: '/tmp/proj' });
-
-      expect(h.id).toMatch(/^session_[0-9a-f-]{36}$/);
-      expect(h.id).toBe(h.id.toLowerCase());
-      expect(svc.get(h.id)).toBe(h);
-    });
-
-    it('fork mints a session_-prefixed lowercase id when newSessionId is omitted', async () => {
-      const svc = build([
-        stubPair(IWorkspaceService, {
-          ...workspaceStub(),
-          get: () =>
-            Promise.resolve({
-              id: 'wd_stub',
-              root: '/tmp/proj',
-              name: 'stub',
-              createdAt: 0,
-              lastOpenedAt: 0,
-            }),
-        }),
-      ]);
-
-      await svc.create({ sessionId: 'src', workDir: '/tmp/proj' });
-      const target = await svc.fork({ sourceSessionId: 'src' });
-
-      expect(target.id).toMatch(/^session_[0-9a-f-]{36}$/);
-      expect(target.id).toBe(target.id.toLowerCase());
-      expect(target.id).not.toBe('src');
-    });
+    await facade.close('shared');
+    await facade.archive('shared');
+    expect(runtime.closeCalls).toEqual([]);
+    expect(runtime.archiveCalls).toEqual([]);
   });
 
-  describe('fork session state', () => {
-    function workspaceGetStub(): ReturnType<typeof stubPair> {
-      return stubPair(IWorkspaceService, {
-        ...workspaceStub(),
-        get: () =>
-          Promise.resolve({
-            id: 'wd_stub',
-            root: '/tmp/proj',
-            name: 'stub',
-            createdAt: 0,
-            lastOpenedAt: 0,
-          }),
-      });
-    }
+  /* ---------------------------------------------------------------------- */
+  /* Shared hook slots                                                       */
+  /* ---------------------------------------------------------------------- */
 
-    it('copies blobs, plans, background tasks, and media originals into the fork', async () => {
-      const root = await makeTmpRoot();
-      const svc = build([
-        stubPair(IBootstrapService, tmpBootstrapStub(root)),
-        workspaceGetStub(),
-      ]);
-      await svc.create({ sessionId: 'src', workDir: '/tmp/proj' });
-
-      const srcDir = join(root, 'sessions', 'wd_stub', 'src');
-      await mkdir(join(srcDir, 'agents', 'main', 'blobs'), { recursive: true });
-      await writeFile(join(srcDir, 'agents', 'main', 'blobs', 'ab12cd'), 'blob-bytes');
-      await mkdir(join(srcDir, 'agents', 'main', 'plans'), { recursive: true });
-      await writeFile(join(srcDir, 'agents', 'main', 'plans', 'p1.md'), '# plan');
-      await mkdir(join(srcDir, 'agents', 'main', 'tasks', 'bash-1'), { recursive: true });
-      await writeFile(join(srcDir, 'agents', 'main', 'tasks', 'bash-1.json'), '{}');
-      await writeFile(join(srcDir, 'agents', 'main', 'tasks', 'bash-1', 'output.log'), 'out');
-      await mkdir(join(srcDir, 'media-originals'), { recursive: true });
-      await writeFile(join(srcDir, 'media-originals', 'x.png'), 'png');
-      await writeFile(join(srcDir, 'state.json'), '{"source":true}');
-      await writeFile(join(srcDir, 'agents', 'main', 'wire.jsonl'), '{"type":"metadata"}\n');
-      await mkdir(join(srcDir, 'logs'), { recursive: true });
-      await writeFile(join(srcDir, 'logs', 'kimi-code.log'), 'log');
-
-      await svc.fork({ sourceSessionId: 'src', newSessionId: 'dst' });
-
-      const dstDir = join(root, 'sessions', 'wd_stub', 'dst');
-      await expect(
-        readFile(join(dstDir, 'agents', 'main', 'blobs', 'ab12cd'), 'utf8'),
-      ).resolves.toBe('blob-bytes');
-      await expect(
-        readFile(join(dstDir, 'agents', 'main', 'plans', 'p1.md'), 'utf8'),
-      ).resolves.toBe('# plan');
-      await expect(
-        readFile(join(dstDir, 'agents', 'main', 'tasks', 'bash-1.json'), 'utf8'),
-      ).resolves.toBe('{}');
-      await expect(
-        readFile(join(dstDir, 'agents', 'main', 'tasks', 'bash-1', 'output.log'), 'utf8'),
-      ).resolves.toBe('out');
-      await expect(readFile(join(dstDir, 'media-originals', 'x.png'), 'utf8')).resolves.toBe(
-        'png',
-      );
-      await expect(stat(join(dstDir, 'state.json'))).rejects.toThrow();
-      await expect(stat(join(dstDir, 'agents', 'main', 'wire.jsonl'))).rejects.toThrow();
-      await expect(stat(join(dstDir, 'logs'))).rejects.toThrow();
+  it('exposes the shared lifecycle hook slots for the external-hooks adapter', async () => {
+    const { facade } = build();
+    const seen: string[] = [];
+    facade.hooks.onDidCreateSession.register('externalHooks', async (event, next) => {
+      seen.push(`start:${event.source}:${event.sessionId}`);
+      await next();
+    });
+    facade.hooks.onWillCloseSession.register('externalHooks', async (event, next) => {
+      seen.push(`end:${event.reason}:${event.sessionId}`);
+      await next();
     });
 
-    it('loads the copied session tool policy before returning the fork', async () => {
-      const root = await makeTmpRoot();
-      const bootstrap = tmpBootstrapStub(root);
-      const srcDir = join(root, 'sessions', 'wd_stub', 'src');
-      const dstPolicy = join(root, 'sessions', 'wd_stub', 'dst', 'tool-policy', 'state.json');
-      let readyCount = 0;
-      let disabledTools: readonly string[] = [];
-      const policy = {
-        ...sessionToolPolicyStub(),
-        get ready(): Promise<void> {
-          readyCount += 1;
-          if (readyCount === 1) return Promise.resolve();
-          return readFile(dstPolicy, 'utf8').then((raw) => {
-            disabledTools = (JSON.parse(raw) as { disabledTools: readonly string[] }).disabledTools;
-          });
-        },
-        disabledTools: () => disabledTools,
-      } satisfies ISessionToolPolicy;
-      const svc = build([
-        stubPair(IBootstrapService, bootstrap),
-        workspaceGetStub(),
-        stubPair(ISessionToolPolicy, policy),
-      ]);
-      await svc.create({ sessionId: 'src', workDir: '/tmp/proj' });
-      await mkdir(join(srcDir, 'tool-policy'), { recursive: true });
-      await writeFile(join(srcDir, 'tool-policy', 'state.json'), '{"disabledTools":["Skill"]}');
-
-      const target = await svc.fork({ sourceSessionId: 'src', newSessionId: 'dst' });
-
-      expect(target.accessor.get(ISessionToolPolicy).disabledTools()).toEqual(['Skill']);
+    // The runtime session host runs the slots hosted on the facade — the
+    // Session-scoped adapter must observe them exactly like a legacy run.
+    await facade.hooks.onDidCreateSession.run({
+      sessionId: 's1',
+      handle: fakeHandle('s1'),
+      source: 'startup',
     });
-
-    it('rolls back the target session when fork fails after materializing', async () => {
-      const root = await makeTmpRoot();
-      const srcDir = join(root, 'sessions', 'wd_stub', 'src');
-      const svc = build([
-        stubPair(IBootstrapService, tmpBootstrapStub(root)),
-        workspaceGetStub(),
-        stubPair(ISessionMetadata, {
-          ...metadataStub(),
-          read: () =>
-            Promise.resolve({
-              agents: { main: {} },
-            } as never),
-        }),
-      ]);
-      await svc.create({ sessionId: 'src', workDir: '/tmp/proj' });
-      await mkdir(join(srcDir, 'agents', 'main', 'plans'), { recursive: true });
-      await writeFile(join(srcDir, 'agents', 'main', 'plans', 'p1.md'), '# plan');
-      const dstDir = join(root, 'sessions', 'wd_stub', 'dst');
-
-      await expect(svc.fork({ sourceSessionId: 'src', newSessionId: 'dst' })).rejects.toThrow(
-        'not implemented',
-      );
-
-      expect(svc.get('dst')).toBeUndefined();
-      await expect(stat(dstDir)).rejects.toThrow();
-      await expect(svc.fork({ sourceSessionId: 'src', newSessionId: 'dst' })).rejects.toThrow(
-        'not implemented',
-      );
+    await facade.hooks.onWillCloseSession.run({
+      sessionId: 's1',
+      handle: fakeHandle('s1'),
+      reason: 'exit',
     });
-
-    it('duplicates the source session cron tasks for the fork', async () => {
-      const root = await makeTmpRoot();
-      const cron = cronStoreStub([
-        {
-          id: 'task-src',
-          cron: '0 9 * * *',
-          prompt: 'standup',
-          createdAt: 1,
-          tags: { [CRON_SESSION_TAG]: 'src' },
-        },
-        {
-          id: 'task-other',
-          cron: '0 9 * * *',
-          prompt: 'other',
-          createdAt: 1,
-          tags: { [CRON_SESSION_TAG]: 'other' },
-        },
-        { id: 'task-untagged', cron: '* * * * *', prompt: 'x', createdAt: 1 },
-      ]);
-      const svc = build([
-        stubPair(IBootstrapService, tmpBootstrapStub(root)),
-        workspaceGetStub(),
-        stubPair(ICronTaskPersistence, cron),
-      ]);
-      await svc.create({ sessionId: 'src', workDir: '/tmp/proj' });
-
-      await svc.fork({ sourceSessionId: 'src', newSessionId: 'dst' });
-
-      const all = [...cron.docs.values()];
-      expect(all).toHaveLength(4);
-      const clone = all.find((task) => task.tags?.[CRON_SESSION_TAG] === 'dst');
-      expect(clone).toMatchObject({ cron: '0 9 * * *', prompt: 'standup', createdAt: 1 });
-      expect(clone!.id).not.toBe('task-src');
-      expect(cron.docs.get('task-src')!.tags![CRON_SESSION_TAG]).toBe('src');
-    });
-  });
-
-  describe('defaultPlanMode bootstrap', () => {
-    it('enters plan mode on a fresh session when config.defaultPlanMode is true', async () => {
-      const { lifecycle, enter, create } = agentLifecycleCapturingPlanSpy();
-      const svc = build([
-        stubPair(IConfigService, configStub({ defaultPlanMode: true })),
-        stubPair(IAgentLifecycleService, lifecycle),
-      ]);
-
-      await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
-
-      expect(create).toHaveBeenCalledTimes(1);
-      expect(enter).toHaveBeenCalledTimes(1);
-    });
-
-    it('leaves plan mode inactive when config.defaultPlanMode is absent', async () => {
-      const { lifecycle, enter, create } = agentLifecycleCapturingPlanSpy();
-      const svc = build([
-        stubPair(IConfigService, configStub({})),
-        stubPair(IAgentLifecycleService, lifecycle),
-      ]);
-
-      await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
-
-      expect(create).not.toHaveBeenCalled();
-      expect(enter).not.toHaveBeenCalled();
-    });
-
-    it('does not apply config.defaultPlanMode when resuming a session', async () => {
-      const workDir = '/tmp/proj';
-      const summary = { id: 's1', workspaceId: 'wd_stub', cwd: workDir } as SessionSummary;
-      const { lifecycle, enter, create } = agentLifecycleCapturingPlanSpy({
-        mainPreexists: true,
-      });
-      const svc = build([
-        stubPair(IConfigService, configStub({ defaultPlanMode: true })),
-        stubPair(IAgentLifecycleService, lifecycle),
-        stubPair(ISessionIndex, {
-          ...sessionIndexStub(),
-          get: () => Promise.resolve(summary),
-        }),
-        stubPair(IWorkspaceService, persistentWorkspaceStub()),
-      ]);
-
-      await svc.resume('s1');
-
-      expect(create).not.toHaveBeenCalled();
-      expect(enter).not.toHaveBeenCalled();
-    });
+    expect(seen).toEqual(['start:startup:s1', 'end:exit:s1']);
   });
 });

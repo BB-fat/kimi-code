@@ -148,8 +148,8 @@ export class TranscriptService {
     // are activated through the runtime session host, so the eager cleanup
     // rides the HOST's lifecycle events (which carry the full SessionRef —
     // M6); the `forSessionLive` re-check (via the process-wide live lookup,
-    // which also observes legacy-activated sessions) remains the safety net
-    // for any other activation path.
+    // which `trackActivated` feeds — M8a: every activation publishes there)
+    // remains the safety net for any other activation path.
     const host = deps.core.accessor.get(IRuntimeSessionHostService);
     host.onDidCloseSession(({ ref }) => this.dropSession(ref));
     host.onDidArchiveSession(({ ref }) => this.dropSession(ref));

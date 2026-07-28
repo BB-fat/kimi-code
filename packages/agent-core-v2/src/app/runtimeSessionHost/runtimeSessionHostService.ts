@@ -2,8 +2,9 @@
  * `runtimeSessionHost` domain (L6) — `IRuntimeSessionHostService`
  * implementation.
  *
- * Every method mirrors the matching `SessionLifecycleService` branch; read
- * the two side by side when changing either. The routing half delegates to
+ * M8a: this is THE session activation path — the legacy `sessionLifecycle`
+ * machine is gone, and `ISessionLifecycleService` survives only as a thin
+ * bare-id facade that delegates HERE. The routing half delegates to
  * `ISessionService` / the registry (the runtime is always already
  * registered); the assembly half delegates to
  * `IRuntimeSessionActivationService`; everything else — live map, main
@@ -11,12 +12,12 @@
  * publication, rollback — is the App-level side effect layer the activation
  * service deliberately does not own.
  *
- * Deliberate tightenings versus the legacy branches (never observable on a
- * success path):
+ * Deliberate tightenings versus the retired legacy branches (never
+ * observable on a success path):
  *
  *  - a failed resume disposes the half-built scope and closes the lease —
- *    the legacy `doResume` leaves a half-materialized handle in its live map
- *    when the main-agent create rejects;
+ *    the legacy `doResume` left a half-materialized handle in its live map
+ *    when the main-agent create rejected;
  *  - a failed create/fork rolls back through `runtime.sessions.delete(force)`
  *    — the local equivalent of the legacy `hostFs.remove(sessionDir)`; the
  *    append-only `session_index.jsonl` keeps its historical line, which the
@@ -298,17 +299,8 @@ export class RuntimeSessionHostService extends Disposable implements IRuntimeSes
   async archive(ref: SessionRef): Promise<void> {
     const key = sessionRefKey(ref);
     const scope = this.live.get(key);
-    if (scope === undefined) {
-      // A session live in the legacy lifecycle's OWN map was activated
-      // outside this host (the in-process CLI / debug-RPC paths — its tracked
-      // entries mirror THIS host's live map, so a hit here can only be
-      // legacy-owned): the legacy service owns its archive sequence.
-      if (this.lifecycle.get(ref.sessionId) !== undefined) {
-        await this.lifecycle.archive(ref.sessionId);
-      }
-      // Legacy archive acts on live sessions only; a cold session is a no-op.
-      return;
-    }
+    // Legacy archive acts on live sessions only; a cold session is a no-op.
+    if (scope === undefined) return;
     await scope.handle.accessor.get(ISessionMetadata).setArchived(true);
     await this.drainAgents(scope);
     this.event.publish({
@@ -325,13 +317,7 @@ export class RuntimeSessionHostService extends Disposable implements IRuntimeSes
   async close(ref: SessionRef): Promise<void> {
     const key = sessionRefKey(ref);
     const scope = this.live.get(key);
-    if (scope === undefined) {
-      // Same legacy-owner delegation as `archive` (see above).
-      if (this.lifecycle.get(ref.sessionId) !== undefined) {
-        await this.lifecycle.close(ref.sessionId);
-      }
-      return;
-    }
+    if (scope === undefined) return;
     await this.announceWillClose(ref, scope);
     this.live.delete(key);
     this.untrackLive(key);

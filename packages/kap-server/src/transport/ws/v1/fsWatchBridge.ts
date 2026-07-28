@@ -188,10 +188,10 @@ export class FsWatchBridge {
     const key = sessionRefKey(ref);
     const existing = this.bySession.get(key);
     if (existing !== undefined) return existing;
-    // The process-wide live lookup, addressed by the FULL ref (M6): host
-    // sessions surface through their ref-keyed `trackActivated` entries and
-    // legacy-activated sessions through the lifecycle's own map. A session
-    // that is not live keeps the pre-M6 not-found mapping (40409).
+    // The process-wide live lookup, addressed by the FULL ref (M6): every
+    // live session surfaces through its ref-keyed `trackActivated` entry
+    // (M8a: the lookup's only source — the facade activates nothing itself).
+    // A session that is not live keeps the pre-M6 not-found mapping (40409).
     const session = this.core.accessor.get(ISessionLifecycleService).getByRef(ref);
     if (session === undefined) return undefined;
     const sw: SessionWatch = {

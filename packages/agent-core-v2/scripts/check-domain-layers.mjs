@@ -415,20 +415,26 @@ const KOSONG_BANNED_SDK_PACKAGES = ['@anthropic-ai/sdk', '@google/genai', 'opena
  * dynamic and re-export imports alike (the shared IMPORT_RE).
  */
 const DOMAIN_IMPORT_BANS = new Map([
-  // TODO(multi-runtime M8): as the refactor milestones land, extend this table
-  // to every remaining Session Core domain — M4 added the runtime-backed
-  // activation path (`runtimeSession`), but the domains that still import
-  // `#/app/workspace/**` today (e.g. `sessionLifecycle`, `sessionExport`)
-  // stay exempt until their workspace coupling is removed.
+  // Multi-runtime refactor status (M8a): the legacy activation machine is
+  // deleted — `sessionLifecycle` is now a thin bare-id/workDir facade over
+  // `IRuntimeSessionHostService`, and its Workspace imports
+  // (`workspace`, `workspaceRegistration`) are the facade's deliberate v1
+  // compatibility job (the in-process SDK/klient contract still resolves
+  // workDirs through the Workspace catalog). The Session Core domains that
+  // must NEVER see the Workspace domain are guarded individually below:
+  // the pathless contracts (`sessionHostRuntime`), the standalone memory
+  // runtime, the runtime-backed activation (`runtimeSession`) and the
+  // composition host (`runtimeSessionHost`).
   //
-  // TODO(multi-runtime M8): the legacy layout helpers (`sessionLifecycle`'s
-  // directory copy/wire rewrite/index append paths, `FileSessionIndex`'s
-  // layout reads and the bootstrap scope builders) are still imported by the
-  // old domains, so the plan §10.1 "layout helper only the Local adapter may
-  // import" rule cannot be enabled globally yet — it would turn the old
-  // domains red. M2 guards the NEW side instead (see
-  // TARGET_IMPORT_ALLOWLIST below); once M8 deletes the old domains, extend
-  // the ban so no domain outside the Local adapter imports those helpers.
+  // TODO(multi-runtime M8b): the legacy layout helpers (`FileSessionIndex`'s
+  // layout reads, the bootstrap scope builders, `ISessionContext`'s
+  // `sessionDir`/`metaScope`) are still imported by the remaining v1
+  // surfaces (`sessionExport`, `sessionContext` seeds, `localWorkspaceRuntime`),
+  // so the plan §10.1 "layout helper only the Local adapter may import"
+  // rule cannot be enabled globally yet. M2 guards the NEW side instead
+  // (see TARGET_IMPORT_ALLOWLIST below); once M8b removes the context path
+  // fields and the remaining readers migrate onto the lease, extend the ban
+  // so no domain outside the Local adapter imports those helpers.
   [
     'sessionHostRuntime',
     {
@@ -480,6 +486,27 @@ const DOMAIN_IMPORT_BANS = new Map([
       specifiers: [/^node:/],
       reason:
         'the runtime-backed session activation consumes ONLY the injected ISessionRuntimeContext (plan §1.5): no Workspace domain, no session index/lifecycle/export, no bootstrap path builders, no concrete runtime, no persistence/OS backends, no host I/O — storage, cold read, artifacts and OS handles all arrive with the lease',
+    },
+  ],
+  [
+    'runtimeSessionHost',
+    {
+      domains: new Set([
+        'workspace',
+        'workspaceAliases',
+        'workspaceSessions',
+        'workspaceRegistration',
+        'sessionIndex',
+        'sessionExport',
+        'bootstrap',
+        'localWorkspaceRuntime',
+        'standaloneMemoryRuntime',
+        'persistence/backends',
+        'os/backends',
+      ]),
+      specifiers: [/^node:/],
+      reason:
+        'the runtime session host routes ONLY through the sessionHostRuntime contracts (registry/session service) and assembles scopes through runtimeSession (plan §3.4): no Workspace domain or registration manager (runtimeId always arrives resolved), no session index/export, no bootstrap path builders, no concrete runtime, no persistence/OS backends, no host I/O',
     },
   ],
   [

@@ -796,9 +796,9 @@ export class SessionEventBroadcaster {
   private async createSessionState(ref: SessionRef): Promise<SessionState | undefined> {
     if (this.closed) return undefined;
 
-    // The process-wide live lookup, addressed by the FULL ref (M6): host
-    // sessions surface through their ref-keyed `trackActivated` entries and
-    // legacy-activated sessions through the lifecycle's own map.
+    // The process-wide live lookup, addressed by the FULL ref (M6): every
+    // live session surfaces through its ref-keyed `trackActivated` entry
+    // (M8a: the lookup's only source — the facade activates nothing itself).
     const session = this.opts.core.accessor.get(ISessionLifecycleService).getByRef(ref);
     if (session === undefined) return undefined;
 
@@ -929,10 +929,11 @@ export class SessionEventBroadcaster {
   /**
    * Route a session-scoped core event to its owning session state (M6). The
    * internal payload's `runtimeId` pins the exact `SessionRef`; a payload
-   * without one (a legacy-activated session's publisher) resolves the bare id
-   * through the v1 resolver. An id that does not resolve to exactly one
-   * runtime is DROPPED — never routed to an arbitrary candidate (plan §1.3
-   * rule 5; same-named sessions are indistinguishable on the v1 wire anyway).
+   * without one (a publisher that does not stamp the runtime identity)
+   * resolves the bare id through the v1 resolver. An id that does not
+   * resolve to exactly one runtime is DROPPED — never routed to an arbitrary
+   * candidate (plan §1.3 rule 5; same-named sessions are indistinguishable
+   * on the v1 wire anyway).
    */
   private async dispatchCoreSessionEvent(
     sessionId: string,

@@ -1,28 +1,28 @@
 /**
  * `runtimeSessionHost` domain (L6) — `IRuntimeSessionHostService`, the
- * composition-layer wrapper that makes a runtime-activated session
- * behaviorally equivalent to a legacy `ISessionLifecycleService` session
- * (multi-runtime refactor, M5b; plan §6.3 preparation).
+ * composition layer that activates sessions through their owner runtime
+ * (multi-runtime refactor, M5b; plan §6.3). M8a: with the legacy
+ * `sessionLifecycle` machine deleted, this is the ONLY activation path —
+ * the bare-id `ISessionLifecycleService` facade and the kap-server v1 edge
+ * both delegate here.
  *
  * The activation service (`runtimeSession`, one layer down) turns a lease
- * into a Session scope — and nothing else. Everything the legacy
- * create/resume/restore/fork/archive flow does AROUND scope assembly is an
- * App-level concern and lives here, mirrored branch by branch against
- * `SessionLifecycleService`:
+ * into a Session scope — and nothing else. Everything the activation flow
+ * does AROUND scope assembly is an App-level concern and lives here:
  *
  *  - routing: `runtimeId`/`SessionRef` → `ISessionService` /
  *    `ISessionHostRuntimeRegistry` (never provider.open, never a per-session
  *    runtime — plan §3.4);
  *  - live-session registry keyed by the full `SessionRef`
  *    (`sessionRefKey`), with the same get/list/inflight-resume semantics the
- *    legacy service has;
+ *    retired legacy service had;
  *  - main-agent materialization (create with binding / resume ensure /
  *    fork roster rebuild) and the `defaultPlanMode` auto-enter on create;
  *  - additional-dirs seeding from the project-local config;
  *  - lifecycle side effects: the shared `ISessionLifecycleService.hooks`
  *    slots (`onDidCreateSession` → `SessionStart`, `onWillCloseSession` →
  *    `SessionEnd`) so the Session-scoped external-hooks adapter observes
- *    runtime sessions exactly like legacy ones, the `session_started`
+ *    every session exactly alike, the `session_started`
  *    telemetry event, `session_load_failed` on resume failures, and the
  *    `event.session.archived` publication;
  *  - failure rollback: a failed create/fork deletes the session from its
@@ -31,7 +31,7 @@
  *    touching persisted data.
  *
  * Wire and route concerns stay out: this service exposes no v1 schema and
- * switches no route by itself (M5c delegates routes to it).
+ * switches no route by itself (the kap-server edge delegates routes to it).
  */
 
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';
