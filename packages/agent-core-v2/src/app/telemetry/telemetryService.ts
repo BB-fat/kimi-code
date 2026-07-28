@@ -85,10 +85,10 @@ export class TelemetryService implements ITelemetryService {
     options?: TelemetryShutdownOptions,
   ): Promise<void> {
     const retirement = this.retirements.get(appender);
-    if (retirement !== undefined) return retirement;
+    if (retirement !== undefined) return this.retireAppender(appender, options);
     if (!this.appenders.includes(appender)) return Promise.resolve();
     this.appenders = this.appenders.filter((a) => a !== appender);
-    return this.removeDetachedAppender(appender, options);
+    return this.retireAppender(appender, options);
   }
 
   async setAppender(
@@ -100,7 +100,7 @@ export class TelemetryService implements ITelemetryService {
     if (!this.registrations.has(appender)) this.createRegistration(appender);
     const previous = this.appenders.filter((candidate) => candidate !== appender);
     this.appenders = [appender];
-    await Promise.all(previous.map((candidate) => this.removeDetachedAppender(candidate, options)));
+    await Promise.all(previous.map((candidate) => this.retireAppender(candidate, options)));
   }
 
   setEnabled(enabled: boolean): void {
@@ -115,15 +115,15 @@ export class TelemetryService implements ITelemetryService {
 
   shutdown(options?: TelemetryShutdownOptions): Promise<void> {
     if (this.shutdownPromise === null) {
-      const appenders = this.appenders;
+      const appenders = new Set([...this.appenders, ...this.retirements.keys()]);
       this.appenders = [];
       for (const appender of appenders) {
-        void this.removeDetachedAppender(appender, options);
+        void this.retireAppender(appender, options);
       }
       this.shutdownPromise = Promise.all(this.retirements.values()).then(() => undefined);
     } else if (options !== undefined) {
-      for (const appender of this.registrations.keys()) {
-        void this.invokeAppender(() => appender.shutdown?.(options));
+      for (const appender of this.retirements.keys()) {
+        void this.retireAppender(appender, options);
       }
     }
     return this.shutdownPromise;
@@ -154,12 +154,17 @@ export class TelemetryService implements ITelemetryService {
     }
   }
 
-  private removeDetachedAppender(
+  private retireAppender(
     appender: ITelemetryAppender,
     options?: TelemetryShutdownOptions,
   ): Promise<void> {
     const retirement = this.retirements.get(appender);
-    if (retirement !== undefined) return retirement;
+    if (retirement !== undefined) {
+      if (options !== undefined) {
+        void this.invokeAppender(() => appender.shutdown?.(options));
+      }
+      return retirement;
+    }
     const pending = this.invokeAppender(() => appender.shutdown?.(options));
     this.retirements.set(appender, pending);
     return pending;

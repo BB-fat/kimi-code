@@ -26,11 +26,13 @@ export interface ITelemetrySpoolStore {
 export interface TelemetrySpoolStoreOptions {
   readonly storage: IFileSystemStorageService;
   readonly maxFiles?: number;
+  readonly maxFileBytes?: number;
   readonly now?: () => number;
 }
 
 export const TELEMETRY_SPOOL_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 export const TELEMETRY_SPOOL_MAX_FILES = 256;
+export const TELEMETRY_SPOOL_MAX_FILE_BYTES = 256 * 1024;
 
 const TELEMETRY_SCOPE = 'telemetry-v2';
 const FAILED_PREFIX = 'failed_';
@@ -41,12 +43,17 @@ const textDecoder = new TextDecoder();
 export class TelemetrySpoolStore implements ITelemetrySpoolStore {
   private readonly storage: IFileSystemStorageService;
   private readonly maxFiles: number;
+  private readonly maxFileBytes: number;
   private readonly now: () => number;
   private writes: Promise<void> = Promise.resolve();
 
   constructor(options: TelemetrySpoolStoreOptions) {
     this.storage = options.storage;
     this.maxFiles = Math.max(1, Math.floor(options.maxFiles ?? TELEMETRY_SPOOL_MAX_FILES));
+    this.maxFileBytes = Math.max(
+      1,
+      Math.floor(options.maxFileBytes ?? TELEMETRY_SPOOL_MAX_FILE_BYTES),
+    );
     this.now = options.now ?? Date.now;
   }
 
@@ -95,41 +102,51 @@ export class TelemetrySpoolStore implements ITelemetrySpoolStore {
       }
     }
     files.sort((left, right) => left.createdAt - right.createdAt || left.key.localeCompare(right.key));
+    const overflow = files.splice(0, Math.max(0, files.length - this.maxFiles));
+    discarded.push(...overflow.map((file) => file.key));
     await Promise.all(discarded.map((key) => this.acknowledge(key).catch(() => undefined)));
     return files;
   }
 
   private async putOwned(events: readonly EnrichedCloudEvent[]): Promise<void> {
-    const text = events.map((event) => JSON.stringify(event)).join('\n') + '\n';
-    const files = await this.enforcePolicy().catch(() => []);
-    if (files.length < this.maxFiles) {
-      await this.storage.write(TELEMETRY_SCOPE, this.createKey(), textEncoder.encode(text), {
-        atomic: true,
-      });
-      return;
+    const chunks = this.chunk(events).slice(-this.maxFiles);
+    const files = [...(await this.enforcePolicy())];
+    for (const chunk of chunks) {
+      const file = this.createFile();
+      await this.storage.write(TELEMETRY_SCOPE, file.key, chunk, { atomic: true });
+      files.push(file);
+      const overflow = files.splice(0, Math.max(0, files.length - this.maxFiles));
+      await Promise.all(
+        overflow.map((candidate) => this.acknowledge(candidate.key).catch(() => undefined)),
+      );
     }
-
-    const compactedCount = files.length - this.maxFiles + 1;
-    const compacted = files.slice(0, compactedCount);
-    const existing = await Promise.all(
-      compacted.map(async (file) => {
-        const bytes = await this.storage.read(TELEMETRY_SCOPE, file.key);
-        if (bytes === undefined) return '';
-        const jsonl = textDecoder.decode(bytes);
-        return jsonl.length === 0 || jsonl.endsWith('\n') ? jsonl : jsonl + '\n';
-      }),
-    );
-    await this.storage.write(
-      TELEMETRY_SCOPE,
-      this.createKey(),
-      textEncoder.encode(existing.join('') + text),
-      { atomic: true },
-    );
-    await Promise.all(compacted.map((file) => this.acknowledge(file.key).catch(() => undefined)));
   }
 
-  private createKey(): string {
-    return `${FAILED_PREFIX}${this.now()}_${randomBytes(6).toString('hex')}${JSONL_SUFFIX}`;
+  private chunk(events: readonly EnrichedCloudEvent[]): Uint8Array[] {
+    const chunks: Uint8Array[] = [];
+    let lines: Uint8Array[] = [];
+    let byteLength = 0;
+    for (const event of events) {
+      const line = textEncoder.encode(`${JSON.stringify(event)}\n`);
+      if (line.byteLength > this.maxFileBytes) continue;
+      if (byteLength + line.byteLength > this.maxFileBytes) {
+        chunks.push(concatBytes(lines, byteLength));
+        lines = [];
+        byteLength = 0;
+      }
+      lines.push(line);
+      byteLength += line.byteLength;
+    }
+    if (lines.length > 0) chunks.push(concatBytes(lines, byteLength));
+    return chunks;
+  }
+
+  private createFile(): SpoolFile {
+    const createdAt = this.now();
+    return {
+      key: `${FAILED_PREFIX}${createdAt}_${randomBytes(6).toString('hex')}${JSONL_SUFFIX}`,
+      createdAt,
+    };
   }
 
   private async readJsonl(key: string): Promise<readonly EnrichedCloudEvent[]> {
@@ -161,4 +178,14 @@ function parseCreatedAt(key: string): number | undefined {
   if (underscore === -1) return undefined;
   const createdAt = Number(rest.slice(0, underscore));
   return Number.isFinite(createdAt) ? createdAt : undefined;
+}
+
+function concatBytes(parts: readonly Uint8Array[], byteLength: number): Uint8Array {
+  const bytes = new Uint8Array(byteLength);
+  let offset = 0;
+  for (const part of parts) {
+    bytes.set(part, offset);
+    offset += part.byteLength;
+  }
+  return bytes;
 }

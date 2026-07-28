@@ -139,6 +139,30 @@ describe('TelemetryService (unit)', () => {
     expect(appender.events).toHaveLength(0);
   });
 
+  it('registration shutdown tightens retirement started by disposal', async () => {
+    const retired = deferred();
+    const shutdownOptions: Array<TelemetryShutdownOptions | undefined> = [];
+    const appender: ITelemetryAppender = {
+      track() {},
+      shutdown(options) {
+        shutdownOptions.push(options);
+        return retired.promise;
+      },
+    };
+    const svc = new TelemetryService();
+    const registration = svc.addAppender(appender);
+    const options = { deadlineMs: 42 };
+
+    registration.dispose();
+    await Promise.resolve();
+    const closing = registration.shutdown(options);
+    await Promise.resolve();
+
+    expect(shutdownOptions).toEqual([undefined, options]);
+    retired.resolve();
+    await closing;
+  });
+
   it('addAppender starts the registered appender', () => {
     const appender = new CapturingAppender();
     const svc = new TelemetryService();
@@ -271,6 +295,30 @@ describe('TelemetryService (unit)', () => {
 
     retired.resolve();
     await first;
+  });
+
+  it('service shutdown forwards a lifecycle budget to retirement started by disposal', async () => {
+    const retired = deferred();
+    const shutdownOptions: Array<TelemetryShutdownOptions | undefined> = [];
+    const appender: ITelemetryAppender = {
+      track() {},
+      shutdown(options) {
+        shutdownOptions.push(options);
+        return retired.promise;
+      },
+    };
+    const svc = new TelemetryService();
+    const registration = svc.addAppender(appender);
+    const options = { deadlineMs: 42 };
+
+    registration.dispose();
+    await Promise.resolve();
+    const closing = svc.shutdown(options);
+    await Promise.resolve();
+
+    expect(shutdownOptions).toEqual([undefined, options]);
+    retired.resolve();
+    await closing;
   });
 
   it('rejects appenders registered after shutdown begins', async () => {

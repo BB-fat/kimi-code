@@ -1,8 +1,9 @@
 /**
- * `telemetry` domain (L1) — cloud appender lifecycle integration coverage.
+ * `telemetry` domain (L1) — cloud delivery and durable spool coverage.
  *
- * Exercises batching, durable shutdown, startup replay, privacy, and wire
- * shape through the real appender, transport, spool, and file-storage stack.
+ * Exercises spool retention and capacity plus appender batching, durable
+ * shutdown, startup replay, privacy, and wire shape through the real transport
+ * and file-storage stack.
  */
 
 import { getEventListeners } from 'node:events';
@@ -25,7 +26,7 @@ import {
 } from '#/_base/errors/unexpectedError';
 import { FileStorageService } from '#/persistence/backends/node-fs/fileStorageService';
 import { CloudAppender, type CloudAppenderOptions } from '#/app/telemetry/cloudAppender';
-import { CloudTransport } from '#/app/telemetry/cloudTransport';
+import { CloudTransport, type EnrichedCloudEvent } from '#/app/telemetry/cloudTransport';
 import { TelemetrySpoolStore } from '#/app/telemetry/telemetrySpoolStore';
 
 import { stubBootstrap } from '../bootstrap/stubs';
@@ -123,6 +124,82 @@ function readAllFailedEvents(homeDir: string): Record<string, unknown>[] {
       .map((line) => JSON.parse(line) as Record<string, unknown>),
   );
 }
+
+function spoolEvent(event: string, padding = ''): EnrichedCloudEvent {
+  return {
+    event_id: `${event}-id`,
+    device_id: 'dev',
+    session_id: null,
+    event,
+    timestamp: 1,
+    properties: { padding },
+    context: {},
+  };
+}
+
+describe('TelemetrySpoolStore', () => {
+  let homeDir: string;
+
+  beforeEach(() => {
+    homeDir = mkdtempSync(join(tmpdir(), 'telemetry-spool-store-'));
+  });
+
+  afterEach(() => {
+    rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  it('recovery expires an old event after a newer write reaches the file cap', async () => {
+    const dayMs = 24 * 60 * 60 * 1000;
+    let now = 0;
+    const store = new TelemetrySpoolStore({
+      storage: new FileStorageService(homeDir),
+      maxFiles: 1,
+      now: () => now,
+    });
+
+    await store.put([spoolEvent('old')]);
+    now = 6 * dayMs;
+    await store.put([spoolEvent('new')]);
+    now = 8 * dayMs;
+
+    const entries = await store.recoverable(10);
+
+    expect(entries.flatMap((entry) => entry.events).map((event) => event.event)).toEqual([
+      'new',
+    ]);
+  });
+
+  it('put keeps only the newest chunk when one batch exceeds byte capacity', async () => {
+    const store = new TelemetrySpoolStore({
+      storage: new FileStorageService(homeDir),
+      maxFiles: 1,
+      maxFileBytes: 512,
+    });
+
+    await store.put([
+      spoolEvent('first', 'x'.repeat(300)),
+      spoolEvent('second', 'x'.repeat(300)),
+    ]);
+
+    const entries = await store.recoverable(10);
+
+    expect(entries.flatMap((entry) => entry.events).map((event) => event.event)).toEqual([
+      'second',
+    ]);
+  });
+
+  it('put drops an event when its JSONL record exceeds byte capacity', async () => {
+    const store = new TelemetrySpoolStore({
+      storage: new FileStorageService(homeDir),
+      maxFiles: 1,
+      maxFileBytes: 128,
+    });
+
+    await store.put([spoolEvent('oversized', 'x'.repeat(300))]);
+
+    await expect(store.recoverable(10)).resolves.toEqual([]);
+  });
+});
 
 describe('CloudAppender', () => {
   let homeDir: string;
@@ -708,7 +785,7 @@ describe('CloudAppender', () => {
     );
   });
 
-  it('caps the durable spool by file count', async () => {
+  it('keeps the newest durable batches when the spool reaches its file cap', async () => {
     let now = 1;
     const appender = new CloudAppender(
       baseOptions({
@@ -729,7 +806,7 @@ describe('CloudAppender', () => {
       readAllFailedEvents(homeDir)
         .map((event) => event['event'])
         .toSorted(),
-    ).toEqual(['first', 'second', 'third']);
+    ).toEqual(['second', 'third']);
   });
 
   it('start leaves legacy telemetry spool files for their owning pipeline', async () => {
