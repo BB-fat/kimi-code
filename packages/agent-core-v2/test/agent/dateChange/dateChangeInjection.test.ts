@@ -8,7 +8,7 @@
  * test/agent/dateChange/dateChangeInjection.test.ts`.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
@@ -55,6 +55,8 @@ describe('AgentDateChangeService', () => {
   let profile: IAgentProfileService;
 
   beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 6, 29, 12));
     ctx = createTestAgent();
     context = ctx.get(IAgentContextMemoryService);
     injector = ctx.get(IAgentContextInjectorService) as unknown as InjectableDynamicInjector;
@@ -63,9 +65,13 @@ describe('AgentDateChangeService', () => {
 
   afterEach(async () => {
     try {
-      await ctx.expectResumeMatches();
+      try {
+        await ctx.expectResumeMatches();
+      } finally {
+        await ctx.dispose();
+      }
     } finally {
-      await ctx.dispose();
+      vi.useRealTimers();
     }
   });
 

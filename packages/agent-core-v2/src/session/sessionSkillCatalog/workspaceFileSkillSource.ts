@@ -4,7 +4,7 @@
  * Discovers project skills from the session's current `workDir`
  * (`workspaceContext`) through `ISkillDiscovery`, contributing them at priority
  * 30 (above user / extra / plugin / builtin). Watches the candidate root paths
- * (existing or not) through `SkillSourceWatcher` and re-fires `onDidChange` on
+ * (existing or not) through `fileSourceMonitor` and re-fires `onDidChange` on
  * debounced fs changes. Bound at Session scope so each session reads its own
  * workspace root.
  */
@@ -15,15 +15,23 @@ import { Emitter, type Event } from '#/_base/event';
 import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { IConfigService } from '#/app/config/config';
 import {
+  IFileSourceMonitor,
+  type IFileSourceWatch,
+} from '#/app/fileSourceMonitor/fileSourceMonitor';
+import {
   MERGE_ALL_AVAILABLE_SKILLS_SECTION,
   type MergeAllAvailableSkillsConfig,
 } from '#/app/skillCatalog/configSection';
 import { ISkillCatalogRuntimeOptions } from '#/app/skillCatalog/skillCatalogRuntimeOptions';
 import { ISkillDiscovery } from '#/app/skillCatalog/skillDiscovery';
-import { projectRootCandidates, projectRoots } from '#/app/skillCatalog/skillRoots';
-import { SkillSourceWatcher } from '#/app/skillCatalog/skillSourceWatcher';
-import { SKILL_SOURCE_PRIORITY, type ISkillSource, type SkillContribution } from '#/app/skillCatalog/skillSource';
-import { IHostFsWatchService } from '#/os/interface/hostFsWatch';
+import { resolveProjectSkillRoots } from '#/app/skillCatalog/skillRoots';
+import {
+  isSkillLoadAborted,
+  SKILL_SOURCE_PRIORITY,
+  type ISkillSource,
+  type SkillContribution,
+} from '#/app/skillCatalog/skillSource';
+import { SKILL_ROOT_WATCH_OPTIONS } from '#/app/skillCatalog/skillTraversal';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 
 export interface IWorkspaceFileSkillSource extends ISkillSource {
@@ -40,18 +48,18 @@ export class WorkspaceFileSkillSource extends Disposable implements IWorkspaceFi
   readonly priority = SKILL_SOURCE_PRIORITY.workspace;
   private readonly onDidChangeEmitter = this._register(new Emitter<void>());
   readonly onDidChange: Event<void> = this.onDidChangeEmitter.event;
-  private readonly watcher: SkillSourceWatcher;
+  private readonly watcher: IFileSourceWatch;
 
   constructor(
     @ISkillDiscovery private readonly discovery: ISkillDiscovery,
     @ISessionWorkspaceContext private readonly workspace: ISessionWorkspaceContext,
     @IConfigService private readonly config: IConfigService,
     @ISkillCatalogRuntimeOptions private readonly runtimeOptions: ISkillCatalogRuntimeOptions,
-    @IHostFsWatchService hostFsWatch: IHostFsWatchService,
+    @IFileSourceMonitor fileSourceMonitor: IFileSourceMonitor,
   ) {
     super();
     this.watcher = this._register(
-      new SkillSourceWatcher(hostFsWatch, () => this.onDidChangeEmitter.fire()),
+      fileSourceMonitor.createWatch(SKILL_ROOT_WATCH_OPTIONS, () => this.onDidChangeEmitter.fire()),
     );
     this._register(
       this.config.onDidSectionChange((event) => {
@@ -60,15 +68,21 @@ export class WorkspaceFileSkillSource extends Disposable implements IWorkspaceFi
     );
   }
 
-  async load(): Promise<SkillContribution> {
+  async load(signal?: AbortSignal): Promise<SkillContribution> {
     if ((this.runtimeOptions.explicitDirs?.length ?? 0) > 0) {
       return { skills: [] };
     }
     await this.config.ready;
+    if (isSkillLoadAborted(signal)) return { skills: [] };
     const mergeAllAvailableSkills =
       this.config.get<MergeAllAvailableSkillsConfig>(MERGE_ALL_AVAILABLE_SKILLS_SECTION) ?? true;
-    this.watcher.setPaths(await projectRootCandidates(this.workspace.workDir));
-    return this.discovery.discover(await projectRoots(this.workspace.workDir, { mergeAllAvailableSkills }));
+    const resolution = await resolveProjectSkillRoots(this.workspace.workDir, {
+      mergeAllAvailableSkills,
+    });
+    if (isSkillLoadAborted(signal)) return { skills: [] };
+    await this.watcher.setPaths(resolution.candidates);
+    if (isSkillLoadAborted(signal)) return { skills: [] };
+    return this.discovery.discover(resolution.roots, signal);
   }
 }
 

@@ -28,6 +28,8 @@ import type { ReloadSummary } from '#/app/plugin/types';
 import { IProviderService } from '#/kosong/provider/provider';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 import { IConfigService } from '#/app/config/config';
+import { IFileSourceMonitor } from '#/app/fileSourceMonitor/fileSourceMonitor';
+import { FileSourceMonitorService } from '#/app/fileSourceMonitor/fileSourceMonitorService';
 import {
   EXTRA_SKILL_DIRS_SECTION,
   MERGE_ALL_AVAILABLE_SKILLS_SECTION,
@@ -47,14 +49,23 @@ import { ISessionStateService } from '#/session/state/sessionState';
 import { SessionStateService } from '#/session/state/sessionStateService';
 import { ISkillDiscovery } from '#/app/skillCatalog/skillDiscovery';
 import type { SkillRoot } from '#/app/skillCatalog/types';
+import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IHostFsWatchService } from '#/os/interface/hostFsWatch';
 
 import { stubBootstrap } from '../../app/bootstrap/stubs';
 import { stubSkill } from '../../app/skillCatalog/stubs';
 import { stubProviderService } from '../../app/provider/stubs';
 import { stubHostFsWatch, type StubHostFsWatch } from '../../os/stubs';
+import { createFakeHostFs } from '../../tools/fixtures/fake-exec';
 
 const bootstrapStub = stubBootstrap('/home');
+
+function fileSourceMonitorHostFs(): IHostFileSystem {
+  return createFakeHostFs({
+    stat: async () => ({ isFile: false, isDirectory: true, size: 0 }),
+    realpath: async (path) => path,
+  });
+}
 
 function configStub(): IConfigService & {
   setExtraSkillDirs(dirs: readonly string[]): void;
@@ -169,6 +180,7 @@ function makeHost(
     stubPair(IConfigService, config),
     stubPair(ISkillCatalogRuntimeOptions, runtimeOptions),
     stubPair(IPluginService, pluginStub(pluginRoots, pluginReloadEmitter)),
+    stubPair(IHostFileSystem, fileSourceMonitorHostFs()),
     stubPair(IHostFsWatchService, watch),
   ]);
   const session = host.child(LifecycleScope.Session, 's1', [stubPair(ISessionWorkspaceContext, ws)]);
@@ -228,6 +240,13 @@ describe('SessionSkillCatalogService', () => {
     registerScopedService(LifecycleScope.App, IBuiltinSkillSource, BuiltinSkillSource);
     registerScopedService(LifecycleScope.App, IUserFileSkillSource, UserFileSkillSource);
     registerScopedService(LifecycleScope.App, IPluginService, PluginService);
+    registerScopedService(
+      LifecycleScope.App,
+      IFileSourceMonitor,
+      FileSourceMonitorService,
+      ScopeActivation.OnScopeCreated,
+      'fileSourceMonitor',
+    );
     registerScopedService(LifecycleScope.Session, ISessionSkillCatalog, SessionSkillCatalogService);
     registerScopedService(LifecycleScope.Session, IExplicitFileSkillSource, ExplicitFileSkillSource);
     registerScopedService(LifecycleScope.Session, IExtraFileSkillSource, ExtraFileSkillSource);
@@ -367,6 +386,7 @@ describe('SessionSkillCatalogService', () => {
       stubPair(IConfigService, config),
       stubPair(ISkillCatalogRuntimeOptions, runtimeOptions),
       stubPair(IPluginService, pluginStub()),
+      stubPair(IHostFileSystem, fileSourceMonitorHostFs()),
       stubPair(IHostFsWatchService, stubHostFsWatch()),
     ]);
     const session = host.child(LifecycleScope.Session, 's1', [stubPair(ISessionWorkspaceContext, ws)]);
@@ -383,6 +403,46 @@ describe('SessionSkillCatalogService', () => {
     await loading;
 
     expect(catalog.catalog.getSkill('extra-only')?.description).toBe('from extra');
+    host.dispose();
+  });
+
+  it('does not arm a file source after disposal releases its pending config wait', async () => {
+    const configReady = deferred<void>();
+    const readyRequested = deferred<void>();
+    const baseConfig = configStub();
+    baseConfig.setExtraSkillDirs(['/late-skills']);
+    const config = {
+      ...baseConfig,
+      get ready() {
+        readyRequested.resolve(undefined);
+        return configReady.promise;
+      },
+    } as unknown as IConfigService;
+    const watch = stubHostFsWatch();
+    const { stub: ws } = workspaceStub('/work');
+    const host = createScopedTestHost([
+      stubPair(ISkillDiscovery, new InMemorySkillDiscovery()),
+      stubPair(IBootstrapService, bootstrapStub),
+      stubPair(IConfigService, config),
+      stubPair(ISkillCatalogRuntimeOptions, {
+        _serviceBrand: undefined,
+      } as unknown as ISkillCatalogRuntimeOptions),
+      stubPair(IPluginService, pluginStub()),
+      stubPair(IHostFileSystem, fileSourceMonitorHostFs()),
+      stubPair(IHostFsWatchService, watch),
+    ]);
+    const session = host.child(LifecycleScope.Session, 's1', [
+      stubPair(ISessionWorkspaceContext, ws),
+    ]);
+    const catalog = session.accessor.get(ISessionSkillCatalog);
+    const loading = catalog.load();
+
+    await readyRequested.promise;
+    session.dispose();
+    configReady.resolve(undefined);
+    await loading;
+
+    expect(watch.watchedPaths()).toEqual([]);
     host.dispose();
   });
 
@@ -407,6 +467,7 @@ describe('SessionSkillCatalogService', () => {
       stubPair(IConfigService, config),
       stubPair(ISkillCatalogRuntimeOptions, runtimeOptions),
       stubPair(IPluginService, pluginStub()),
+      stubPair(IHostFileSystem, fileSourceMonitorHostFs()),
       stubPair(IHostFsWatchService, stubHostFsWatch()),
     ]);
     const session = host.child(LifecycleScope.Session, 's1', [stubPair(ISessionWorkspaceContext, ws)]);
@@ -625,6 +686,7 @@ describe('SessionSkillCatalogService', () => {
         _serviceBrand: undefined,
       } as unknown as ISkillCatalogRuntimeOptions),
       stubPair(IPluginService, pluginStub()),
+      stubPair(IHostFileSystem, fileSourceMonitorHostFs()),
       stubPair(IHostFsWatchService, stubHostFsWatch()),
     ]);
     const session = host.child(LifecycleScope.Session, 's1', [
@@ -673,6 +735,49 @@ describe('SessionSkillCatalogService', () => {
     }
   });
 
+  it('does not commit a source contribution that finishes after session disposal', async () => {
+    const started = deferred<void>();
+    const result = deferred<SkillContribution>();
+    let loadSignal: AbortSignal | undefined;
+    const pluginSource: IPluginSkillSource = {
+      _serviceBrand: undefined,
+      id: 'plugin',
+      priority: 5,
+      load: (signal) => {
+        loadSignal = signal;
+        started.resolve(undefined);
+        return result.promise;
+      },
+    };
+    const { stub: ws } = workspaceStub('/work');
+    const host = createScopedTestHost([
+      stubPair(ISkillDiscovery, new InMemorySkillDiscovery()),
+      stubPair(IBootstrapService, bootstrapStub),
+      stubPair(IConfigService, configStub()),
+      stubPair(ISkillCatalogRuntimeOptions, {
+        _serviceBrand: undefined,
+      } as unknown as ISkillCatalogRuntimeOptions),
+      stubPair(IPluginService, pluginStub()),
+      stubPair(IHostFileSystem, fileSourceMonitorHostFs()),
+      stubPair(IHostFsWatchService, stubHostFsWatch()),
+    ]);
+    const session = host.child(LifecycleScope.Session, 's1', [
+      stubPair(ISessionWorkspaceContext, ws),
+      stubPair(IPluginSkillSource, pluginSource),
+    ]);
+    const catalog = session.accessor.get(ISessionSkillCatalog);
+    const loading = catalog.load();
+
+    await started.promise;
+    session.dispose();
+    expect(loadSignal?.aborted).toBe(true);
+    result.resolve({ skills: [stubSkill('late-skill')] });
+    await loading;
+
+    expect(catalog.catalog.getSkill('late-skill')).toBeUndefined();
+    host.dispose();
+  });
+
   it('binds thisArg when forwarding plugin reloads through the plugin skill source', async () => {
     const reloadEmitter = new Emitter<ReloadSummary>();
     const pluginService = pluginStub([], reloadEmitter);
@@ -685,6 +790,7 @@ describe('SessionSkillCatalogService', () => {
         _serviceBrand: undefined,
       } as unknown as ISkillCatalogRuntimeOptions),
       stubPair(IPluginService, pluginService),
+      stubPair(IHostFileSystem, fileSourceMonitorHostFs()),
       stubPair(IHostFsWatchService, stubHostFsWatch()),
     ]);
     const session = host.child(LifecycleScope.Session, 's1', [
@@ -744,6 +850,7 @@ describe('SessionSkillCatalogService', () => {
         _serviceBrand: undefined,
       } as unknown as ISkillCatalogRuntimeOptions),
       stubPair(IProviderService, stubProviderService()),
+      stubPair(IHostFileSystem, fileSourceMonitorHostFs()),
       stubPair(IHostFsWatchService, stubHostFsWatch()),
     ]);
     const { stub: ws } = workspaceStub('/work');

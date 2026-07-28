@@ -87,6 +87,7 @@ const V2_RECORD_TYPES: ReadonlySet<string> = new Set([
   'interaction.request',
   'interaction.resolved',
   'plan.revision',
+  'skill.disclosure.set',
 ]);
 
 describe('v1 wire vocabulary', () => {

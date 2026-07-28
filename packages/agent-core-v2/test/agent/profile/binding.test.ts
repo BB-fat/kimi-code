@@ -107,6 +107,32 @@ describe('AgentProfileService.bind', () => {
     expect(svc.getSystemPrompt()).toContain('Kimi Code CLI');
   });
 
+  it('binds without a skill listing when the skill catalog fails to initialize', async () => {
+    const ready = Promise.reject(new Error('skill catalog unavailable'));
+    void ready.catch(() => undefined);
+    ctx = createTestAgent(
+      hostEnvironmentServices(homeDir),
+      sessionService(ISessionSkillCatalog, {
+        _serviceBrand: undefined,
+        catalog: {
+          getModelSkillDisclosure: () => {
+            throw new Error('unreachable catalog');
+          },
+        } as never,
+        ready,
+        onDidChange: Event.None as Event<string>,
+        load: async () => {},
+        reload: async () => {},
+      }),
+    );
+    const profile = ctx.get(IAgentProfileService);
+
+    await profile.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: MOCK_MODEL });
+
+    expect(profile.isRunnable()).toBe(true);
+    expect(profile.getSystemPrompt()).toContain('Kimi Code CLI');
+  });
+
   it('persists the complete binding in one journal record', async () => {
     const persistence = new InMemoryWireRecordPersistence();
     ctx = createTestAgent(
@@ -692,7 +718,10 @@ describe('AgentToolPolicyService.setSessionDisabledTools', () => {
       hostEnvironmentServices(homeDir),
       sessionService(ISessionSkillCatalog, {
         _serviceBrand: undefined,
-        catalog: { getModelSkillListing: () => skillMarker } as never,
+        catalog: {
+          getModelSkillDisclosure: () => ({ names: ['policy-skill'], listing: skillMarker }),
+          getModelSkillListing: () => skillMarker,
+        } as never,
         ready: Promise.resolve(),
         onDidChange: Event.None as Event<string>,
         load: async () => {},
@@ -716,7 +745,10 @@ describe('AgentToolPolicyService.setSessionDisabledTools', () => {
       hostEnvironmentServices(homeDir),
       sessionService(ISessionSkillCatalog, {
         _serviceBrand: undefined,
-        catalog: { getModelSkillListing: () => skillMarker } as never,
+        catalog: {
+          getModelSkillDisclosure: () => ({ names: ['policy-skill'], listing: skillMarker }),
+          getModelSkillListing: () => skillMarker,
+        } as never,
         ready: Promise.resolve(),
         onDidChange: Event.None as Event<string>,
         load: async () => {},
@@ -736,7 +768,10 @@ describe('AgentToolPolicyService.setSessionDisabledTools', () => {
       hostEnvironmentServices(homeDir),
       sessionService(ISessionSkillCatalog, {
         _serviceBrand: undefined,
-        catalog: { getModelSkillListing: () => skillMarker } as never,
+        catalog: {
+          getModelSkillDisclosure: () => ({ names: ['policy-skill'], listing: skillMarker }),
+          getModelSkillListing: () => skillMarker,
+        } as never,
         ready: Promise.resolve(),
         onDidChange: Event.None as Event<string>,
         load: async () => {},
@@ -752,7 +787,9 @@ describe('AgentToolPolicyService.setSessionDisabledTools', () => {
       .replace(TOOLS_SECTION, { disabled: ['Skill'] }, ConfigTarget.Memory);
 
     expect(toolPolicy.isToolActive('Skill')).toBe(false);
-    await vi.waitFor(() => expect(profile.getSystemPrompt()).not.toContain(skillMarker));
+    await vi.waitFor(() => {
+      expect(profile.getSystemPrompt()).not.toContain(skillMarker);
+    });
   });
 });
 

@@ -15,6 +15,7 @@ import type {
   SkillCatalog,
   SkillDefinition,
   SkillMetadata,
+  ModelSkillDisclosure,
   SkillSource,
   SkippedSkill,
 } from './types';
@@ -115,15 +116,22 @@ export class InMemorySkillCatalog implements SkillCatalog {
   }
 
   getModelSkillListing(): string {
-    const lines = ['DISREGARD any earlier skill listings. Current available skills:'];
-    const listing = renderGroupedSkills(
-      this.listInvocableSkills().filter((skill) => skill.metadata.isSubSkill !== true),
-      formatModelSkill,
+    return this.getModelSkillDisclosure().listing;
+  }
+
+  getModelSkillDisclosure(): ModelSkillDisclosure {
+    const skills = this.listInvocableSkills().filter(
+      (skill) => skill.metadata.isSubSkill !== true,
     );
+    const lines = ['DISREGARD any earlier skill listings. Current available skills:'];
+    const listing = renderGroupedSkills(skills, formatModelSkill);
     if (listing.length > 0) {
       lines.push(listing);
     }
-    return lines.length === 1 ? '' : lines.join('\n');
+    return {
+      names: skills.map((skill) => skill.name),
+      listing: lines.length === 1 ? '' : lines.join('\n'),
+    };
   }
 
   private indexPluginSkill(
@@ -285,5 +293,5 @@ function tokenizeArgs(raw: string): string[] {
 }
 
 function escapeRegExp(value: string): string {
-  return value.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+  return value.replaceAll(/[\\^$.*+?()[\]{}|]/g, '\\$&');
 }

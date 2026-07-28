@@ -56,6 +56,17 @@ function messageText(message: ContextMessage): string {
     .join('');
 }
 
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 describe('AgentAgentsMdReminderService', () => {
   let cwd: string;
   let agentsMdPath: string;
@@ -67,6 +78,7 @@ describe('AgentAgentsMdReminderService', () => {
   let context: IAgentContextMemoryService;
   let injector: InjectableDynamicInjector;
   let profile: IAgentProfileService;
+  let readTextOverride: ((path: string) => Promise<string>) | undefined;
 
   function fileStat(path: string): HostFileStat {
     return { isFile: true, isDirectory: false, size: files.get(path)?.length ?? 0 };
@@ -85,10 +97,12 @@ describe('AgentAgentsMdReminderService', () => {
     agentsMdPath = `${cwd}/AGENTS.md`;
     files = new Map();
     dirs = new Set([cwd, `${cwd}/.git`]);
+    readTextOverride = undefined;
     hostFs = createFakeHostFs({
       stat: async (path: string) => {
-        if (!files.has(path)) throw new Error(`ENOENT: ${path}`);
-        return fileStat(path);
+        if (files.has(path)) return fileStat(path);
+        if (dirs.has(path)) return { isFile: false, isDirectory: true, size: 0 };
+        throw new Error(`ENOENT: ${path}`);
       },
       lstat: async (path: string) => {
         if (files.has(path)) return fileStat(path);
@@ -96,11 +110,13 @@ describe('AgentAgentsMdReminderService', () => {
         throw new Error(`ENOENT: ${path}`);
       },
       readText: async (path: string) => {
+        if (readTextOverride !== undefined) return readTextOverride(path);
         const content = files.get(path);
         if (content === undefined) throw new Error(`ENOENT: ${path}`);
         return content;
       },
       readdir: async () => [],
+      realpath: async (path: string) => path,
     });
     watch = stubHostFsWatch();
     ctx = createTestAgent(
@@ -157,6 +173,45 @@ describe('AgentAgentsMdReminderService', () => {
 
     await injector.inject();
     expect(agentsMdReminders(context)).toHaveLength(1);
+  });
+
+  it('keeps a watch event that arrives while fresh content is being read', async () => {
+    files.set(agentsMdPath, 'rule one');
+    profile.update({ systemPrompt: systemPromptWithAgentsMd(await currentAgentsMd()) });
+    await injector.inject();
+
+    files.set(agentsMdPath, 'rule two');
+    watch.fire(agentsMdPath, { action: 'modified' });
+    await settleWatchDebounce();
+
+    const readStarted = deferred<void>();
+    const releaseRead = deferred<void>();
+    let pauseRead = true;
+    readTextOverride = async (path) => {
+      const content = files.get(path);
+      if (content === undefined) throw new Error(`ENOENT: ${path}`);
+      if (path === agentsMdPath && pauseRead) {
+        pauseRead = false;
+        readStarted.resolve(undefined);
+        await releaseRead.promise;
+      }
+      return content;
+    };
+
+    const firstInjection = injector.inject();
+    await readStarted.promise;
+    files.set(agentsMdPath, 'rule three');
+    watch.fire(agentsMdPath, { action: 'modified' });
+    await settleWatchDebounce();
+    releaseRead.resolve(undefined);
+    await firstInjection;
+
+    await injector.inject();
+
+    const reminders = agentsMdReminders(context);
+    expect(reminders).toHaveLength(2);
+    expect(messageText(reminders[0] as ContextMessage)).toContain('rule two');
+    expect(messageText(reminders[1] as ContextMessage)).toContain('rule three');
   });
 
   it('announces removal when the last AGENTS.md file disappears', async () => {

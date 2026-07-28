@@ -11,7 +11,7 @@
  * AGENTS.md block of the current system prompt, else the volatile
  * `seededContent` adopted at first evaluation (custom profiles without the
  * fenced block). The live content is read once and then only re-read when the
- * `SkillSourceWatcher` over `agentsMdCandidatePaths` reports a change — never
+ * shared `fileSourceMonitor` subscription reports a candidate change — never
  * per step, so the step pipeline carries no filesystem IO (fake-timer retry
  * loops included); cwd changes re-arm the watch and force one re-read. The
  * plain-data state (`seededContent`) is registered into `agentState`
@@ -21,7 +21,6 @@
 import { Disposable } from '#/_base/di/lifecycle';
 import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { defineState } from '#/_base/state/stateRegistry';
-import { normalize } from 'pathe';
 
 import {
   IAgentContextInjectorService,
@@ -31,10 +30,12 @@ import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory'
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
-import { SkillSourceWatcher } from '#/app/skillCatalog/skillSourceWatcher';
+import {
+  IFileSourceMonitor,
+  type IFileSourceWatch,
+} from '#/app/fileSourceMonitor/fileSourceMonitor';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
-import { IHostFsWatchService } from '#/os/interface/hostFsWatch';
 
 import { agentsMdCandidatePaths, loadAgentsMd } from './context';
 import { IAgentProfileService } from './profile';
@@ -55,10 +56,10 @@ export const agentsMdReminderSeededContentKey = defineState<string | undefined>(
 export class AgentAgentsMdReminderService extends Disposable implements IAgentAgentsMdReminderService {
   declare readonly _serviceBrand: undefined;
 
-  private readonly watcher: SkillSourceWatcher;
-  private candidates: ReadonlySet<string> = new Set();
+  private readonly watcher: IFileSourceWatch;
   private watchCwd: string | undefined;
-  private dirty = true;
+  private changeVersion = 0;
+  private loadedVersion = -1;
   private current: string | undefined;
 
   constructor(
@@ -69,18 +70,14 @@ export class AgentAgentsMdReminderService extends Disposable implements IAgentAg
     @IHostFileSystem private readonly fs: IHostFileSystem,
     @IHostEnvironment private readonly env: IHostEnvironment,
     @IBootstrapService private readonly bootstrap: IBootstrapService,
-    @IHostFsWatchService hostFsWatch: IHostFsWatchService,
+    @IFileSourceMonitor fileSourceMonitor: IFileSourceMonitor,
   ) {
     super();
     this.states.register(agentsMdReminderSeededContentKey);
     this.watcher = this._register(
-      new SkillSourceWatcher(
-        hostFsWatch,
-        () => {
-          this.dirty = true;
-        },
-        (change) => this.candidates.has(normalize(change.path)),
-      ),
+      fileSourceMonitor.createWatch({ target: 'file' }, () => {
+        this.changeVersion += 1;
+      }),
     );
     this._register(
       dynamicInjector.register(AGENTS_MD_INJECTION_VARIANT, (ctx) => this.reminder(ctx)),
@@ -102,7 +99,6 @@ export class AgentAgentsMdReminderService extends Disposable implements IAgentAg
       if (baseline === current) return undefined;
       return buildAgentsMdReminder(current);
     } catch {
-      // A filesystem failure must never break the step loop.
       return undefined;
     }
   }
@@ -111,18 +107,20 @@ export class AgentAgentsMdReminderService extends Disposable implements IAgentAg
     const cwd = this.profile.data().cwd;
     if (cwd !== this.watchCwd) {
       this.watchCwd = cwd;
-      this.dirty = true;
-      this.candidates = new Set();
-      void this.armWatch(cwd);
+      this.changeVersion += 1;
+      await this.armWatch(cwd);
     }
-    if (!this.dirty && this.current !== undefined) return this.current;
+    if (this.loadedVersion === this.changeVersion && this.current !== undefined) {
+      return this.current;
+    }
+    const loadingVersion = this.changeVersion;
     const content = await loadAgentsMd(
       { fs: this.fs, homeDir: this.env.homeDir },
       cwd,
       this.bootstrap.homeDir,
     );
     this.current = content;
-    this.dirty = false;
+    this.loadedVersion = loadingVersion;
     return content;
   }
 
@@ -133,12 +131,9 @@ export class AgentAgentsMdReminderService extends Disposable implements IAgentAg
         this.bootstrap.homeDir,
         cwd,
       );
-      // Arm only if the provider has not moved to another cwd meanwhile.
       if (cwd !== this.watchCwd) return;
-      this.candidates = new Set(paths.map((path) => normalize(path)));
-      this.watcher.setPaths(paths);
+      await this.watcher.setPaths(paths);
     } catch {
-      // Keep the read-once cache; change detection degrades to cwd switches.
     }
   }
 

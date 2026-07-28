@@ -1,9 +1,8 @@
 /**
- * `skillListReminder` domain (L4) — skill-list freshness reminder contract.
+ * `skillDisclosure` domain (L4) — skill-list reminder contract.
  *
- * Defines the Agent-scope marker service that announces skill-list additions
- * through a `skill_list` context-injection reminder when the session catalog
- * gains skills the system prompt's listing does not know about.
+ * Defines the Agent-scoped marker service that announces structured skill
+ * additions after the model's last committed disclosure baseline.
  */
 
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';

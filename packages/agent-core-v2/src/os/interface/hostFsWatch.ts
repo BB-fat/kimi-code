@@ -24,10 +24,13 @@ export interface HostFsChange {
 
 export interface HostFsWatchOptions {
   readonly recursive?: boolean;
+  readonly depth?: number;
+  readonly pollingIntervalMs?: number;
   readonly ignored?: (path: string) => boolean;
 }
 
 export interface IHostFsWatchHandle extends IDisposable {
+  readonly ready: Promise<void>;
   readonly onDidChange: Event<HostFsChange>;
 }
 

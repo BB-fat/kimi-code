@@ -21,7 +21,7 @@
 // owning model offloads inline media to blob storage), cross-reducers
 // (foreign models that also reduce this record on dispatch and replay).
 
-// Index (44 record types)
+// Index (45 record types)
 //   config.update                      profile              persisted  src/agent/profile/profileOps.ts
 //   context_size.measured              contextSize          transient  src/agent/contextSize/contextSizeOps.ts
 //   context.append_loop_event          contextMemory        persisted  src/agent/contextMemory/contextOps.ts
@@ -53,6 +53,7 @@
 //   plan.revision                      plan                 persisted  src/agent/plan/planOps.ts
 //   profile.bind                       profile              persisted  src/agent/profile/profileOps.ts
 //   skill.activate                     skill                transient  src/agent/skill/skillOps.ts
+//   skill.disclosure.set               skillDisclosure      persisted  src/agent/skillDisclosure/skillDisclosureOps.ts
 //   swarm_mode.enter                   swarm                persisted  src/agent/swarm/swarmOps.ts
 //   swarm_mode.exit                    swarm                persisted  src/agent/swarm/swarmOps.ts
 //   task.started                       task                 persisted  src/agent/task/taskOps.ts
@@ -476,6 +477,15 @@ interface SkillActivatePayload {
 }
 
 /**
+ * model: skillDisclosure · persisted
+ * owner: src/agent/skillDisclosure/skillDisclosureOps.ts
+ */
+interface SkillDisclosureSetPayload {
+  _name: 'skill.disclosure.set';
+  names: string[];
+}
+
+/**
  * model: swarm · persisted · toEvent
  * owner: src/agent/swarm/swarmOps.ts
  */
@@ -646,6 +656,7 @@ interface WirePayloadMap {
   "plan.revision": PlanRevisionPayload;
   "profile.bind": ProfileBindPayload;
   "skill.activate": SkillActivatePayload;
+  "skill.disclosure.set": SkillDisclosureSetPayload;
   "swarm_mode.enter": SwarmModeEnterPayload;
   "swarm_mode.exit": SwarmModeExitPayload;
   "task.started": TaskStartedPayload;

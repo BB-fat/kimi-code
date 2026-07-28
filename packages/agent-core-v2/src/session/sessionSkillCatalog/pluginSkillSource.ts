@@ -13,7 +13,12 @@ import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiatio
 import type { Event } from '#/_base/event';
 import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { ISkillDiscovery } from '#/app/skillCatalog/skillDiscovery';
-import { SKILL_SOURCE_PRIORITY, type ISkillSource, type SkillContribution } from '#/app/skillCatalog/skillSource';
+import {
+  isSkillLoadAborted,
+  SKILL_SOURCE_PRIORITY,
+  type ISkillSource,
+  type SkillContribution,
+} from '#/app/skillCatalog/skillSource';
 import { IPluginService } from '#/app/plugin/plugin';
 
 export interface IPluginSkillSource extends ISkillSource {
@@ -42,8 +47,10 @@ export class PluginSkillSource implements IPluginSkillSource {
     @IPluginService private readonly plugins: IPluginService,
   ) {}
 
-  async load(): Promise<SkillContribution> {
-    return this.discovery.discover(await this.plugins.pluginSkillRoots());
+  async load(signal?: AbortSignal): Promise<SkillContribution> {
+    const roots = await this.plugins.pluginSkillRoots();
+    if (isSkillLoadAborted(signal)) return { skills: [] };
+    return this.discovery.discover(roots, signal);
   }
 }
 

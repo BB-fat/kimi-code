@@ -4,7 +4,7 @@
  * Discovers user skills from the bootstrap home directories through
  * `ISkillDiscovery`, contributing them at priority 20 (above extra / plugin /
  * builtin, below workspace). Reads home paths from `bootstrap`. Watches the
- * candidate root paths (existing or not) through `SkillSourceWatcher` and
+ * candidate root paths (existing or not) through `fileSourceMonitor` and
  * re-fires `onDidChange` on debounced fs changes. Bound at App scope.
  */
 
@@ -14,7 +14,10 @@ import { Emitter, type Event } from '#/_base/event';
 import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
-import { IHostFsWatchService } from '#/os/interface/hostFsWatch';
+import {
+  IFileSourceMonitor,
+  type IFileSourceWatch,
+} from '#/app/fileSourceMonitor/fileSourceMonitor';
 
 import {
   MERGE_ALL_AVAILABLE_SKILLS_SECTION,
@@ -22,9 +25,14 @@ import {
 } from './configSection';
 import { ISkillCatalogRuntimeOptions } from './skillCatalogRuntimeOptions';
 import { ISkillDiscovery } from './skillDiscovery';
-import { userRootCandidates, userRoots } from './skillRoots';
-import { SkillSourceWatcher } from './skillSourceWatcher';
-import { SKILL_SOURCE_PRIORITY, type ISkillSource, type SkillContribution } from './skillSource';
+import { resolveUserSkillRoots } from './skillRoots';
+import {
+  isSkillLoadAborted,
+  SKILL_SOURCE_PRIORITY,
+  type ISkillSource,
+  type SkillContribution,
+} from './skillSource';
+import { SKILL_ROOT_WATCH_OPTIONS } from './skillTraversal';
 
 export interface IUserFileSkillSource extends ISkillSource {
   readonly _serviceBrand: undefined;
@@ -40,18 +48,18 @@ export class UserFileSkillSource extends Disposable implements IUserFileSkillSou
   readonly priority = SKILL_SOURCE_PRIORITY.user;
   private readonly onDidChangeEmitter = this._register(new Emitter<void>());
   readonly onDidChange: Event<void> = this.onDidChangeEmitter.event;
-  private readonly watcher: SkillSourceWatcher;
+  private readonly watcher: IFileSourceWatch;
 
   constructor(
     @ISkillDiscovery private readonly discovery: ISkillDiscovery,
     @IBootstrapService private readonly bootstrap: IBootstrapService,
     @IConfigService private readonly config: IConfigService,
     @ISkillCatalogRuntimeOptions private readonly runtimeOptions: ISkillCatalogRuntimeOptions,
-    @IHostFsWatchService hostFsWatch: IHostFsWatchService,
+    @IFileSourceMonitor fileSourceMonitor: IFileSourceMonitor,
   ) {
     super();
     this.watcher = this._register(
-      new SkillSourceWatcher(hostFsWatch, () => this.onDidChangeEmitter.fire()),
+      fileSourceMonitor.createWatch(SKILL_ROOT_WATCH_OPTIONS, () => this.onDidChangeEmitter.fire()),
     );
     this._register(
       this.config.onDidSectionChange((event) => {
@@ -60,19 +68,23 @@ export class UserFileSkillSource extends Disposable implements IUserFileSkillSou
     );
   }
 
-  async load(): Promise<SkillContribution> {
+  async load(signal?: AbortSignal): Promise<SkillContribution> {
     if ((this.runtimeOptions.explicitDirs?.length ?? 0) > 0) {
       return { skills: [] };
     }
     await this.config.ready;
+    if (isSkillLoadAborted(signal)) return { skills: [] };
     const mergeAllAvailableSkills =
       this.config.get<MergeAllAvailableSkillsConfig>(MERGE_ALL_AVAILABLE_SKILLS_SECTION) ?? true;
-    this.watcher.setPaths(
-      userRootCandidates(this.bootstrap.homeDir, this.bootstrap.osHomeDir),
+    const resolution = await resolveUserSkillRoots(
+      this.bootstrap.homeDir,
+      this.bootstrap.osHomeDir,
+      { mergeAllAvailableSkills },
     );
-    return this.discovery.discover(
-      await userRoots(this.bootstrap.homeDir, this.bootstrap.osHomeDir, { mergeAllAvailableSkills }),
-    );
+    if (isSkillLoadAborted(signal)) return { skills: [] };
+    await this.watcher.setPaths(resolution.candidates);
+    if (isSkillLoadAborted(signal)) return { skills: [] };
+    return this.discovery.discover(resolution.roots, signal);
   }
 }
 

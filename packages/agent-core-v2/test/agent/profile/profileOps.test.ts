@@ -6,6 +6,7 @@ import { TestInstantiationService } from '#/_base/di/test';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { AgentProfileService } from '#/agent/profile/profileService';
 import { ActiveToolsModel, ProfileModel } from '#/agent/profile/profileOps';
+import { IAgentSkillDisclosureService } from '#/agent/skillDisclosure/skillDisclosure';
 import { DEFAULT_AGENT_PROFILE_NAME } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
@@ -215,8 +216,26 @@ function buildHost(key: string): {
   host.stub(IBootstrapService, stubUnused());
   host.stub(ISessionContext, createSessionContextStub());
   host.stub(ISessionWorkspaceContext, stubUnused());
-  host.stub(ISessionAgentProfileCatalog, stubUnused());
+  host.stub(ISessionAgentProfileCatalog, {
+    _serviceBrand: undefined,
+    ready: Promise.resolve(),
+    get: () => undefined,
+    getDefault: () => {
+      throw new Error('catalog resolution is not exercised');
+    },
+    list: () => [],
+    load: async () => {},
+    reload: async () => {},
+    onDidChange: () => ({ dispose: () => {} }),
+  });
   host.stub(ISessionSkillCatalog, stubUnused());
+  host.stub(IAgentSkillDisclosureService, {
+    _serviceBrand: undefined,
+    resolve: async () => ({ names: [], listing: '' }),
+    disclosedNames: () => undefined,
+    legacyNames: () => undefined,
+    markDisclosed: () => {},
+  });
   host.stub(ISessionToolPolicy, {
     _serviceBrand: undefined,
     ready: Promise.resolve(),

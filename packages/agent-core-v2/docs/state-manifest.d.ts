@@ -23,7 +23,7 @@
 // references become '(circular)', and class instances collapse to a '(ClassName)'
 // marker — the wire shape of an entry is the JSON projection of the type here.
 //
-// Index (Session: 28 keys · Agent: 71 keys)
+// Index (Session: 28 keys · Agent: 70 keys)
 //   Session
 //     cron.inFlight                             src/session/cron/sessionCronServiceImpl.ts
 //     cron.lastSeenAt                           src/session/cron/sessionCronServiceImpl.ts
@@ -104,7 +104,6 @@
 //     profile.emittedToolPatternWarnings              src/agent/profile/profileService.ts
 //     prompt.launching                                src/agent/prompt/promptService.ts
 //     shellCommand.tasks                              src/agent/shellCommand/shellCommandService.ts
-//     skillList.seededNames                           src/agent/skillListReminder/skillListReminderService.ts
 //     stepRetry.failedAttempts                        src/agent/stepRetry/stepRetryService.ts
 //     stepRetry.lastFailedDriverId                    src/agent/stepRetry/stepRetryService.ts
 //     task.activeTaskReminderPending                  src/agent/task/taskService.ts
@@ -585,6 +584,10 @@ export interface SessionStateSnapshot {
     }[];
     getKimiSkillsDescription: () => string;
     getModelSkillListing: () => string;
+    getModelSkillDisclosure: () => /* ModelSkillDisclosure — packages/agent-core-v2/src/app/skillCatalog/types.ts */ {
+      readonly names: readonly string[];
+      readonly listing: string;
+    };
   };
   // src/session/sessionToolPolicy/sessionToolPolicyService.ts
   'sessionToolPolicy.state': /* SessionToolPolicyState — packages/agent-core-v2/src/session/sessionToolPolicy/sessionToolPolicyService.ts */ {
@@ -1015,7 +1018,7 @@ export interface AgentStateSnapshot {
   'llmRequester.lastConfigLogSignature': string | undefined;
   'llmRequester.mediaDegradedTurns': Set<number>;
   'llmRequester.mediaStrippedTurns': Map<number, /* MediaStripSnapshot — packages/agent-core-v2/src/agent/contextProjector/contextProjector.ts */ {
-    readonly "__@mediaStripSnapshotBrand@2732": undefined;
+    readonly "__@mediaStripSnapshotBrand@2719": undefined;
   }>;
   'llmRequester.turnConfigs': Map<number, /* TurnRequestConfig — packages/agent-core-v2/src/agent/llmRequester/llmRequesterService.ts */ {
     readonly resolved: /* ProfileModelContext — packages/agent-core-v2/src/agent/profile/profile.ts */ {
@@ -1102,8 +1105,6 @@ export interface AgentStateSnapshot {
   'prompt.launching': boolean;
   // src/agent/shellCommand/shellCommandService.ts
   'shellCommand.tasks': Map<string, string>;
-  // src/agent/skillListReminder/skillListReminderService.ts
-  'skillList.seededNames': ReadonlySet<string> | undefined;
   // src/agent/stepRetry/stepRetryService.ts
   'stepRetry.failedAttempts': number;
   'stepRetry.lastFailedDriverId': string | undefined;

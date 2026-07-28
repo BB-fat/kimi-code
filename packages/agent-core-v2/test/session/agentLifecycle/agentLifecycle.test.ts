@@ -17,6 +17,7 @@ import { Event } from '#/_base/event';
 import { type McpServerConfig } from '#/agent/mcp/config-schema';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import '#/agent/profile/profileService';
+import '#/agent/skillDisclosure/skillDisclosureService';
 import { IAgentMcpService } from '#/agent/mcp/mcp';
 import { McpConnectionManager } from '#/agent/mcp/connection-manager';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
@@ -315,7 +316,9 @@ describe('AgentLifecycleService', () => {
     } as unknown as ISessionAgentProfileCatalog);
     ix.stub(ISessionSkillCatalog, {
       _serviceBrand: undefined,
-      catalog: { skills: [] },
+      catalog: {
+        getModelSkillDisclosure: () => ({ names: [], listing: '' }),
+      },
       ready: Promise.resolve(),
       onDidChange: Event.None,
       load: () => Promise.resolve(),
@@ -772,6 +775,7 @@ describe('AgentLifecycleService', () => {
       systemPrompt: 'original prompt',
       activeToolNames: ['Read'],
       disallowedTools: ['Bash'],
+      disclosedSkillNames: ['review'],
       subagents: ['explore'],
     });
 
@@ -784,6 +788,7 @@ describe('AgentLifecycleService', () => {
       systemPrompt: 'original prompt',
       activeToolNames: ['Read'],
       disallowedTools: ['Bash'],
+      disclosedSkillNames: ['review'],
       subagents: ['explore'],
     });
   });

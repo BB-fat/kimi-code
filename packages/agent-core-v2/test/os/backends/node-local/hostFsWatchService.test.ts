@@ -86,4 +86,14 @@ describe('HostFsWatchService', () => {
 
     expect(events).toHaveLength(0);
   });
+
+  it('settles readiness when disposed during watcher startup', async () => {
+    root = await mkdtemp(join(tmpdir(), 'hostfswatch-'));
+    const svc = new HostFsWatchService();
+    handle = svc.watch(root, { pollingIntervalMs: 25 });
+
+    handle.dispose();
+    await expect(handle.ready).resolves.toBeUndefined();
+    handle = undefined;
+  });
 });

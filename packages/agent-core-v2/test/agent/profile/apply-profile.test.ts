@@ -1,8 +1,8 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'pathe';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
 import { IAgentProfileService, type ResolvedAgentProfile } from '#/agent/profile/profile';
@@ -12,7 +12,7 @@ import { createTestAgent, execEnvServices, hostEnvironmentServices, type TestAge
 const profile: ResolvedAgentProfile = {
   name: 'agents-profile',
   systemPrompt: (context) =>
-    typeof context['agentsMd'] === 'string' ? (context['agentsMd'] as string) : '',
+    typeof context['agentsMd'] === 'string' ? context['agentsMd'] : '',
   tools: [],
 };
 
@@ -29,6 +29,14 @@ const exactProfile: ResolvedAgentProfile = {
     ].join('\n'),
   tools: ['Read', 'Write'],
 };
+
+function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
 
 describe('AgentProfileService.applyProfile', () => {
   let ctx: TestAgentContext;
@@ -88,6 +96,53 @@ describe('AgentProfileService.applyProfile', () => {
 
     expect(svc.data().systemPrompt).toBe(exactSystemPrompt(workDir, 'new instructions'));
     expect(svc.getActiveToolNames()).toEqual(['Read']);
+  });
+
+  it('does not let an older refresh overwrite a newer cwd prompt', async () => {
+    const cwdA = join(workDir, 'a');
+    const cwdB = join(workDir, 'b');
+    await Promise.all([mkdir(cwdA), mkdir(cwdB)]);
+    const fs = new HostFileSystem();
+    ctx = createTestAgent(
+      execEnvServices({ hostFs: fs }),
+      hostEnvironmentServices(homeDir),
+      { cwd: workDir },
+    );
+    const svc = ctx.get(IAgentProfileService);
+    await svc.applyProfile(exactProfile);
+
+    const firstReadStarted = deferred();
+    const releaseFirstRead = deferred();
+    const readdir = fs.readdir.bind(fs);
+    vi.spyOn(fs, 'readdir').mockImplementation(async (path) => {
+      if (path === cwdA) {
+        firstReadStarted.resolve();
+        await releaseFirstRead.promise;
+      }
+      return readdir(path);
+    });
+    const refreshes: Promise<void>[] = [];
+    const refresh = svc.refreshSystemPrompt.bind(svc);
+    vi.spyOn(svc, 'refreshSystemPrompt').mockImplementation(() => {
+      const pending = refresh();
+      refreshes.push(pending);
+      return pending;
+    });
+
+    svc.update({ cwd: cwdA });
+    await firstReadStarted.promise;
+    svc.update({ cwd: cwdB });
+    await vi.waitFor(() => {
+      expect(refreshes).toHaveLength(2);
+    });
+    await refreshes[1];
+    expect(svc.getSystemPrompt()).toContain(`cwd:${cwdB}`);
+
+    releaseFirstRead.resolve();
+    await refreshes[0];
+    expect(svc.data().cwd).toBe(cwdB);
+    expect(svc.getSystemPrompt()).toContain(`cwd:${cwdB}`);
+    expect(svc.getSystemPrompt()).not.toContain(`cwd:${cwdA}`);
   });
 
   it('caches an agents-md warning when the content exceeds the 32 KB soft budget', async () => {

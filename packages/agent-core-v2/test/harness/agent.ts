@@ -2204,6 +2204,7 @@ function createHostFsWatchService(): IHostFsWatchService {
   return {
     _serviceBrand: undefined,
     watch: () => ({
+      ready: Promise.resolve(),
       onDidChange: Event.None as Event<HostFsChange>,
       dispose: () => { },
     }),

@@ -146,6 +146,7 @@ function skillCatalogStub(): ISessionSkillCatalog {
       listInvocableSkills: () => [],
       getSkillRoots: () => [],
       getSkippedByPolicy: () => [],
+      getModelSkillDisclosure: () => ({ names: [], listing: '' }),
       getModelSkillListing: () => '',
     },
     ready: Promise.resolve(),
