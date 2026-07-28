@@ -32,6 +32,7 @@ import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { IHostFileSystem, type HostFileStat } from '#/os/interface/hostFileSystem';
 import { IHostProcessService, type IHostProcess } from '#/os/interface/hostProcess';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
+import { ISessionCapabilities } from '#/session/sessionCapabilities/sessionCapabilities';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 import {
   type GrepInput,
@@ -316,6 +317,12 @@ describe('GrepTool', () => {
           });
           reg.definePartialInstance(IEventBus, {
             subscribe: () => toDisposable(() => {}),
+          });
+          reg.definePartialInstance(ISessionCapabilities, {
+            has: () => true,
+            admitsAll: () => true,
+            toolContributions: [],
+            agentServiceContributions: [],
           });
         },
       });

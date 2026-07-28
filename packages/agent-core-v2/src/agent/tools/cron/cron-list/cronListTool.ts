@@ -144,4 +144,5 @@ registerScopedService(
   CronListTool,
   ScopeActivation.OnScopeCreated,
   'cron',
+  ['os.filesystem'],
 );

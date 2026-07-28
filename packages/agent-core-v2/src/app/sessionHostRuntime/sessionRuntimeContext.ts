@@ -19,12 +19,19 @@
 
 import { Error2 } from '#/_base/errors/errors';
 import { CoreErrors } from '#/_base/errors/codes';
+import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';
+import type { SyncDescriptor } from '#/_base/di/descriptors';
 import type {
   DocumentCodec,
   IAtomicDocumentStore,
 } from '#/persistence/interface/atomicDocumentStore';
 import type { IAppendLogStore } from '#/persistence/interface/appendLogStore';
 import type { IBlobStore } from '#/persistence/interface/blobStore';
+import type { IHostEnvironment } from '#/os/interface/hostEnvironment';
+import type { IHostFileSystem } from '#/os/interface/hostFileSystem';
+import type { IHostFsWatchService } from '#/os/interface/hostFsWatch';
+import type { IHostProcessService } from '#/os/interface/hostProcess';
+import type { IHostTerminalService } from '#/os/interface/terminal';
 
 import type { SessionRuntimeCapability } from './sessionHostRuntime';
 import type { SessionRef } from './sessionRef';
@@ -192,20 +199,38 @@ export interface ISessionColdReader {
 /* ------------------------------------------------------------------------ */
 
 /**
- * M0 contribution descriptor: a Session/Agent service a runtime wants
- * projected into sessions it hosts. `requires` gates activation on the
- * runtime capability set (plan §7.4). The concrete binding to the DI service
- * registry (identifiers + constructors) is defined when the scope-assembly
- * milestone lands; until then contributions are opaque to Session Core.
+ * A Session/Agent service a runtime projects into the sessions it hosts
+ * (plan §7.4): a real DI binding — the service identifier plus the
+ * descriptor the scope collection activates. `requires` gates inclusion on
+ * the lease's capability set: a contribution whose `requires` is not
+ * projected is excluded BEFORE the scope is built. A contribution whose `id`
+ * matches a baseline registry registration REPLACES it for this session —
+ * that is how a runtime substitutes its own backend for a Session Core
+ * service (e.g. a remote filesystem service).
+ *
+ * Session Core's own baseline services do not flow through here: they live in
+ * the scoped DI registry and carry the same `requires` gating on their
+ * registration entries. This channel is for runtime-provided extras and
+ * overrides.
  */
 export interface ScopedServiceContribution {
-  readonly id: string;
+  readonly id: ServiceIdentifier<unknown>;
+  readonly descriptor: SyncDescriptor<unknown>;
   readonly requires: readonly SessionRuntimeCapability[];
 }
 
-/** M0 tool contribution descriptor — same gating contract as services. */
+/**
+ * A tool a runtime projects into the sessions it hosts (plan §7.4). Same
+ * gating contract as services; activation mirrors the builtin tool flow (the
+ * bound Profile's tool policy still applies) — see
+ * `AgentToolActivationService`, which consults the session's capability view
+ * for these entries.
+ */
 export interface ToolContribution {
+  readonly id: ServiceIdentifier<unknown>;
+  /** Model-facing tool name, declared so activation can filter without instantiating. */
   readonly name: string;
+  readonly descriptor: SyncDescriptor<unknown>;
   readonly requires: readonly SessionRuntimeCapability[];
 }
 
@@ -216,14 +241,34 @@ export interface SessionRuntimeContributions {
   readonly tools: readonly ToolContribution[];
 }
 
+/* ------------------------------------------------------------------------ */
+/* OS capability handles                                                     */
+/* ------------------------------------------------------------------------ */
+
 /**
- * Optional OS capability handles a runtime may expose on a session lease
- * (plan §3.3). Headless runtimes leave `ISessionRuntimeContext.os` undefined.
- * The concrete handle set (filesystem/process/terminal/watch/stdio) is
- * defined with the OS-contribution milestone; M0 keeps it opaque so the
- * generic contract stays free of host-OS types.
+ * The OS capability handles a runtime may expose on a session lease
+ * (plan §3.3/§7.4). Headless runtimes leave `ISessionRuntimeContext.os`
+ * undefined entirely; a runtime with OS support provides `cwd` plus the
+ * handles backing its projected `os.*` capabilities — a capability string
+ * without its handle is a runtime bug, and Session Core treats the missing
+ * handle as unavailable (reads look empty, mutations fail with
+ * `session.capability_unavailable`).
+ *
+ * `cwd` is the session's working-directory fact (the workspace root for a
+ * local runtime, the remote workdir for a remote runtime) and the only path
+ * the generic contract ever carries (plan §7.2): every other physical path
+ * stays inside the owning runtime's adapter. The handles are the
+ * `os/interface` contracts, so a runtime may back them with node-local
+ * services, remote clients, or fakes without Session Core knowing.
  */
-export type ISessionOsCapabilities = Readonly<Record<string, unknown>>;
+export interface ISessionOsCapabilities {
+  readonly cwd: string;
+  readonly filesystem?: IHostFileSystem;
+  readonly process?: IHostProcessService;
+  readonly terminal?: IHostTerminalService;
+  readonly watch?: IHostFsWatchService;
+  readonly environment?: IHostEnvironment;
+}
 
 /* ------------------------------------------------------------------------ */
 /* Persistence context                                                       */
@@ -291,3 +336,14 @@ export interface ISessionRuntimeContext {
  * the emphasis is the held per-session concurrency/lifecycle token.
  */
 export type ISessionRuntimeLease = ISessionRuntimeContext;
+
+/**
+ * DI token under which the runtime-backed scope assembly seeds the lease
+ * itself into the Session scope, so Session/Agent services can reach the
+ * lease's artifact service, cold reader and capability set without any App
+ * container lookup (plan §1.5). The legacy session-lifecycle path never seeds
+ * it; consumers that must work on both paths resolve it through
+ * `ISessionCapabilities` instead of injecting the lease directly.
+ */
+export const ISessionRuntimeLease: ServiceIdentifier<ISessionRuntimeContext> =
+  createDecorator<ISessionRuntimeContext>('sessionRuntimeLease');

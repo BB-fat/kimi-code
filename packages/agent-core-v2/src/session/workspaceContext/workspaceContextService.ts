@@ -60,7 +60,11 @@ export class SessionWorkspaceContextService implements ISessionWorkspaceContext 
   }
 
   setWorkDir(workDir: string): void {
-    this._workDir = resolve(workDir);
+    // An empty workDir is a fact, not a relative reference: runtime-backed
+    // headless sessions have no workspace root, and `resolve('')` would
+    // silently turn it into the HOST process's cwd — discovery would then
+    // scan (and confinement would bless) a directory the session does not own.
+    this._workDir = workDir === '' ? '' : resolve(workDir);
   }
 
   setAdditionalDirs(dirs: readonly string[]): void {
@@ -72,6 +76,8 @@ export class SessionWorkspaceContextService implements ISessionWorkspaceContext 
   }
 
   isWithin(absPath: string): boolean {
+    // No workspace root (headless runtime): nothing is inside it.
+    if (this._workDir === '') return false;
     const target = resolve(absPath);
     if (target === this._workDir) return true;
     const rel = relative(this._workDir, target);

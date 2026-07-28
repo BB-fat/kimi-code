@@ -362,7 +362,11 @@ export class GrepTool implements IGrepTool {
   }
 }
 
-registerAgentToolService(IGrepTool, GrepTool, { name: 'Grep', domain: 'os/backends' });
+registerAgentToolService(IGrepTool, GrepTool, {
+  name: 'Grep',
+  domain: 'os/backends',
+  requires: ['os.process', 'os.filesystem'],
+});
 
 function formatSpawnError(error: unknown): string {
   return errorCode(error) === 'ENOENT'

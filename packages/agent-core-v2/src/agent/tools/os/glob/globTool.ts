@@ -325,7 +325,11 @@ export class GlobTool implements IGlobTool {
   }
 }
 
-registerAgentToolService(IGlobTool, GlobTool, { name: 'Glob', domain: 'os/backends' });
+registerAgentToolService(IGlobTool, GlobTool, {
+  name: 'Glob',
+  domain: 'os/backends',
+  requires: ['os.process', 'os.filesystem'],
+});
 
 function createRgProbe(processService: IHostProcessService): RgProbe {
   return {

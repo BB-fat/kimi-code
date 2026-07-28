@@ -28,6 +28,15 @@ export interface ScopedEntry {
   readonly descriptor: SyncDescriptor<unknown>;
   readonly domain: string;
   readonly activation: ScopeActivation;
+  /**
+   * Opaque capability strings a scope builder may require before including
+   * this entry. The DI layer treats them as inert labels: nothing here knows
+   * what a capability means, and scope builders that never apply a
+   * `serviceFilter` see every entry (the legacy behavior). Runtime-driven
+   * scope assembly (the multi-runtime session activation) filters entries
+   * whose `requires` are not projected by the session's runtime lease.
+   */
+  readonly requires: readonly string[];
 }
 
 const _scopedRegistry: ScopedEntry[] = [];
@@ -39,6 +48,7 @@ export function registerScopedService<T>(
   ctor: new (...args: any[]) => T,
   activation: ScopeActivation = ScopeActivation.OnScopeCreated,
   domain: string = 'unknown',
+  requires: readonly string[] = [],
 ): void {
   const descriptor = new SyncDescriptor<T>(ctor);
   _scopedRegistry.push({
@@ -47,6 +57,7 @@ export function registerScopedService<T>(
     descriptor: descriptor as SyncDescriptor<unknown>,
     domain,
     activation,
+    requires,
   });
 }
 
@@ -66,6 +77,14 @@ export type ScopeSeed = ReadonlyArray<
 export interface ScopeOptions {
   readonly id?: string;
   readonly extra?: ScopeSeed;
+  /**
+   * Optional admission filter over the scoped registry applied while building
+   * the scope's collection: entries returning `false` are excluded (and thus
+   * never activated nor resolvable at this scope — resolution falls through
+   * to the parent). Seeds in `extra` are unaffected. Scope builders that omit
+   * it get the full registry, exactly as before.
+   */
+  readonly serviceFilter?: (entry: ScopedEntry) => boolean;
 }
 
 export interface IScopeHandle<K extends LifecycleScope = LifecycleScope> {
@@ -79,12 +98,13 @@ export type IAppScopeHandle = IScopeHandle<LifecycleScope.App>;
 export type ISessionScopeHandle = IScopeHandle<LifecycleScope.Session>;
 export type IAgentScopeHandle = IScopeHandle<LifecycleScope.Agent>;
 
-function buildCollection(kind: LifecycleScope, extra?: ScopeSeed): ServiceCollection {
+function buildCollection(kind: LifecycleScope, options: ScopeOptions): ServiceCollection {
   const collection = new ServiceCollection();
+  const { extra, serviceFilter } = options;
   for (const entry of _scopedRegistry) {
-    if (entry.scope === kind) {
-      collection.set(entry.id, entry.descriptor);
-    }
+    if (entry.scope !== kind) continue;
+    if (serviceFilter !== undefined && !serviceFilter(entry)) continue;
+    collection.set(entry.id, entry.descriptor);
   }
   if (extra) {
     for (const [id, value] of extra) {
@@ -117,7 +137,7 @@ export function createScopedChildHandle(
   id: string,
   options: ScopeOptions = {},
 ): IScopeHandle {
-  const collection = buildCollection(kind, options.extra);
+  const collection = buildCollection(kind, options);
   const child = parent.createChild(collection);
   try {
     activateScopeServices(child, kind, collection);
@@ -153,7 +173,7 @@ export class Scope implements IDisposable {
 
   static createApp(options: ScopeOptions = {}): Scope {
     const kind = LifecycleScope.App;
-    const collection = buildCollection(kind, options.extra);
+    const collection = buildCollection(kind, options);
     const instantiation = new InstantiationService(collection, true);
     try {
       activateScopeServices(instantiation, kind, collection);
@@ -180,7 +200,7 @@ export class Scope implements IDisposable {
     if (this.children.has(id)) {
       throw new Error(`Scope '${this.id}' already has a child with id '${id}'`);
     }
-    const collection = buildCollection(kind, options.extra);
+    const collection = buildCollection(kind, options);
     const childInstantiation = this.instantiation.createChild(collection);
     try {
       activateScopeServices(childInstantiation, kind, collection);

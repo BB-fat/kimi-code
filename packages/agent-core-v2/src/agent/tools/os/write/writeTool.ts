@@ -141,4 +141,8 @@ export class WriteTool implements IWriteTool {
   }
 }
 
-registerAgentToolService(IWriteTool, WriteTool, { name: 'Write', domain: 'os/backends' });
+registerAgentToolService(IWriteTool, WriteTool, {
+  name: 'Write',
+  domain: 'os/backends',
+  requires: ['os.filesystem'],
+});

@@ -121,4 +121,5 @@ registerScopedService(
   SessionExternalHooksService,
   ScopeActivation.OnScopeCreated,
   'externalHooks',
+  ['os.process'],
 );

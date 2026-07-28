@@ -258,4 +258,5 @@ registerScopedService(
   SessionTerminalService,
   ScopeActivation.OnScopeCreated,
   'terminal',
+  ['os.terminal'],
 );

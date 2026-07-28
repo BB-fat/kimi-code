@@ -417,4 +417,5 @@ registerScopedService(
   AgentExternalHooksService,
   ScopeActivation.OnScopeCreated,
   'externalHooks',
+  ['os.process'],
 );

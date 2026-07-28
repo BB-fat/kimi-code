@@ -135,4 +135,5 @@ registerScopedService(
   SessionWorkspaceCommandService,
   ScopeActivation.OnScopeCreated,
   'workspaceCommand',
+  ['os.process'],
 );

@@ -20,6 +20,7 @@ import {
 } from '#/agent/toolRegistry/toolContribution';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { AgentToolRegistryService } from '#/agent/toolRegistry/toolRegistryService';
+import { ISessionCapabilities } from '#/session/sessionCapabilities/sessionCapabilities';
 import type { AgentTool, ToolExecution } from '#/tool/toolContract';
 
 class StubTool implements AgentTool {
@@ -79,6 +80,12 @@ describe('AgentToolActivationService', () => {
         });
         reg.definePartialInstance(IEventBus, {
           subscribe: () => toDisposable(() => {}),
+        });
+        reg.definePartialInstance(ISessionCapabilities, {
+          has: () => true,
+          admitsAll: () => true,
+          toolContributions: [],
+          agentServiceContributions: [],
         });
         reg.define(IAgentToolRegistryService, AgentToolRegistryService);
         reg.define(IAgentToolActivationService, AgentToolActivationService);

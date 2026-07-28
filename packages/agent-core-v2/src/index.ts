@@ -339,10 +339,32 @@ export * from '#/app/sessionExport/wire-scan';
 export * from '#/app/sessionExport/zip';
 export * from '#/app/sessionLegacy/sessionLegacy';
 export * from '#/app/sessionLegacy/sessionLegacyService';
+export * from '#/app/sessionHostRuntime/errors';
+export * from '#/app/sessionHostRuntime/sessionRef';
+export * from '#/app/sessionHostRuntime/sessionHostRuntime';
+export * from '#/app/sessionHostRuntime/sessionManager';
+export * from '#/app/sessionHostRuntime/sessionRuntimeContext';
+export * from '#/app/sessionHostRuntime/sessionHostRuntimeRegistry';
+export * from '#/app/sessionHostRuntime/sessionService';
+export * from '#/app/sessionHostRuntime/sessionTransferService';
+// The multi-runtime contracts reuse a few names the barrel already exported
+// from legacy domains; pin those names to their long-standing sources so the
+// barrel's existing meaning never changes. The runtime-contract variants
+// (`SessionListQuery`, `SessionCloseReason`, `SessionMetadata`) stay
+// importable from their domain modules.
+export type { SessionListQuery } from '#/app/sessionIndex/sessionIndex';
+export type { SessionCloseReason } from '#/app/sessionLifecycle/sessionLifecycle';
+export { SessionMetadata } from '#/session/sessionMetadata/sessionMetadataService';
+export * from '#/app/runtimeSession/runtimeSessionActivation';
+export * from '#/app/runtimeSession/runtimeSessionActivationService';
+export * from '#/app/runtimeSession/blobBackedStorage';
+export * from '#/app/runtimeSession/leaseOsProjection';
 export * from '#/session/interaction/interaction';
 export * from '#/session/interaction/interactionOps';
 export * from '#/session/interaction/interactionService';
 export * from '#/session/sessionContext/sessionContext';
+export * from '#/session/sessionCapabilities/sessionCapabilities';
+export * from '#/session/sessionCapabilities/sessionCapabilitiesService';
 
 import '#/session/approval/approval';
 import '#/session/approval/approvalService';

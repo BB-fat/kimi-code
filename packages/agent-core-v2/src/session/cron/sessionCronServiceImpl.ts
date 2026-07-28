@@ -721,4 +721,8 @@ registerScopedService(
   SessionCronServiceImpl,
   ScopeActivation.OnScopeCreated,
   'cron',
+  // TODO(multi-runtime M8): cron persistence is the App-scope host-fs store
+  // (`cron/<workspaceId>/`); move it to the lease's typed Stores (plan §7.3)
+  // and drop this gate.
+  ['os.filesystem'],
 );

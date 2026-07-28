@@ -176,7 +176,12 @@ export class ExitPlanModeTool implements IExitPlanModeTool {
   }
 }
 
-registerAgentToolService(IExitPlanModeTool, ExitPlanModeTool, { name: 'ExitPlanMode', domain: 'plan' });
+registerAgentToolService(IExitPlanModeTool, ExitPlanModeTool, {
+  name: 'ExitPlanMode',
+  domain: 'plan',
+  // See EnterPlanMode: the plan working document is a legacy host file.
+  requires: ['session.host_files'],
+});
 
 function formatAutoApprovedPlanForOutput(plan: string, path: string | undefined): string {
   const savedTo = path !== undefined ? `Plan saved to: ${path}\n\n` : '';

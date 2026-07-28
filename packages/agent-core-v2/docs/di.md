@@ -253,7 +253,7 @@ registerScopedService(
 
 两种模式共用同一套依赖图，循环依赖都会抛 `CyclicDependencyError`。
 
-完整签名是 `registerScopedService(scope, id, ctor, activation = ScopeActivation.OnScopeCreated, domain?)`：第四个参数是 activation，第五个参数是 domain。
+完整签名是 `registerScopedService(scope, id, ctor, activation = ScopeActivation.OnScopeCreated, domain?, requires? = [])`：第四个参数是 activation，第五个参数是 domain，第六个参数是该注册项需要的 runtime capability 字符串。`requires` 对不设置 `ScopeOptions.serviceFilter` 的 Scope 构建完全惰性（旧路径行为不变）；runtime 驱动的激活路径（`app/runtimeSession`）会用它按 lease 的 capability set 过滤 collection。
 
 ---
 

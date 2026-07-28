@@ -49,6 +49,13 @@ export interface AgentToolContributionOptions {
   readonly disclosure?: ToolDisclosure;
   readonly when?: (accessor: ServicesAccessor) => boolean;
   readonly domain?: string;
+  /**
+   * Runtime capabilities the tool needs (plan §7.4). Inert on the legacy
+   * session-lifecycle path (its capability view admits everything); the
+   * runtime-backed activation excludes the tool from the scope and skips its
+   * activation when the session's runtime does not project every entry.
+   */
+  readonly requires?: readonly string[];
 }
 
 export interface AgentToolContribution<T extends AnyAgentTool = AnyAgentTool> {
@@ -70,6 +77,7 @@ export function registerAgentToolService<T extends AnyAgentTool>(
     ctor,
     ScopeActivation.OnDemand,
     options.domain ?? 'unknown',
+    options.requires ?? [],
   );
   _agentToolContributions.push({ id, ctor, options });
 }

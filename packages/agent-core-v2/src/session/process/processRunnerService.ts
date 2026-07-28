@@ -58,4 +58,5 @@ registerScopedService(
   SessionProcessRunner,
   ScopeActivation.OnScopeCreated,
   'process',
+  ['os.process'],
 );

@@ -16,6 +16,8 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
+import { createDecorator } from '#/_base/di/instantiation';
+import { SyncDescriptor } from '#/_base/di/descriptors';
 import type { ISessionRuntimeContext } from '#/app/sessionHostRuntime/sessionRuntimeContext';
 import type { SessionExportEntry } from '#/app/sessionHostRuntime/sessionManager';
 import { jsonDocumentCodec } from '#/persistence/backends/node-fs/atomicDocumentStore';
@@ -99,9 +101,10 @@ describe('multi-session hosting over one shared connection (plan §9.1)', () => 
       code: 'session.lease_conflict',
     });
 
-    // Every lease points at the SAME shared connection identity.
-    expect(leaseA.os?.['remoteConnectionId']).toBe(runtime.connection.id);
-    expect(leaseB.os?.['remoteConnectionId']).toBe(runtime.connection.id);
+    // Every lease points at the SAME shared connection identity (the fake
+    // projects it as `os.cwd`).
+    expect(leaseA.os?.cwd).toBe(runtime.connection.id);
+    expect(leaseB.os?.cwd).toBe(runtime.connection.id);
 
     // Closing one session leaves the other fully usable; closing the LAST one
     // still keeps the runtime online (plan §5.4).
@@ -181,18 +184,28 @@ describe('multi-session hosting over one shared connection (plan §9.1)', () => 
 
 describe('capability-gated contributions (plan §4.4/§7.4)', () => {
   it('excludes contributions whose required capability the runtime does not project', async () => {
+    class MarkerService {
+      declare readonly _serviceBrand: undefined;
+    }
+    const svcFs = createDecorator<MarkerService>('svc-fs');
+    const svcTerminal = createDecorator<MarkerService>('svc-terminal');
+    const svcNone = createDecorator<MarkerService>('svc-none');
+    const svcAgentProc = createDecorator<MarkerService>('agent-proc');
+    const toolRead = createDecorator<MarkerService>('tool-read');
+    const toolPty = createDecorator<MarkerService>('tool-pty');
+    const marker = new SyncDescriptor(MarkerService);
     const provider = new FakeRemoteWorkspaceProvider({
       capabilities: new Set(['os.filesystem', 'session.cold_read']),
       contributions: {
         sessionServices: [
-          { id: 'svc-fs', requires: ['os.filesystem'] },
-          { id: 'svc-terminal', requires: ['os.terminal'] },
-          { id: 'svc-none', requires: [] },
+          { id: svcFs, descriptor: marker, requires: ['os.filesystem'] },
+          { id: svcTerminal, descriptor: marker, requires: ['os.terminal'] },
+          { id: svcNone, descriptor: marker, requires: [] },
         ],
-        agentServices: [{ id: 'agent-proc', requires: ['os.process'] }],
+        agentServices: [{ id: svcAgentProc, descriptor: marker, requires: ['os.process'] }],
         tools: [
-          { name: 'read_file', requires: ['os.filesystem'] },
-          { name: 'run_pty', requires: ['os.terminal'] },
+          { id: toolRead, name: 'read_file', descriptor: marker, requires: ['os.filesystem'] },
+          { id: toolPty, name: 'run_pty', descriptor: marker, requires: ['os.terminal'] },
         ],
       },
     });
@@ -200,7 +213,7 @@ describe('capability-gated contributions (plan §4.4/§7.4)', () => {
     await runtime.sessions.create({ sessionId: 'gated' });
     const lease = await openLease(runtime, 'gated');
 
-    expect(lease.contributions.sessionServices.map((s) => s.id)).toEqual(['svc-fs', 'svc-none']);
+    expect(lease.contributions.sessionServices.map((s) => s.id)).toEqual([svcFs, svcNone]);
     expect(lease.contributions.agentServices).toEqual([]);
     expect(lease.contributions.tools.map((t) => t.name)).toEqual(['read_file']);
     expect(lease.capabilities.has('os.terminal')).toBe(false);

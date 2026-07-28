@@ -190,7 +190,7 @@ import {
 
 const TEST_HOME_DIR = '/home/test';
 
-const MOCK_PROVIDER = {
+export const MOCK_PROVIDER = {
   type: 'kimi',
   apiKey: 'test-key',
   baseUrl: 'https://api.example.test/v1',
@@ -2330,7 +2330,7 @@ function configStateSnapshot(ctx: AgentTestContext): ResumeStateSnapshot['config
   };
 }
 
-function emptyConfig(): KimiConfig {
+export function emptyConfig(): KimiConfig {
   return configWithProvider({ providers: {} }, MOCK_PROVIDER, undefined);
 }
 
@@ -2350,7 +2350,7 @@ function applyTestAgentOptionsToConfig(config: KimiConfig, options: TestAgentOpt
   };
 }
 
-function configService(readConfig: () => KimiConfig): IConfigService {
+export function configService(readConfig: () => KimiConfig): IConfigService {
   // Mirror the production overlay chain: the secondary-model recipe
   // materializes its derived entry into the effective models view, so
   // spawn-time binding resolves it exactly as in production. Top-level
@@ -2620,7 +2620,7 @@ function createLogService(logger: Logger | undefined, bindings: LogContext = {})
  * sampling / thinking / budget) are forwarded into the `GenerateFn` so tests
  * assert them as request parameters instead of morph-era provider state.
  */
-function createGenerateBackedProtocolRegistry(generate: GenerateFn): IProtocolAdapterRegistry {
+export function createGenerateBackedProtocolRegistry(generate: GenerateFn): IProtocolAdapterRegistry {
   const real = new ProtocolAdapterRegistry();
   return {
     _serviceBrand: undefined,

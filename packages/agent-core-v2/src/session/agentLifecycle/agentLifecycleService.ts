@@ -21,7 +21,7 @@
  * service awaits during creation.
  */
 
-import { IInstantiationService } from '#/_base/di/instantiation';
+import { IInstantiationService, type ServiceIdentifier } from '#/_base/di/instantiation';
 import { Disposable, type IDisposable } from '#/_base/di/lifecycle';
 import { Emitter } from '#/_base/event';
 import {
@@ -31,13 +31,14 @@ import {
   ScopeActivation,
   registerScopedService,
 } from '#/_base/di/scope';
-import { IBootstrapService } from '#/app/bootstrap/bootstrap';
+import { join } from 'pathe';
 import { IConfigService } from '#/app/config/config';
 import { IEventBus } from '#/app/event/eventBus';
 import { DEFAULT_PERMISSION_MODE_SECTION } from '#/agent/permissionMode/configSection';
 import { PermissionModeConfiguredModel } from '#/agent/permissionMode/permissionModeOps';
 import type { PermissionMode } from '#/agent/permissionPolicy/types';
 import { IAgentTaskService } from '#/agent/task/task';
+import { ISessionCapabilities } from '#/session/sessionCapabilities/sessionCapabilities';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 import { ISessionMcpService } from '#/session/mcp/sessionMcp';
@@ -83,7 +84,7 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
     @IInstantiationService private readonly instantiation: IInstantiationService,
     @ISessionContext private readonly ctx: ISessionContext,
     @ISessionMetadata private readonly sessionMetadata: ISessionMetadata,
-    @IBootstrapService private readonly bootstrap: IBootstrapService,
+    @ISessionCapabilities private readonly sessionCapabilities: ISessionCapabilities,
     @IConfigService private readonly config: IConfigService,
     @ISessionMcpService private readonly sessionMcp: ISessionMcpService,
     @ISessionInteractionService private readonly interaction: ISessionInteractionService,
@@ -152,16 +153,30 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
 
   private async doCreate(agentId: string, opts: CreateAgentOptions): Promise<IAgentScopeHandle> {
     const mcpReady = this.sessionMcp.ensureMcpReady();
-    const agentHomedir = this.bootstrap.agentHomedir(
-      this.ctx.workspaceId,
-      this.ctx.sessionId,
-      agentId,
-    );
-    const agentScope = this.bootstrap.agentScope(
-      this.ctx.workspaceId,
-      this.ctx.sessionId,
-      agentId,
-    );
+    // The agent's persistence scope composes off the session's — identical to
+    // the legacy bootstrap.agentScope(workspaceId, sessionId, agentId), but
+    // without the App-level path builder, so runtime-backed sessions (whose
+    // scope comes from the lease namespace) share this code path.
+    const agentScope = this.ctx.scope(`agents/${agentId}`);
+    // The physical per-agent directory only exists on the legacy local path;
+    // it is retained in session metadata for older v1 readers (current
+    // readers derive it from the scope). Runtime-backed sessions have no host
+    // directory (plan §7.2) and simply omit the field.
+    const agentHomedir =
+      this.ctx.sessionDir === '' ? undefined : join(this.ctx.sessionDir, 'agents', agentId);
+    const agentSeeds: Array<readonly [ServiceIdentifier<unknown>, unknown]> = [
+      [IAgentScopeContext, makeAgentScopeContext({ agentId, agentScope })],
+      [ITelemetryService, this.telemetry.withContext({ agent_id: agentId })],
+    ];
+    // Runtime-contributed agent services and tools (capability-filtered by
+    // the seeded capability view) merge into every Agent collection, so
+    // `AgentToolActivationService` can resolve them like builtin tools.
+    for (const contribution of this.sessionCapabilities.agentServiceContributions) {
+      agentSeeds.push([contribution.id, contribution.descriptor]);
+    }
+    for (const contribution of this.sessionCapabilities.toolContributions) {
+      agentSeeds.push([contribution.id, contribution.descriptor]);
+    }
     const handle = createScopedChildHandle(
       this.instantiation,
       LifecycleScope.Agent,
@@ -171,10 +186,11 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
       // (wire, blob) or resolves it through the scope tree (the
       // session's shared MCP manager via `ISessionMcpService`).
       {
-        extra: [
-          [IAgentScopeContext, makeAgentScopeContext({ agentId, agentScope })],
-          [ITelemetryService, this.telemetry.withContext({ agent_id: agentId })],
-        ],
+        extra: agentSeeds,
+        // Propagate the session's capability gating into the Agent
+        // collection: entries whose `requires` the session's runtime does not
+        // project are excluded (the legacy allow-all view keeps everything).
+        serviceFilter: (entry) => this.sessionCapabilities.admitsAll(entry.requires),
       },
     ) as IAgentScopeHandle;
     this.handles.set(agentId, handle);

@@ -210,4 +210,5 @@ registerScopedService(
   CronCreateTool,
   ScopeActivation.OnScopeCreated,
   'cron',
+  ['os.filesystem'],
 );

@@ -91,8 +91,14 @@ export class SessionMcpService extends Disposable implements ISessionMcpService 
     manager: McpConnectionManager,
     callerServers?: Readonly<Record<string, McpServerConfig>>,
   ): Promise<void> {
+    // File-based MCP config discovery only makes sense with a workspace root:
+    // headless runtime-backed sessions have none, and resolving relative to
+    // the host process cwd would read (and try to connect) a project the
+    // session does not own. Caller-supplied and plugin servers still merge.
     const [base, pluginServers] = await Promise.all([
-      resolveSessionMcpConfig({ cwd: this.workspace.workDir, homeDir: this.bootstrap.homeDir }),
+      this.workspace.workDir === ''
+        ? Promise.resolve(undefined)
+        : resolveSessionMcpConfig({ cwd: this.workspace.workDir, homeDir: this.bootstrap.homeDir }),
       this.plugins.enabledMcpServers(),
     ]);
     const withCaller = mergeCallerMcpServers(base, callerServers);

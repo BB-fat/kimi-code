@@ -446,6 +446,7 @@ export class LocalSessionLease implements ISessionRuntimeContext, LocalLeaseHand
     runtimeId: string,
     capabilities: ReadonlySet<SessionRuntimeCapability>,
     contributions: SessionRuntimeContributions,
+    osHandles: Omit<ISessionOsCapabilities, 'cwd'>,
     private readonly onClosed: (lease: LocalSessionLease) => void,
   ) {
     this.ref = { runtimeId, sessionId: state.meta.id };
@@ -462,10 +463,10 @@ export class LocalSessionLease implements ISessionRuntimeContext, LocalLeaseHand
     this.coldReader = new LocalSessionColdReader(storage, workspaceId, this.ref);
     this.capabilities = capabilities;
     this.contributions = contributions;
-    // The workspace root is the one host fact session-scoped OS capabilities
-    // are built around; the concrete fs/process/terminal/watch handles land
-    // with the OS-contribution milestone (M4).
-    this.os = { cwd };
+    // The workspace root plus the runtime's shared node-local host services
+    // (plan §7.4): runtime-level resources, shared by every session lease and
+    // never disposed per session.
+    this.os = { cwd, ...osHandles };
   }
 
   get closedLease(): boolean {

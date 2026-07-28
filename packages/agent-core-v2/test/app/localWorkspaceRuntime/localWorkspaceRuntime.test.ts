@@ -448,7 +448,14 @@ describe('open/resume child lease', () => {
     expect(lease.coldReader).toBeDefined();
     expect([...lease.capabilities].toSorted()).toEqual([...env.runtime.capabilities()].toSorted());
     expect(lease.contributions).toEqual({ sessionServices: [], agentServices: [], tools: [] });
-    expect(lease.os).toEqual({ cwd: env.cwd });
+    // The lease projects the workspace root plus the runtime's shared
+    // node-local OS handles (plan §7.4).
+    expect(lease.os?.cwd).toBe(env.cwd);
+    expect(lease.os?.filesystem).toBeDefined();
+    expect(lease.os?.process).toBeDefined();
+    expect(lease.os?.terminal).toBeDefined();
+    expect(lease.os?.watch).toBeDefined();
+    expect(lease.os?.environment).toBeDefined();
     await lease.close('explicit');
   });
 

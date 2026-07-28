@@ -284,4 +284,5 @@ registerScopedService(
   SessionFsWatchService,
   ScopeActivation.OnScopeCreated,
   'sessionFsWatch',
+  ['os.watch'],
 );

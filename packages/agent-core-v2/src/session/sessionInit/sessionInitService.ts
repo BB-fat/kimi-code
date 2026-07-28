@@ -145,4 +145,5 @@ registerScopedService(
   SessionInitService,
   ScopeActivation.OnScopeCreated,
   'session-init',
+  ['os.filesystem'],
 );

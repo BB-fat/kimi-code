@@ -285,4 +285,5 @@ registerScopedService(
   SessionSwarmService,
   ScopeActivation.OnScopeCreated,
   'sessionSwarm',
+  ['os.process'],
 );

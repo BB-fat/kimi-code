@@ -10,8 +10,9 @@
  *     backend" (the standalone memory session manager stands in for the
  *     remote store); sessions share the connection identity while their
  *     namespaces, locks and state stay isolated;
- *   - OS capabilities surface as an opaque remote handle on the lease (`os`),
- *     carrying the shared connection id every session lease points at;
+ *   - OS capabilities surface through the lease's `os` handles — the fake
+ *     projects the shared connection id as `os.cwd` (its only OS fact), so
+ *     every session lease observably points at the same connection identity;
  *   - contributions are gated at lease-assembly time: a contribution whose
  *     `requires` names a capability the runtime does not project is excluded
  *     before the Session scope would ever see it (plan §4.4/§7.4);
@@ -212,7 +213,7 @@ export class FakeRemoteWorkspaceRuntime implements IWorkspaceRuntime {
         agentServices: gate(context.contributions.agentServices),
         tools: gate(context.contributions.tools),
       },
-      os: { remoteConnectionId: this.connection.id },
+      os: { cwd: this.connection.id },
       get closedLease() {
         return (context as { readonly closedLease?: boolean }).closedLease ?? false;
       },

@@ -1032,4 +1032,5 @@ registerScopedService(
   SessionFsService,
   ScopeActivation.OnScopeCreated,
   'sessionFs',
+  ['os.filesystem'],
 );

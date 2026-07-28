@@ -62,7 +62,14 @@ export class EnterPlanModeTool implements IEnterPlanModeTool {
   }
 }
 
-registerAgentToolService(IEnterPlanModeTool, EnterPlanModeTool, { name: 'EnterPlanMode', domain: 'plan' });
+registerAgentToolService(IEnterPlanModeTool, EnterPlanModeTool, {
+  name: 'EnterPlanMode',
+  domain: 'plan',
+  // The plan working document is a host file in the legacy session directory
+  // (plan §7.5); runtime leases do not project one until M8 re-roots plan
+  // files in lease artifacts.
+  requires: ['session.host_files'],
+});
 
 function enteredPlanModeMessage(planPath: string | null): string {
   if (planPath === null) {

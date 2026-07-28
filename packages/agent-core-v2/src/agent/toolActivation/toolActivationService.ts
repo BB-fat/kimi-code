@@ -23,13 +23,17 @@
  */
 
 import { Disposable } from '#/_base/di/lifecycle';
-import { IInstantiationService } from '#/_base/di/instantiation';
+import { IInstantiationService, type ServiceIdentifier } from '#/_base/di/instantiation';
 import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { IEventBus } from '#/app/event/eventBus';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { isToolActive } from '#/agent/toolPolicy/evaluate';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
-import { getAgentToolContributions } from '#/agent/toolRegistry/toolContribution';
+import {
+  getAgentToolContributions,
+  type AnyAgentTool,
+} from '#/agent/toolRegistry/toolContribution';
+import { ISessionCapabilities } from '#/session/sessionCapabilities/sessionCapabilities';
 
 import { IAgentToolActivationService } from './toolActivation';
 
@@ -40,6 +44,7 @@ export class AgentToolActivationService extends Disposable implements IAgentTool
     @IInstantiationService private readonly instantiationService: IInstantiationService,
     @IAgentToolRegistryService private readonly toolRegistry: IAgentToolRegistryService,
     @IAgentProfileService private readonly profile: IAgentProfileService,
+    @ISessionCapabilities private readonly sessionCapabilities: ISessionCapabilities,
     @IEventBus eventBus: IEventBus,
   ) {
     super();
@@ -58,6 +63,11 @@ export class AgentToolActivationService extends Disposable implements IAgentTool
         const source = options.source ?? 'builtin';
         if (this.toolRegistry.resolve(options.name) !== undefined) continue;
         if (!isToolActive(policy, options.name, source)) continue;
+        // Capability gating (plan §7.4): the session's runtime must project
+        // every capability the tool requires — otherwise the tool is absent
+        // from this session (its DI registration was filtered out of the
+        // scope too, so resolving it here would throw).
+        if (!this.sessionCapabilities.admitsAll(options.requires ?? [])) continue;
         if (options.when !== undefined && !options.when(accessor)) continue;
         const tool = accessor.get(id);
         this._register(
@@ -66,6 +76,16 @@ export class AgentToolActivationService extends Disposable implements IAgentTool
             disclosure: options.disclosure,
           }),
         );
+      }
+      // Runtime-contributed tools ride the same policy filter; their
+      // descriptors were merged into the Agent collection by
+      // `AgentLifecycleService` from the session's capability view.
+      for (const contribution of this.sessionCapabilities.toolContributions) {
+        if (this.toolRegistry.resolve(contribution.name) !== undefined) continue;
+        if (!isToolActive(policy, contribution.name, 'builtin')) continue;
+        if (!this.sessionCapabilities.admitsAll(contribution.requires)) continue;
+        const tool = accessor.get(contribution.id as ServiceIdentifier<AnyAgentTool>);
+        this._register(this.toolRegistry.register(tool, { source: 'builtin' }));
       }
     });
     return Promise.resolve();

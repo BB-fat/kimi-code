@@ -268,6 +268,7 @@ export class StandaloneMemorySessionManager implements ISessionManager {
         status: 'active',
         metadata: {
           ...structuredClone(source.current.metadata),
+          forkedFrom: sourceSessionId,
           ...(input.metadata === undefined ? {} : structuredClone(input.metadata)),
         },
         revision: '1',
@@ -286,8 +287,51 @@ export class StandaloneMemorySessionManager implements ISessionManager {
       forked.namespaces.add(targetNamespace);
       await this.copyNamespace(sourceNamespace, targetNamespace);
     }
+    await this.reanchorStateDocument(sourceSessionId, sessionId, input);
     this.catalog.set(sessionId, forked);
     return cloneDescriptor(forked.current);
+  }
+
+  /**
+   * The same fork rewrite the local runtime performs (plan §5.8): the copied
+   * engine metadata document (`state.json` in the session namespace — the
+   * engine's metadata key) is re-anchored to the fork — new id, `forkedFrom`
+   * provenance, fresh timestamps, unarchived, goal state never crossing
+   * forks. Without it the fork would resume with the SOURCE session's
+   * identity.
+   */
+  private async reanchorStateDocument(
+    sourceSessionId: string,
+    sessionId: string,
+    input: SameRuntimeForkInput,
+  ): Promise<void> {
+    const targetNamespace = sessionNamespaceOf(sessionId);
+    const stateBytes = await this.backend.documentBytes.read(targetNamespace, ENGINE_STATE_KEY);
+    if (stateBytes === undefined) return;
+    const meta = JSON.parse(textDecoder.decode(stateBytes)) as Record<string, unknown>;
+    const titleFromInput = readMetadataString(input.metadata, 'title');
+    const custom = forkCustomMetadata(
+      readMetadataRecord(meta['custom']),
+      readMetadataRecord(input.metadata?.['custom']),
+    );
+    const now = Date.now();
+    const reanchored: Record<string, unknown> = {
+      ...meta,
+      id: sessionId,
+      forkedFrom: sourceSessionId,
+      createdAt: now,
+      updatedAt: now,
+      archived: false,
+      title: titleFromInput ?? `Fork: ${typeof meta['title'] === 'string' ? meta['title'] : sourceSessionId}`,
+      isCustomTitle: titleFromInput !== undefined ? true : meta['isCustomTitle'] === true,
+      custom,
+    };
+    await this.backend.documentBytes.write(
+      targetNamespace,
+      ENGINE_STATE_KEY,
+      textEncoder.encode(JSON.stringify(reanchored)),
+      { atomic: true },
+    );
   }
 
   async coldRead(sessionId: string): Promise<ISessionColdReader> {
@@ -450,4 +494,43 @@ function assertValidSessionId(sessionId: string): void {
       { details: { sessionId } },
     );
   }
+}
+
+/** The engine's session-metadata document key inside the session namespace. */
+const ENGINE_STATE_KEY = 'state.json';
+
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
+function readMetadataString(
+  metadata: SameRuntimeForkInput['metadata'],
+  key: string,
+): string | undefined {
+  const value = metadata?.[key];
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function readMetadataRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/**
+ * Merge custom metadata for a fork, dropping the `goal` key on both sides —
+ * the same rule the engine's legacy fork and the local runtime apply (goal
+ * state never crosses forks).
+ */
+function forkCustomMetadata(
+  source: Record<string, unknown> | undefined,
+  input: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  const merged = { ...withoutGoal(source), ...withoutGoal(input) };
+  return Object.keys(merged).length === 0 ? undefined : merged;
+}
+
+function withoutGoal(value: Record<string, unknown> | undefined): Record<string, unknown> {
+  if (value === undefined) return {};
+  const { goal: _drop, ...rest } = value as { goal?: unknown; [key: string]: unknown };
+  return rest;
 }

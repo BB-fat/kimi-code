@@ -30,7 +30,16 @@ export type SessionRuntimeStatus = 'online' | 'offline' | 'degraded';
  * is built, and explicitly calling an absent capability surfaces
  * `session.capability_unavailable`.
  *
- * M0 baseline set — concrete runtimes may refine/extend it as they land.
+ * The `os.*` family covers the workspace OS handles of
+ * `ISessionOsCapabilities` (plan §7.4); the `session.*` family covers
+ * runtime-provided session data planes.
+ *
+ * `session.host_files` is TRANSITIONAL (M4): it marks contributions that
+ * still need the legacy per-session host directory (`logs/`, plan working
+ * documents, task output files, media originals). No M4 runtime projects it
+ * through a lease, so those contributions stay off the runtime-backed
+ * activation path; M8 replaces them with lease artifact/persistence access
+ * (plan §7.5) and drops this capability.
  */
 export type SessionRuntimeCapability =
   | 'os.filesystem'
@@ -38,6 +47,7 @@ export type SessionRuntimeCapability =
   | 'os.terminal'
   | 'os.watch'
   | 'os.stdio'
+  | 'session.host_files'
   | 'artifact.model_read'
   | 'session.cold_read'
   | 'session.export'

@@ -138,4 +138,5 @@ registerScopedService(
   AgentMediaToolsRegistrar,
   ScopeActivation.OnScopeCreated,
   'media',
+  ['os.filesystem'],
 );

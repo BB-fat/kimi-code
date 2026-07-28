@@ -114,4 +114,8 @@ export class EditTool implements IEditTool {
   }
 }
 
-registerAgentToolService(IEditTool, EditTool, { name: 'Edit', domain: 'edit' });
+registerAgentToolService(IEditTool, EditTool, {
+  name: 'Edit',
+  domain: 'edit',
+  requires: ['os.filesystem'],
+});

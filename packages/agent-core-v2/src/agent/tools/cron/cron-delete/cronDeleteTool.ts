@@ -106,4 +106,5 @@ registerScopedService(
   CronDeleteTool,
   ScopeActivation.OnScopeCreated,
   'cron',
+  ['os.filesystem'],
 );

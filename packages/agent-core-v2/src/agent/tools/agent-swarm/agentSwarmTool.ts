@@ -214,7 +214,11 @@ export class AgentSwarmTool implements IAgentSwarmTool {
   }
 }
 
-registerAgentToolService(IAgentSwarmTool, AgentSwarmTool, { name: 'AgentSwarm', domain: 'swarm' });
+registerAgentToolService(IAgentSwarmTool, AgentSwarmTool, {
+  name: 'AgentSwarm',
+  domain: 'swarm',
+  requires: ['os.process'],
+});
 
 async function createAgentSwarmSpecs(
   args: AgentSwarmToolInput,

@@ -46,6 +46,7 @@ import { IPluginService } from '#/app/plugin/plugin';
 import { IAppendLogStore } from '#/persistence/interface/appendLogStore';
 import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import { ISessionCapabilities } from '#/session/sessionCapabilities/sessionCapabilities';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 import { createWireMetadataRecord, type WireRecord } from '#/wire/record';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
@@ -176,6 +177,15 @@ describe('AgentLifecycleService', () => {
       workspaceId: 'ws_test',
       sessionDir: '/tmp/kimi-agentLifecycle-test',
       metaScope: 'test',
+      cwd: '/tmp/kimi-agentLifecycle-work',
+      scope: (subKey?: string) => (subKey === undefined || subKey === '' ? 'test' : `test/${subKey}`),
+    });
+    ix.stub(ISessionCapabilities, {
+      _serviceBrand: undefined,
+      has: () => true,
+      admitsAll: () => true,
+      toolContributions: [],
+      agentServiceContributions: [],
     });
     ix.stub(ISessionMetadata, {
       _serviceBrand: undefined,
@@ -498,7 +508,7 @@ describe('AgentLifecycleService', () => {
 
     expect(child.id).toBe('child');
     expect(registerAgent).toHaveBeenCalledWith('child', {
-      homedir: '/tmp/kimi-agentLifecycle-home/sessions/ws_test/sess_test/agents/child',
+      homedir: '/tmp/kimi-agentLifecycle-test/agents/child',
       type: 'sub',
       parentAgentId: 'main',
       forkedFrom: 'main',

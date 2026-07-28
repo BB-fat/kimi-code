@@ -58,6 +58,7 @@ import type {
 } from '#/app/sessionHostRuntime/sessionManager';
 import type {
   ISessionColdReader,
+  ISessionOsCapabilities,
   SessionDescriptor,
   SessionRuntimeContributions,
 } from '#/app/sessionHostRuntime/sessionRuntimeContext';
@@ -67,6 +68,11 @@ import type {
 } from '#/app/workspace/workspaceRuntime';
 import { CRON_SESSION_TAG, type CronTask } from '#/app/cron/cronTask';
 import { ErrorCodes } from '#/errors';
+import { HostEnvironmentService } from '#/os/backends/node-local/hostEnvironmentService';
+import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
+import { HostFsWatchService } from '#/os/backends/node-local/hostFsWatchService';
+import { HostProcessService } from '#/os/backends/node-local/hostProcessService';
+import { HostTerminalService } from '#/os/backends/node-local/hostTerminalService';
 import { AppendLogStore } from '#/persistence/backends/node-fs/appendLogStore';
 import { jsonDocumentCodec } from '#/persistence/backends/node-fs/atomicDocumentStore';
 import { FileStorageService } from '#/persistence/backends/node-fs/fileStorageService';
@@ -150,6 +156,27 @@ export interface LocalWorkspaceRuntimeOptions {
   readonly workspaceCapabilities?: ReadonlySet<WorkspaceCapability>;
   /** Contributions projected into leases at open time; defaults to none (M4 wires real ones). */
   readonly contributions?: SessionRuntimeContributions;
+  /**
+   * OS capability handles projected onto every session lease (plan §7.4);
+   * each missing handle defaults to the node-local backend. Composition that
+   * already holds the App-scope host services should pass them in so the
+   * runtime shares (not duplicates) the host connections; handles are
+   * runtime-level shared resources and are never disposed per session.
+   */
+  readonly os?: Partial<LocalOsHandles>;
+}
+
+/** The OS handle set the local runtime projects (everything but the per-workspace `cwd`). */
+export type LocalOsHandles = Omit<ISessionOsCapabilities, 'cwd'>;
+
+function defaultLocalOsHandles(overrides?: Partial<LocalOsHandles>): LocalOsHandles {
+  return {
+    filesystem: overrides?.filesystem ?? new HostFileSystem(),
+    process: overrides?.process ?? new HostProcessService(),
+    terminal: overrides?.terminal ?? new HostTerminalService(),
+    watch: overrides?.watch ?? new HostFsWatchService(),
+    environment: overrides?.environment ?? new HostEnvironmentService(),
+  };
 }
 
 export class LocalWorkspaceRuntime implements IWorkspaceRuntime {
@@ -189,6 +216,7 @@ export class LocalWorkspaceRuntime implements IWorkspaceRuntime {
       },
       this.caps,
       options.contributions ?? NO_CONTRIBUTIONS,
+      defaultLocalOsHandles(options.os),
     );
   }
 
@@ -221,6 +249,7 @@ export class LocalWorkspaceSessionManager implements ISessionManager {
     private readonly setStatus: (status: SessionRuntimeStatus) => void,
     private readonly caps: ReadonlySet<SessionRuntimeCapability>,
     private readonly contributions: SessionRuntimeContributions,
+    private readonly osHandles: LocalOsHandles,
   ) {
     this.indexLogs = new AppendLogStore(storage);
   }
@@ -502,6 +531,7 @@ export class LocalWorkspaceSessionManager implements ISessionManager {
       this.runtimeId,
       this.caps,
       this.contributions,
+      this.osHandles,
       (closed) => {
         if (this.leases.get(sessionId) === closed) this.leases.delete(sessionId);
       },

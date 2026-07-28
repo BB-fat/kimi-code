@@ -165,6 +165,12 @@ const DOMAIN_LAYER = new Map([
   // also carries the Rule 4 bans that keep it workspace-free and fs-free.
   ['standaloneMemoryRuntime', 4],
   // L3 — registries & capabilities
+  // `sessionCapabilities` is the Session-scope view of the runtime capability
+  // set a session was activated with (plan §7.4): the default registration
+  // admits everything (the legacy path's behavior), the runtime-backed
+  // activation seeds the lease's view. It only reads the L2 host-runtime
+  // contracts, so it sits in L3 beside the other registries/capabilities.
+  ['sessionCapabilities', 3],
   ['tool', 3],
   ['skill', 3],
   ['skillCatalog', 3],
@@ -244,6 +250,14 @@ const DOMAIN_LAYER = new Map([
   ['btw', 5],
   // L6 — coordination
   ['agentLifecycle', 6],
+  // `runtimeSession` (M4, plan §1.5/§7.2) is the runtime-backed Session scope
+  // assembly path: it turns an `ISessionRuntimeContext` lease into a live
+  // Session scope — persistence/artifact/cold/OS/capability seeds from the
+  // lease, the DI collection filtered by the lease's capability set. It
+  // coordinates sessionMetadata/agentLifecycle and the session catalogs, so
+  // it sits in L6 beside sessionLifecycle; the Rule 4 bans keep it off the
+  // Workspace domain, the bootstrap path builders and every backend.
+  ['runtimeSession', 6],
   // `subagent` drives turns on other agents (`run`) and hosts the
   // requester-side run hook/event surface (`SubagentStart`/`SubagentStop`).
   // Its highest real dependency is `agentLifecycle` (target lookup), so it
@@ -390,12 +404,11 @@ const KOSONG_BANNED_SDK_PACKAGES = ['@anthropic-ai/sdk', '@google/genai', 'opena
  * dynamic and re-export imports alike (the shared IMPORT_RE).
  */
 const DOMAIN_IMPORT_BANS = new Map([
-  // TODO(multi-runtime): as the refactor milestones land, extend this table
-  // beyond `sessionHostRuntime` — M4/M5 must ban the domains that import
+  // TODO(multi-runtime M8): as the refactor milestones land, extend this table
+  // to every remaining Session Core domain — M4 added the runtime-backed
+  // activation path (`runtimeSession`), but the domains that still import
   // `#/app/workspace/**` today (e.g. `sessionLifecycle`, `sessionExport`)
-  // once their workspace coupling is removed, and M8 should cover every
-  // remaining Session Core domain. Do not leave this skeleton guarding only
-  // the M0 contracts.
+  // stay exempt until their workspace coupling is removed.
   //
   // TODO(multi-runtime M8): the legacy layout helpers (`sessionLifecycle`'s
   // directory copy/wire rewrite/index append paths, `FileSessionIndex`'s
@@ -434,6 +447,37 @@ const DOMAIN_IMPORT_BANS = new Map([
       specifiers: [/^node:fs/, /^fs$/],
       reason:
         'the standalone memory runtime is headless and purely in-memory (plan §4.5): no Workspace domain, no Local layout/index, no OS backends, no filesystem I/O',
+    },
+  ],
+  [
+    'runtimeSession',
+    {
+      domains: new Set([
+        'workspace',
+        'workspaceAliases',
+        'workspaceSessions',
+        'workspaceRegistration',
+        'sessionIndex',
+        'sessionLifecycle',
+        'sessionExport',
+        'bootstrap',
+        'localWorkspaceRuntime',
+        'standaloneMemoryRuntime',
+        'persistence/backends',
+        'os/backends',
+      ]),
+      specifiers: [/^node:/],
+      reason:
+        'the runtime-backed session activation consumes ONLY the injected ISessionRuntimeContext (plan §1.5): no Workspace domain, no session index/lifecycle/export, no bootstrap path builders, no concrete runtime, no persistence/OS backends, no host I/O — storage, cold read, artifacts and OS handles all arrive with the lease',
+    },
+  ],
+  [
+    'workspaceRegistration',
+    {
+      domains: new Set(['sessionIndex', 'sessionLifecycle', 'sessionExport']),
+      specifiers: [],
+      reason:
+        'workspace registration/runtime management owns long-lived runtime leases and delegates to runtime.sessions (plan §7.7); the legacy session discovery/lifecycle/export machinery is not its business',
     },
   ],
 ]);
