@@ -1,8 +1,9 @@
 /**
  * `telemetry` domain (L1) — telemetry facade lifecycle coverage.
  *
- * Exercises appender fan-out, context views, error isolation, lifecycle-option
- * forwarding, and App-scope registration through `ITelemetryService`.
+ * Exercises appender fan-out, context views, error isolation, ordered
+ * replacement, terminal appender rejection, lifecycle-option forwarding, and
+ * App-scope registration through `ITelemetryService`.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -182,11 +183,11 @@ describe('TelemetryService (unit)', () => {
     expect(b.events).toHaveLength(1);
   });
 
-  it('setAppender starts the replacement appender', () => {
+  it('setAppender starts the replacement appender after retirement completes', async () => {
     const appender = new CapturingAppender();
     const svc = new TelemetryService();
 
-    void svc.setAppender(appender);
+    await svc.setAppender(appender);
 
     expect(appender.startCalls).toBe(1);
   });
@@ -200,6 +201,101 @@ describe('TelemetryService (unit)', () => {
 
     expect(previous.shutdownCalls).toBe(1);
     expect(replacement.startCalls).toBe(1);
+  });
+
+  it('setAppender starts the replacement only after the previous appender retires', async () => {
+    const retired = deferred();
+    const lifecycle: string[] = [];
+    const previous: ITelemetryAppender = {
+      track() {},
+      async shutdown() {
+        lifecycle.push('shutdown-started');
+        await retired.promise;
+        lifecycle.push('shutdown-finished');
+      },
+    };
+    const replacement: ITelemetryAppender = {
+      start() {
+        lifecycle.push('replacement-started');
+      },
+      track() {},
+    };
+    const svc = new TelemetryService();
+    await svc.setAppender(previous);
+
+    const replacing = svc.setAppender(replacement);
+    await Promise.resolve();
+
+    expect(lifecycle).toEqual(['shutdown-started']);
+
+    retired.resolve();
+    await replacing;
+
+    expect(lifecycle).toEqual([
+      'shutdown-started',
+      'shutdown-finished',
+      'replacement-started',
+    ]);
+  });
+
+  it('setAppender recovers an active replacement after the previous appender retires', async () => {
+    const retired = deferred();
+    const lifecycle: string[] = [];
+    const previous: ITelemetryAppender = {
+      track() {},
+      async shutdown() {
+        lifecycle.push('shutdown-started');
+        await retired.promise;
+        lifecycle.push('shutdown-finished');
+      },
+    };
+    const replacement: ITelemetryAppender = {
+      start() {},
+      recover() {
+        lifecycle.push('replacement-recovered');
+      },
+      track() {},
+    };
+    const svc = new TelemetryService();
+    await svc.setAppender(previous);
+    svc.addAppender(replacement);
+
+    const replacing = svc.setAppender(replacement);
+    await Promise.resolve();
+
+    expect(lifecycle).toEqual(['shutdown-started']);
+
+    retired.resolve();
+    await replacing;
+
+    expect(lifecycle).toEqual([
+      'shutdown-started',
+      'shutdown-finished',
+      'replacement-recovered',
+    ]);
+  });
+
+  it('addAppender rejects an appender after its registration retires it', async () => {
+    const appender = new CapturingAppender();
+    const svc = new TelemetryService();
+    const registration = svc.addAppender(appender);
+    await registration.shutdown();
+
+    expect(() => svc.addAppender(appender)).toThrow(
+      'Telemetry appender has already shut down',
+    );
+  });
+
+  it('setAppender rejects an appender retired by a later replacement', async () => {
+    const retired = new CapturingAppender();
+    const replacement = new CapturingAppender();
+    const svc = new TelemetryService();
+    await svc.setAppender(retired);
+    await svc.setAppender(replacement);
+
+    await expect(svc.setAppender(retired)).rejects.toThrow(
+      'Telemetry appender has already shut down',
+    );
   });
 
   it('setEnabled(false) drops track; setEnabled(true) resumes', () => {

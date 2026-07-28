@@ -31,6 +31,7 @@ export interface TelemetryShutdownOptions {
 
 export interface ITelemetryAppender {
   start?(): void;
+  recover?(): Promise<void> | void;
   track(event: string, properties?: TelemetryProperties): void;
   withContext?(patch: TelemetryContextPatch): ITelemetryAppender;
   setContext?(patch: TelemetryContextPatch): void;
