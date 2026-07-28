@@ -427,6 +427,36 @@ describe('TelemetryService (unit)', () => {
     ]);
   });
 
+  it('shutdown forwards its budget to retirement active during replacement', async () => {
+    const retired = deferred();
+    const shutdownOptions: Array<TelemetryShutdownOptions | undefined> = [];
+    const previous: ITelemetryAppender = {
+      track() {},
+      shutdown(options) {
+        shutdownOptions.push(options);
+        options?.signal?.addEventListener('abort', retired.resolve, { once: true });
+        return retired.promise;
+      },
+    };
+    const replacement = new CapturingAppender();
+    const controller = new AbortController();
+    const options = { signal: controller.signal };
+    const svc = new TelemetryService();
+    await svc.setAppender(previous);
+
+    const replacing = svc.setAppender(replacement);
+    await Promise.resolve();
+    const closing = svc.shutdown(options);
+    await Promise.resolve();
+
+    expect(shutdownOptions).toEqual([undefined, options]);
+
+    controller.abort();
+    await Promise.all([replacing, closing]);
+
+    expect(replacement.shutdownOptions).toBe(options);
+  });
+
   it('shutdown forwards one lifecycle budget to every appender', async () => {
     const first = new CapturingAppender();
     const second = new CapturingAppender();

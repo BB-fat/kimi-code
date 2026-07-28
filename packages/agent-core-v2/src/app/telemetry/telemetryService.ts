@@ -159,19 +159,24 @@ export class TelemetryService implements ITelemetryService {
 
   shutdown(options?: TelemetryShutdownOptions): Promise<void> {
     if (this.shutdownPromise === null) {
+      if (options !== undefined) this.tightenRetirements(options);
       this.shutdownPromise = this.shutdownAfterTransition(this.appenderTransition, options);
     } else if (options !== undefined) {
-      const tighten = (): void => {
-        const appenders = new Set([...this.appenders, ...this.retirements.keys()]);
-        for (const appender of appenders) {
-          void this.retireAppender(appender, options);
-        }
-      };
+      this.tightenRetirements(options);
       const transition = this.appenderTransition;
-      if (transition === null) tighten();
-      else void transition.then(tighten);
+      if (transition !== null) {
+        void transition.then(() => {
+          this.tightenRetirements(options);
+        });
+      }
     }
     return this.shutdownPromise;
+  }
+
+  private tightenRetirements(options: TelemetryShutdownOptions): void {
+    for (const appender of this.retirements.keys()) {
+      void this.retireAppender(appender, options);
+    }
   }
 
   private async shutdownAfterTransition(
@@ -179,7 +184,7 @@ export class TelemetryService implements ITelemetryService {
     options?: TelemetryShutdownOptions,
   ): Promise<void> {
     if (transition !== null) await transition;
-    const appenders = new Set([...this.appenders, ...this.retirements.keys()]);
+    const appenders = new Set(this.appenders);
     this.appenders = [];
     for (const appender of appenders) {
       void this.retireAppender(appender, options);
