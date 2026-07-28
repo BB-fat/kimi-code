@@ -24,12 +24,22 @@ export type TelemetryProperties = Readonly<Record<string, TelemetryPrimitive>>;
 
 export type TelemetryContextPatch = TelemetryProperties;
 
+export interface TelemetryShutdownOptions {
+  readonly signal?: AbortSignal;
+  readonly deadlineMs?: number;
+}
+
 export interface ITelemetryAppender {
+  start?(): void;
   track(event: string, properties?: TelemetryProperties): void;
   withContext?(patch: TelemetryContextPatch): ITelemetryAppender;
   setContext?(patch: TelemetryContextPatch): void;
   flush?(): Promise<void> | void;
-  shutdown?(): Promise<void> | void;
+  shutdown?(options?: TelemetryShutdownOptions): Promise<void> | void;
+}
+
+export interface ITelemetryAppenderRegistration extends IDisposable {
+  shutdown(options?: TelemetryShutdownOptions): Promise<void>;
 }
 
 export interface TelemetryServiceOptions {
@@ -51,12 +61,15 @@ export interface ITelemetryService {
   ): void;
   withContext(patch: TelemetryContextPatch): ITelemetryService;
   setContext(patch: TelemetryContextPatch): void;
-  addAppender(appender: ITelemetryAppender): IDisposable;
-  removeAppender(appender: ITelemetryAppender): void;
-  setAppender(appender: ITelemetryAppender): void;
+  addAppender(appender: ITelemetryAppender): ITelemetryAppenderRegistration;
+  removeAppender(
+    appender: ITelemetryAppender,
+    options?: TelemetryShutdownOptions,
+  ): Promise<void>;
+  setAppender(appender: ITelemetryAppender, options?: TelemetryShutdownOptions): Promise<void>;
   setEnabled(enabled: boolean): void;
   flush(): Promise<void>;
-  shutdown(): Promise<void>;
+  shutdown(options?: TelemetryShutdownOptions): Promise<void>;
 }
 
 export const nullTelemetryAppender: ITelemetryAppender = {
@@ -73,9 +86,9 @@ export const noopTelemetryService: ITelemetryService = {
   track2: () => {},
   withContext: () => noopTelemetryService,
   setContext: () => {},
-  addAppender: () => ({ dispose: () => {} }),
-  removeAppender: () => {},
-  setAppender: () => {},
+  addAppender: () => ({ dispose: () => {}, shutdown: async () => {} }),
+  removeAppender: async () => {},
+  setAppender: async () => {},
   setEnabled: () => {},
   flush: async () => {},
   shutdown: async () => {},

@@ -200,7 +200,7 @@ describe('server-v2 boot', () => {
     const storage = new InMemoryStorageService();
     const write = storage.write.bind(storage);
     vi.spyOn(storage, 'write').mockImplementation(async (scope, key, data, options) => {
-      if (scope === 'telemetry') throw new Error('telemetry storage unavailable');
+      if (scope === 'telemetry-v2') throw new Error('telemetry storage unavailable');
       await write(scope, key, data, options);
     });
     const auth = {

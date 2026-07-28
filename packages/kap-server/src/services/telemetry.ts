@@ -9,11 +9,10 @@
  */
 
 import {
-  type CloudAppender,
   createCloudAppender,
   IBootstrapService,
   IConfigService,
-  type IDisposable,
+  type ITelemetryAppenderRegistration,
   IOAuthToolkit,
   ITelemetryService,
   type Scope,
@@ -32,11 +31,10 @@ const TELEMETRY_DISABLE_ENV_VALUES = new Set(['1', 'true', 't', 'yes', 'y']);
  * telemetry endpoint must not hold shutdown hostage.
  */
 const TELEMETRY_SHUTDOWN_TIMEOUT_MS = 3_000;
+const TELEMETRY_SHUTDOWN_HARD_CAP_GRACE_MS = 1_000;
 
 export interface ServerTelemetry {
-  /** Present only when telemetry is enabled by both config and environment. */
-  readonly appender?: CloudAppender;
-  readonly registration?: IDisposable;
+  readonly registration?: ITelemetryAppenderRegistration;
 }
 
 function isTelemetryDisabledByEnv(core: Scope): boolean {
@@ -63,28 +61,23 @@ export async function initializeServerTelemetry(
     getAccessToken: async () => (await auth.getCachedAccessToken()) ?? null,
   });
   const registration = service.addAppender(appender);
-  try {
-    // The server is long-lived: flush on a timer, not only at the threshold.
-    appender.startPeriodicFlush();
-  } catch (error) {
-    registration.dispose();
-    throw error;
-  }
-  return { appender, registration };
+  return { registration };
 }
 
 export async function shutdownServerTelemetry(
   telemetry: ServerTelemetry,
   deadlineMs = Date.now() + TELEMETRY_SHUTDOWN_TIMEOUT_MS,
 ): Promise<void> {
-  telemetry.registration?.dispose();
-  if (telemetry.appender === undefined) return;
+  if (telemetry.registration === undefined) return;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
-      telemetry.appender.shutdown(),
+      telemetry.registration.shutdown({ deadlineMs }),
       new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, Math.max(0, deadlineMs - Date.now()));
+        timer = setTimeout(
+          resolve,
+          Math.max(0, deadlineMs - Date.now()) + TELEMETRY_SHUTDOWN_HARD_CAP_GRACE_MS,
+        );
       }),
     ]);
   } finally {

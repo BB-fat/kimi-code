@@ -43,9 +43,9 @@ export function recordingTelemetry(
     setContext(patch: TelemetryContextPatch) {
       currentContext = { ...currentContext, ...patch };
     },
-    addAppender: () => ({ dispose: () => {} }),
-    removeAppender: () => {},
-    setAppender: () => {},
+    addAppender: () => ({ dispose: () => {}, shutdown: async () => {} }),
+    removeAppender: async () => {},
+    setAppender: async () => {},
     setEnabled(next) {
       enabled = next;
     },

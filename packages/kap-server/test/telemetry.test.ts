@@ -11,6 +11,7 @@ import { join } from 'node:path';
 
 import {
   bootstrap,
+  IFileSystemStorageService,
   type ITelemetryAppender,
   ITelemetryService,
   IOAuthToolkit,
@@ -74,7 +75,7 @@ describe('server telemetry', () => {
   it('attaches the cloud appender by default and persists the device id', async () => {
     const app = await bootCore();
     const telemetry = await initializeServerTelemetry(app, home as string);
-    expect(telemetry.appender).toBeDefined();
+    expect(telemetry.registration).toBeDefined();
     expect(readKimiDeviceId(home as string)).not.toBeNull();
     await shutdownServerTelemetry(telemetry);
   });
@@ -113,13 +114,19 @@ describe('server telemetry', () => {
     const telemetry = await initializeServerTelemetry(app, home as string);
     app.accessor.get(ITelemetryService).track('server_probe');
 
-    await expect(shutdownServerTelemetry(telemetry, Date.now())).resolves.toBeUndefined();
+    try {
+      await expect(shutdownServerTelemetry(telemetry, Date.now())).resolves.toBeUndefined();
+      const spool = await app.accessor.get(IFileSystemStorageService).list('telemetry-v2');
+      expect(spool).toHaveLength(1);
+    } finally {
+      await telemetry.registration?.shutdown();
+    }
   });
 
   it('keeps the null appender when config sets telemetry = false', async () => {
     const app = await bootCore('telemetry = false\n');
     const telemetry = await initializeServerTelemetry(app, home as string);
-    expect(telemetry.appender).toBeUndefined();
+    expect(telemetry.registration).toBeUndefined();
     await shutdownServerTelemetry(telemetry);
   });
 
@@ -131,7 +138,7 @@ describe('server telemetry', () => {
         KIMI_DISABLE_TELEMETRY: value,
       });
       const telemetry = await initializeServerTelemetry(app, home as string);
-      expect(telemetry.appender).toBeUndefined();
+      expect(telemetry.registration).toBeUndefined();
       expect(readKimiDeviceId(home as string)).toBeNull();
       await shutdownServerTelemetry(telemetry);
     },

@@ -267,6 +267,26 @@ describe('runV2Print', () => {
     expect(app.dispose).toHaveBeenCalled();
   });
 
+  it('forwards an absolute deadline into telemetry shutdown', async () => {
+    const stdout = writer();
+    const stderr = writer();
+    const { app, agent, appServices } = makeFakeHarness();
+    const telemetry = appServices.get(ITelemetryService) as {
+      shutdown: ReturnType<typeof vi.fn>;
+    };
+    const startedAt = Date.now();
+
+    mocks.bootstrap.mockReturnValue({ app });
+    mocks.ensureMainAgent.mockResolvedValue(agent);
+
+    await runV2Print(opts() as never, '1.2.3-test', { stdout, stderr });
+
+    expect(telemetry.shutdown).toHaveBeenCalledOnce();
+    const options = telemetry.shutdown.mock.calls[0]?.[0] as { deadlineMs?: number } | undefined;
+    expect(options?.deadlineMs).toBeGreaterThanOrEqual(startedAt);
+    expect(options?.deadlineMs).toBeLessThanOrEqual(Date.now() + 3_000);
+  });
+
   it('seeds explicit skill dirs from --skillsDir into bootstrap', async () => {
     const stdout = writer();
     const stderr = writer();
