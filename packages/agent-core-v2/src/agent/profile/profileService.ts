@@ -31,7 +31,12 @@
  * in the synchronous segment before the first dispatch, so concurrent binds
  * cannot both pass (an edge-level guard always leaves an interleaving
  * window); a same-name rebind keeps the persisted thinking effort unless the
- * caller explicitly overrides it. `refreshSystemPrompt` never rejects: a
+ * caller explicitly overrides it. The AGENTS.md portion of the system-prompt
+ * context comes from the seeded `ISessionInstructionsProvider` (the
+ * workspace handler's shared, watch-refreshed snapshot) whenever the
+ * effective cwd is the session cwd — a divergent cwd falls back to reading
+ * the files directly — and the provider's change event drives a
+ * `refreshSystemPrompt`. `refreshSystemPrompt` never rejects: a
  * failed context build keeps the current prompt and surfaces a warning,
  * because the `[tools]` config watcher fires it voided (an unhandled
  * rejection would crash kap-server) and the Session tool-policy fan-out
@@ -55,6 +60,7 @@
 import { Disposable } from '#/_base/di/lifecycle';
 import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { defineState } from '#/_base/state/stateRegistry';
+import { resolve } from 'pathe';
 import { UNKNOWN_CAPABILITY, type ModelCapability } from '#/kosong/contract/capability';
 import { type SamplingOptions, type ThinkingEffort } from '#/kosong/contract/provider';
 import { IModelCatalog, type Model } from '#/kosong/model/catalog';
@@ -82,6 +88,7 @@ import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import type { ToolSource } from '#/tool/toolContract';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
+import { ISessionInstructionsProvider } from '#/session/sessionInstructions/instructionsProvider';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
 import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
 import { ISessionToolPolicy } from '#/session/sessionToolPolicy/sessionToolPolicy';
@@ -94,7 +101,7 @@ import { IWireService } from '#/wire/wire';
 import type { PayloadOf } from '#/wire/types';
 import { IEventBus } from '#/app/event/eventBus';
 import { IHostIdentity } from '#/app/hostIdentity/hostIdentity';
-import { prepareSystemPromptContext } from './context';
+import { prepareSystemPromptContext, type LoadedAgentsMd } from './context';
 import type {
   ApplyProfileOptions,
   BindAgentInput,
@@ -194,6 +201,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     @ISessionWorkspaceContext private readonly workspace: ISessionWorkspaceContext,
     @ISessionAgentProfileCatalog private readonly catalog: ISessionAgentProfileCatalog,
     @ISessionSkillCatalog private readonly skillCatalog: ISessionSkillCatalog,
+    @ISessionInstructionsProvider private readonly instructions: ISessionInstructionsProvider,
     @ISessionToolPolicy private readonly sessionToolPolicy: ISessionToolPolicy,
     @IAgentToolRegistryService private readonly toolRegistry: IAgentToolRegistryService,
     @IAgentProfileCatalogService private readonly builtinProfiles: IAgentProfileCatalogService,
@@ -209,6 +217,13 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     this._register(
       this.sessionToolPolicy.onDidChange((event) => {
         event.waitUntil(this.refreshSystemPrompt());
+      }),
+    );
+    this._register(
+      // The workspace AGENTS.md snapshot changed (fs watch on the handler
+      // side): rebuild the system prompt off the fresh snapshot.
+      this.instructions.onDidChange(() => {
+        void this.refreshSystemPrompt();
       }),
     );
     this._register(
@@ -827,11 +842,20 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     options?: ApplyProfileOptions,
   ): Promise<SystemPromptContext> {
     const effectiveCwd = cwd ?? this.sessionContext.cwd;
+    // The workspace instructions snapshot covers the handler root; an agent
+    // bound to a different cwd falls back to reading the files directly.
+    const preloadedAgentsMd =
+      resolve(effectiveCwd) === resolve(this.sessionContext.cwd)
+        ? await this.workspaceInstructionsSnapshot()
+        : undefined;
     const base = await prepareSystemPromptContext(
       { fs: this.fs, homeDir: this.env.homeDir },
       effectiveCwd,
       this.bootstrap.homeDir,
-      { additionalDirs: options?.additionalDirs ?? this.workspace.additionalDirs },
+      {
+        additionalDirs: options?.additionalDirs ?? this.workspace.additionalDirs,
+        preloadedAgentsMd,
+      },
     );
     const skills = await this.resolveSkillListing();
     return {
@@ -845,6 +869,14 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       skillActive: this.isToolActiveForProfile(profile, 'Skill'),
       productName: this.hostIdentity.productName,
       replyStyleGuide: this.hostIdentity.replyStyleGuide,
+    };
+  }
+
+  private async workspaceInstructionsSnapshot(): Promise<LoadedAgentsMd> {
+    await this.instructions.ready;
+    return {
+      content: this.instructions.agentsMd ?? '',
+      warning: this.instructions.agentsMdWarning,
     };
   }
 
