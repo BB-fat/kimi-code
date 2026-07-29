@@ -8,7 +8,8 @@
  *   1. NO source file may assemble Local session layout paths (`sessions/<wd>`
  *      buckets, `state.json`, `wire.jsonl`) or reference the legacy
  *      layout/index machinery — cold surfaces read through the owner runtime,
- *      never the App home dir (plan §7.6/§9.7). No exemptions.
+ *      never the App home dir (plan §7.6/§9.7). Exemptions are explicit and
+ *      documented in `LAYOUT_EXEMPTIONS`.
  *   2. `ISessionIndex` imports are confined to an explicit exemption list
  *      (the not-yet-migrated LIVE WS surface, owned by M6). The
  *      list may only shrink; every entry states its reason.
@@ -75,14 +76,31 @@ const LAYOUT_BANS: { pattern: RegExp; label: string }[] = [
 ];
 
 /**
+ * Rule 1 exemptions: files allowed to touch the Local session layout, each
+ * with its reason. Merged from main after the guard was introduced:
+ * global message search (#2321) is a local-layout index by design — it
+ * incrementally scans `wire.jsonl` byte offsets across on-disk session dirs,
+ * which only the Local workspace runtime has. Multi-runtime search indexing
+ * (headless / remote runtimes) is future work; until then the feature is
+ * documented as local-only.
+ */
+const LAYOUT_EXEMPTIONS: Record<string, string> = {
+  'search/searchService.ts':
+    'global message search (#2321) indexes on-disk wire.jsonl files; local-layout-only by design, multi-runtime indexing is future work',
+};
+
+/**
  * Rule 2 exemptions: files still allowed to import `ISessionIndex`. M6
  * migrated the LAST consumer (the WebSocket broadcaster's cold-watermark
- * existence check now rides the caller-resolved `SessionRef`), so the list is
- * EMPTY — anything not listed here (i.e. any file at all) must be clean. The
- * mechanism stays: a future bare-id live lookup belongs behind
- * `IV1SessionRefResolver`, never behind a new exemption.
+ * existence check now rides the caller-resolved `SessionRef`); the only
+ * remaining entry is global message search (#2321), exempted for the same
+ * local-layout-only reason as rule 1 above. Any OTHER bare-id live lookup
+ * belongs behind `IV1SessionRefResolver`, never behind a new exemption.
  */
-const SESSION_INDEX_EXEMPTIONS: Record<string, string> = {};
+const SESSION_INDEX_EXEMPTIONS: Record<string, string> = {
+  'search/searchService.ts':
+    'global message search (#2321) enumerates local sessions through the legacy index; local-layout-only by design, multi-runtime indexing is future work',
+};
 
 /** Rule 3: runtime registry/manager imports are v1Compatibility-only. */
 const RUNTIME_IMPORT_BAN = /ISessionHostRuntimeRegistry|IWorkspaceRuntimeManager/;
@@ -90,18 +108,28 @@ const RUNTIME_IMPORT_BAN = /ISessionHostRuntimeRegistry|IWorkspaceRuntimeManager
 describe('v1 compatibility guardrails (plan §10.1)', () => {
   it('no source file assembles Local session layout paths or imports legacy layout machinery', async () => {
     const violations: string[] = [];
+    const exemptedStillTripping = new Set<string>();
     for (const file of await listSourceFiles(SRC_ROOT)) {
       const rel = relative(SRC_ROOT, file);
+      const exempted = LAYOUT_EXEMPTIONS[rel] !== undefined;
       const source = await readFile(file, 'utf8');
       for (const { line, lineNumber } of codeLines(source)) {
         for (const ban of LAYOUT_BANS) {
           if (ban.pattern.test(line)) {
+            if (exempted) {
+              exemptedStillTripping.add(rel);
+              continue;
+            }
             violations.push(`${rel}:${lineNumber} ${ban.label}: ${line.trim()}`);
           }
         }
       }
     }
     expect(violations).toEqual([]);
+    // Stale exemptions get pruned: every listed file must still trip a ban.
+    expect([...exemptedStillTripping].toSorted()).toEqual(
+      Object.keys(LAYOUT_EXEMPTIONS).toSorted(),
+    );
   });
 
   it('ISessionIndex imports stay inside the explicit M6 exemption list', async () => {

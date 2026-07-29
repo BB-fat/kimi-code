@@ -5767,6 +5767,304 @@ exports[`API surface snapshot > matches the frozen v1 wire baseline (OpenAPI + A
 }"
 `;
 
+exports[`API surface snapshot > matches the frozen v1 wire baseline (OpenAPI + AsyncAPI + protocol version) > REST /api/v1/search 1`] = `
+"REST /api/v1/search
+{
+  "post": {
+    "tags": [
+      "search"
+    ],
+    "description": "Global full-text search over user messages, assistant replies and session titles across all sessions",
+    "requestBody": {
+      "required": true,
+      "content": {
+        "application/json": {
+          "schema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "minLength": 1
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "terms",
+                  "literal"
+                ]
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "AND",
+                  "OR"
+                ]
+              },
+              "container": {
+                "type": "object",
+                "properties": {
+                  "session_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "agent_id": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "role": {
+                "type": "string",
+                "enum": [
+                  "user",
+                  "assistant",
+                  "title"
+                ]
+              },
+              "start_time": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "end_time": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "sort": {
+                "type": "string",
+                "enum": [
+                  "score",
+                  "time_desc",
+                  "time_asc"
+                ]
+              },
+              "page_size": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 50
+              },
+              "page_token": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        }
+      }
+    },
+    "responses": {
+      "200": {
+        "description": "Default Response",
+        "content": {
+          "application/json": {
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "number",
+                      "enum": [
+                        0
+                      ]
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "session_id": {
+                                "type": "string"
+                              },
+                              "workspace_id": {
+                                "type": "string"
+                              },
+                              "session_title": {
+                                "type": "string"
+                              },
+                              "agent_id": {
+                                "type": "string"
+                              },
+                              "role": {
+                                "type": "string",
+                                "enum": [
+                                  "user",
+                                  "assistant",
+                                  "title"
+                                ]
+                              },
+                              "snippet": {
+                                "type": "string"
+                              },
+                              "time": {
+                                "type": "number"
+                              },
+                              "turn": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              "step_id": {
+                                "type": "string"
+                              },
+                              "score": {
+                                "type": "number"
+                              }
+                            },
+                            "required": [
+                              "session_id",
+                              "workspace_id",
+                              "session_title",
+                              "agent_id",
+                              "role",
+                              "snippet",
+                              "time",
+                              "score"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "has_more": {
+                          "type": "boolean"
+                        },
+                        "page_token": {
+                          "type": "string"
+                        },
+                        "incomplete": {
+                          "type": "string",
+                          "enum": [
+                            "candidate_cap"
+                          ]
+                        },
+                        "index_state": {
+                          "type": "object",
+                          "properties": {
+                            "state": {
+                              "type": "string",
+                              "enum": [
+                                "building",
+                                "ready",
+                                "readonly"
+                              ]
+                            },
+                            "indexed_sessions": {
+                              "type": "number"
+                            },
+                            "total_sessions": {
+                              "type": "number"
+                            },
+                            "documents": {
+                              "type": "number"
+                            }
+                          },
+                          "required": [
+                            "state",
+                            "indexed_sessions",
+                            "total_sessions",
+                            "documents"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "source": {
+                          "type": "string",
+                          "enum": [
+                            "live",
+                            "index"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "items",
+                        "has_more",
+                        "index_state",
+                        "source"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "request_id": {
+                      "type": "string"
+                    },
+                    "details": {}
+                  },
+                  "required": [
+                    "code",
+                    "msg",
+                    "data",
+                    "request_id"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "number",
+                      "enum": [
+                        40001
+                      ]
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "string",
+                      "nullable": true,
+                      "enum": [
+                        null
+                      ]
+                    },
+                    "request_id": {
+                      "type": "string"
+                    },
+                    "details": {
+                      "nullable": true,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "type": "string"
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "path",
+                          "message"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "msg",
+                    "data",
+                    "request_id"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}"
+`;
+
 exports[`API surface snapshot > matches the frozen v1 wire baseline (OpenAPI + AsyncAPI + protocol version) > REST /api/v1/sessions 1`] = `
 "REST /api/v1/sessions
 {

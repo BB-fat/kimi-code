@@ -13,6 +13,7 @@ import {
   hostRequestHeadersSeed,
   IConfigService,
   IProviderDiscoveryService,
+  IRuntimeSessionHostService,
   IWorkspaceService,
   logSeed,
   resolveConfigPath,
@@ -22,6 +23,7 @@ import {
   type HostIdentityOverrides,
   type Scope,
   type ScopeSeed,
+  type SessionRef,
 } from '@moonshot-ai/agent-core-v2';
 import { createAsyncApiDocument } from './protocol/asyncapi';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -369,7 +371,28 @@ export async function startServer(opts: ServerStartOptions = {}): Promise<Runnin
   // The global search service is DI-managed (App scope) while the transcript
   // service is constructed here by hand — wire the former to the latter so
   // container-scoped searches on live sessions scan the in-memory transcript.
-  core.accessor.get(IGlobalSearchService).setLiveTranscriptSource(transcriptService);
+  // The search query's container carries a BARE session id, so the adapter
+  // resolves it against the runtime host's live scopes (unique match only,
+  // mirroring the v1 resolver's projection semantics) and delegates by ref.
+  const runtimeSessionHost = core.accessor.get(IRuntimeSessionHostService);
+  const liveRefOf = (sessionId: string): SessionRef | undefined => {
+    const matches = runtimeSessionHost.list().filter((scope) => scope.ref.sessionId === sessionId);
+    return matches.length === 1 ? matches[0]!.ref : undefined;
+  };
+  core.accessor.get(IGlobalSearchService).setLiveTranscriptSource({
+    forSessionLive: (sessionId) => {
+      const ref = liveRefOf(sessionId);
+      return ref === undefined ? undefined : transcriptService.forSessionLive(ref);
+    },
+    whenReady: async (sessionId) => {
+      const ref = liveRefOf(sessionId);
+      if (ref !== undefined) await transcriptService.whenReady(ref);
+    },
+    ensureAgentHistory: async (sessionId, agentId) => {
+      const ref = liveRefOf(sessionId);
+      if (ref !== undefined) await transcriptService.ensureAgentHistory(ref, agentId);
+    },
+  });
   const broadcaster = new SessionEventBroadcaster({
     eventsDir: join(homeDir, 'server', 'events'),
     core,
