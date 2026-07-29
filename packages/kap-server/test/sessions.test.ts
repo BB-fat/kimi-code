@@ -499,6 +499,26 @@ describe('server-v2 /api/v1/sessions', () => {
     expect(got.body.data.title).toBe('renamed');
   });
 
+  it('returns title-unavailable when generation cannot run', async () => {
+    const created = await postJson<SessionWire>('/api/v1/sessions', {
+      metadata: { cwd: home as string },
+    });
+
+    const generated = await postJson<null>(
+      `/api/v1/sessions/${created.body.data.id}/title/generate`,
+    );
+
+    expect(generated.body.code).toBe(40922);
+  });
+
+  it('returns session-not-found when generating a title for a missing session', async () => {
+    const generated = await postJson<null>(
+      '/api/v1/sessions/sess_missing_title/title/generate',
+    );
+
+    expect(generated.body.code).toBe(40401);
+  });
+
   it('returns best-effort status for a live session', async () => {
     const cwd = home as string;
     const created = await postJson<SessionWire>('/api/v1/sessions', { metadata: { cwd } });

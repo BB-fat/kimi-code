@@ -1,4 +1,11 @@
+/**
+ * Scenario: managed chat_title generation through the session-scoped service,
+ * including OAuth failures, legacy custom titles, request headers, and races.
+ */
+
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
+
+import { OAuthUnauthorizedError } from '@moonshot-ai/kimi-code-oauth';
 
 import { DisposableStore, type IDisposable } from '#/_base/di/lifecycle';
 import { createServices, type TestInstantiationService } from '#/_base/di/test';
@@ -102,9 +109,11 @@ describe('SessionTitleService', () => {
   let flagEnabled: boolean;
   let providers: Record<string, ProviderConfig>;
   let fetchMock: Mock<(url: string, init?: RequestInit) => Promise<Response>>;
+  let tokenError: Error | undefined;
 
   beforeEach(() => {
     flagEnabled = true;
+    tokenError = undefined;
     providers = { 'managed:kimi-code': MANAGED_PROVIDER };
     metadata = new FakeSessionMetadata();
     events = new FakeEventService();
@@ -139,7 +148,12 @@ describe('SessionTitleService', () => {
         );
         reg.defineInstance(IProviderService, stubProviderService(providers));
         reg.definePartialInstance(IOAuthService, {
-          resolveTokenProvider: () => ({ getAccessToken: async () => 'test-token' }),
+          resolveTokenProvider: () => ({
+            getAccessToken: async () => {
+              if (tokenError !== undefined) throw tokenError;
+              return 'test-token';
+            },
+          }),
         });
         reg.defineInstance(IHostRequestHeaders, new HostRequestHeaders({ 'User-Agent': 'test' }));
         reg.define(ISessionTitleService, SessionTitleService);
@@ -152,6 +166,7 @@ describe('SessionTitleService', () => {
   afterEach(() => {
     disposables.dispose();
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
   });
 
   function publishEasyTitle(lastPrompt: string, sessionId = SESSION_ID): void {
@@ -193,23 +208,21 @@ describe('SessionTitleService', () => {
     flagEnabled = false;
     publishEasyTitle('hello');
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
     expect(fetchMock).not.toHaveBeenCalled();
     expect(metadata.meta.title).toBeUndefined();
   });
 
   it('does nothing without a managed OAuth provider', async () => {
     delete providers['managed:kimi-code'];
-    publishEasyTitle('hello');
+    await metadata.update({ lastPrompt: 'hello' });
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('ignores easy-title events from other sessions', async () => {
     publishEasyTitle('hello', 'sess-other');
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -224,7 +237,6 @@ describe('SessionTitleService', () => {
       },
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -233,7 +245,6 @@ describe('SessionTitleService', () => {
     await waitFor(() => metadata.meta.title === '生成的标题');
 
     publishEasyTitle('second');
-    await new Promise((resolve) => setTimeout(resolve, 50));
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(metadata.meta.title).toBe('生成的标题');
   });
@@ -247,7 +258,8 @@ describe('SessionTitleService', () => {
         }),
     );
 
-    publishEasyTitle('hello');
+    await metadata.update({ lastPrompt: 'hello' });
+    const generation = ix.get(ISessionTitleService).generateTitle();
     await waitFor(() => fetchMock.mock.calls.length === 1);
     await metadata.setTitle('user 取的标题');
     resolveFetch?.(
@@ -257,18 +269,74 @@ describe('SessionTitleService', () => {
       }),
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await expect(generation).resolves.toBeUndefined();
     expect(metadata.meta.title).toBe('user 取的标题');
     expect(metadata.meta.isCustomTitle).toBe(true);
   });
 
   it('keeps the current title when the backend request fails', async () => {
     fetchMock.mockImplementationOnce(async () => new Response('', { status: 500 }));
+    await metadata.update({ title: 'hello', isCustomTitle: false, lastPrompt: 'hello' });
 
-    publishEasyTitle('hello');
+    await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
+    expect(metadata.meta.title).toBe('hello');
+  });
+
+  it('returns unavailable when the OAuth token is missing or revoked', async () => {
+    tokenError = new OAuthUnauthorizedError('re-login required');
+    await metadata.update({ lastPrompt: 'hello' });
+
+    const svc = ix.get(ISessionTitleService);
+    await expect(svc.generateTitle()).resolves.toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('includes environment custom headers', async () => {
+    vi.stubEnv('KIMI_CODE_CUSTOM_HEADERS', 'X-Proxy-Header: from-env\n');
+    await metadata.update({ lastPrompt: 'hello' });
+
+    await ix.get(ISessionTitleService).generateTitle();
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    const headers = new Headers(init?.headers as Record<string, string>);
+    expect(headers.get('x-proxy-header')).toBe('from-env');
+    expect(headers.get('user-agent')).toBe('test');
+  });
+
+  it('does not generate over a legacy customTitle', async () => {
+    metadata.meta = {
+      ...metadata.meta,
+      lastPrompt: 'hello',
+      customTitle: 'legacy title',
+    } as SessionMeta;
+
+    await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('shares an in-flight generation between automatic and manual requests', async () => {
+    let resolveFetch: ((response: Response) => void) | undefined;
+    fetchMock.mockImplementationOnce(
+      async () =>
+        new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        }),
+    );
+
+    publishEasyTitle('first');
     await waitFor(() => fetchMock.mock.calls.length === 1);
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(metadata.meta.title).toBeUndefined();
+    await metadata.update({ lastPrompt: 'second' });
+    const manual = ix.get(ISessionTitleService).generateTitle();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    resolveFetch?.(
+      new Response(JSON.stringify({ title: '生成的标题' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    await expect(manual).resolves.toBe('生成的标题');
+    expect(metadata.meta.title).toBe('生成的标题');
   });
 
   it('generateTitle() regenerates from the stored lastPrompt on demand', async () => {

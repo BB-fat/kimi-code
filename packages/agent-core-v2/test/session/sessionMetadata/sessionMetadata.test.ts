@@ -125,6 +125,30 @@ describe('SessionMetadata', () => {
     expect(healed.updatedAt).toBe(1700000000000);
   });
 
+  it('normalizes the legacy customTitle field before callers read metadata', async () => {
+    const store = ix.get(IAtomicDocumentStore);
+    await store.set(META_SCOPE, 'state.json', {
+      id: 's1',
+      version: 2,
+      createdAt: 1700000000000,
+      updatedAt: 1700000000000,
+      archived: false,
+      customTitle: 'legacy title',
+    });
+
+    const meta = ix.get(ISessionMetadata);
+    await expect(meta.read()).resolves.toMatchObject({
+      title: 'legacy title',
+      isCustomTitle: true,
+    });
+
+    const fresh = createFreshMetadata(ix);
+    await expect(fresh.read()).resolves.toMatchObject({
+      title: 'legacy title',
+      isCustomTitle: true,
+    });
+  });
+
   it('leaves existing agents/custom maps untouched', async () => {
     const store = ix.get(IAtomicDocumentStore);
     await store.set(META_SCOPE, 'state.json', {

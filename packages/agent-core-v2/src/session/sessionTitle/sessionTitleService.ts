@@ -17,8 +17,10 @@
 
 import {
   KIMI_CODE_PROVIDER_NAME,
+  OAuthUnauthorizedError,
   fetchChatTitle,
   kimiCodeToolsUrl,
+  parseKimiCodeCustomHeaders,
 } from '@moonshot-ai/kimi-code-oauth';
 
 import { Disposable } from '#/_base/di/lifecycle';
@@ -42,6 +44,7 @@ export class SessionTitleService extends Disposable implements ISessionTitleServ
   declare readonly _serviceBrand: undefined;
 
   private _autoAttempted = false;
+  private _generation: Promise<string | undefined> | undefined;
 
   constructor(
     @ISessionContext private readonly ctx: ISessionContext,
@@ -54,13 +57,17 @@ export class SessionTitleService extends Disposable implements ISessionTitleServ
     @ILogService private readonly log: ILogService,
   ) {
     super();
-    this._register(this.eventService.subscribe((event) => this.onMetaUpdated(event)));
+    this._register(
+      this.eventService.subscribe((event) => {
+        this.onMetaUpdated(event);
+      }),
+    );
   }
 
   async generateTitle(): Promise<string | undefined> {
     if (!this.flags.enabled(AUTO_TITLE_FLAG_ID)) return undefined;
     const current = await this.metadata.read();
-    if (current.lastPrompt === undefined) return undefined;
+    if (current.lastPrompt === undefined || hasCustomTitle(current)) return undefined;
     return this.generateAndApply(current.lastPrompt);
   }
 
@@ -78,6 +85,18 @@ export class SessionTitleService extends Disposable implements ISessionTitleServ
   }
 
   private async generateAndApply(chatContent: string): Promise<string | undefined> {
+    const inFlight = this._generation;
+    if (inFlight !== undefined) return inFlight;
+    const settled = this.generateAndApplyOnce(chatContent).finally(() => {
+      if (this._generation === settled) this._generation = undefined;
+    });
+    this._generation = settled;
+    return settled;
+  }
+
+  private async generateAndApplyOnce(chatContent: string): Promise<string | undefined> {
+    const current = await this.metadata.read();
+    if (hasCustomTitle(current)) return undefined;
     const provider = this.providers.get(KIMI_CODE_PROVIDER_NAME);
     if (
       provider === undefined ||
@@ -88,20 +107,33 @@ export class SessionTitleService extends Disposable implements ISessionTitleServ
     }
     const tokenProvider = this.oauth.resolveTokenProvider(KIMI_CODE_PROVIDER_NAME, provider.oauth);
     if (tokenProvider === undefined) return undefined;
-    const token = await tokenProvider.getAccessToken();
+    let token: string;
+    try {
+      token = await tokenProvider.getAccessToken();
+    } catch (error) {
+      if (!(error instanceof OAuthUnauthorizedError)) throw error;
+      this.log.debug(`chat_title request unavailable: ${error.message}`);
+      return undefined;
+    }
     const result = await fetchChatTitle(
       kimiCodeToolsUrl(provider.baseUrl),
       token,
       `user: ${chatContent}`,
-      { headers: { ...this.hostHeaders.headers, ...provider.customHeaders } },
+      {
+        headers: {
+          ...parseKimiCodeCustomHeaders(),
+          ...this.hostHeaders.headers,
+          ...provider.customHeaders,
+        },
+      },
     );
     if (result.kind !== 'ok') {
       this.log.debug(`chat_title request failed: ${result.message}`);
       return undefined;
     }
     // The user may have renamed the session while the request was in flight.
-    const current = await this.metadata.read();
-    if (current.isCustomTitle === true) return undefined;
+    const currentAfterRequest = await this.metadata.read();
+    if (hasCustomTitle(currentAfterRequest)) return undefined;
     const title = result.title.slice(0, MAX_GENERATED_TITLE_LENGTH);
     await this.metadata.update({ title, isCustomTitle: false });
     this.eventService.publish({
@@ -115,6 +147,13 @@ export class SessionTitleService extends Disposable implements ISessionTitleServ
     });
     return title;
   }
+}
+
+function hasCustomTitle(metadata: {
+  readonly isCustomTitle?: boolean;
+  readonly customTitle?: unknown;
+}): boolean {
+  return metadata.isCustomTitle === true || typeof metadata.customTitle === 'string';
 }
 
 function readEasyTitleLastPrompt(payload: unknown, sessionId: string): string | undefined {

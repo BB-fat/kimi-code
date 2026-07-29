@@ -208,19 +208,29 @@ export function normalizeSessionMeta(raw: SessionMeta, sessionId: string): Sessi
     createdAt?: unknown;
     updatedAt?: unknown;
     workDir?: unknown;
+    customTitle?: unknown;
   };
   const cwd =
     raw.cwd ?? (typeof legacy.workDir === 'string' && legacy.workDir.length > 0
       ? legacy.workDir
       : undefined);
+  const legacyCustomTitle =
+    typeof legacy.customTitle === 'string' ? legacy.customTitle : undefined;
+  const title = raw.title ?? legacyCustomTitle;
+  const isCustomTitle = legacyCustomTitle === undefined ? raw.isCustomTitle : true;
   if (raw.version === SESSION_META_VERSION) {
-    return cwd === raw.cwd ? raw : { ...raw, cwd };
+    if (cwd === raw.cwd && title === raw.title && isCustomTitle === raw.isCustomTitle) {
+      return raw;
+    }
+    return { ...raw, cwd, title, isCustomTitle };
   }
   return {
     ...raw,
     id: sessionId,
     version: SESSION_META_VERSION,
     cwd,
+    title,
+    isCustomTitle,
     createdAt: toEpochMs(legacy.createdAt),
     updatedAt: toEpochMs(legacy.updatedAt),
   };

@@ -18,6 +18,7 @@ import { join } from 'pathe';
 import type { ProviderConfig } from '@moonshot-ai/kosong';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import type { ProviderConfig as ConfigProviderConfig } from '../../src/config';
 import { FlagResolver } from '../../src/flags';
 import type { ResolvedAgentProfile } from '../../src/profile';
 import type { SDKSessionRPC } from '../../src/rpc';
@@ -112,7 +113,7 @@ const MANAGED_PROVIDER = {
   type: 'kimi',
   baseUrl: 'https://api.example.test/coding/v1',
   oauth: { storage: 'file', key: 'kimi-code' },
-} as const;
+} as const satisfies ConfigProviderConfig;
 
 describe('SessionAPIImpl auto title', () => {
   it('replaces the easy title with the generated one when the flag is on', async () => {
@@ -147,7 +148,6 @@ describe('SessionAPIImpl auto title', () => {
     if (agent.turn.hasActiveTurn) {
       await agent.turn.waitForCurrentTurn();
     }
-    await new Promise((resolve) => setTimeout(resolve, 50));
 
     expect(chatTitleCalls(fetchMock)).toHaveLength(0);
     expect(session.metadata.title).toBe('帮我看个 Go 报错');
@@ -164,7 +164,6 @@ describe('SessionAPIImpl auto title', () => {
     if (agent.turn.hasActiveTurn) {
       await agent.turn.waitForCurrentTurn();
     }
-    await new Promise((resolve) => setTimeout(resolve, 50));
 
     expect(chatTitleCalls(fetchMock)).toHaveLength(0);
     expect(session.metadata.title).toBe('帮我看个 Go 报错');
@@ -173,7 +172,7 @@ describe('SessionAPIImpl auto title', () => {
 
 function chatTitleCalls(fetchMock: ReturnType<typeof vi.fn>): [string, RequestInit?][] {
   return (fetchMock.mock.calls as unknown as [string, RequestInit?][]).filter(([url]) =>
-    String(url).includes('/tools'),
+    url.includes('/tools'),
   );
 }
 
@@ -203,7 +202,7 @@ async function setupAutoTitleSession(options: { autoTitle: boolean; managedOAuth
   const scripted = createScriptedGenerate();
   const flags = new FlagResolver({});
   flags.setConfigOverrides({ 'auto-title': options.autoTitle });
-  const managed =
+  const managed: ConfigProviderConfig =
     options.managedOAuth === false
       ? { type: 'kimi', apiKey: 'sk-test' }
       : MANAGED_PROVIDER;

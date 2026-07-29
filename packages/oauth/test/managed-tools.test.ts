@@ -1,3 +1,8 @@
+/**
+ * Scenario: the managed `/tools` chat_title request contract, including
+ * response validation, API failures, timeouts, and transport errors.
+ */
+
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { fetchChatTitle, kimiCodeToolsUrl } from '../src/managed-tools';
