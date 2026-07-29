@@ -157,6 +157,19 @@ export class ProviderManager implements ModelProvider {
     };
   }
 
+  /** Read a provider entry from the current config (live when constructed with a config getter). */
+  getProviderConfig(providerName: string): ProviderConfig | undefined {
+    return this.config.providers[providerName];
+  }
+
+  /** Resolve an OAuth bearer-token provider for a configured provider entry. */
+  resolveOAuthTokenProvider(
+    providerName: string,
+    oauthRef?: OAuthRef,
+  ): BearerTokenProvider | undefined {
+    return this.options.resolveOAuthTokenProvider?.(providerName, oauthRef);
+  }
+
   resolveAuth(
     model: string,
     options?: { readonly log?: Logger },

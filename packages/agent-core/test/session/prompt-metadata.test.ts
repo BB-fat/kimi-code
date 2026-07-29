@@ -18,6 +18,7 @@ import { join } from 'pathe';
 import type { ProviderConfig } from '@moonshot-ai/kosong';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { FlagResolver } from '../../src/flags';
 import type { ResolvedAgentProfile } from '../../src/profile';
 import type { SDKSessionRPC } from '../../src/rpc';
 import { Session } from '../../src/session';
@@ -107,6 +108,141 @@ const MOCK_PROVIDER = {
   model: 'mock-model',
 } as const satisfies ProviderConfig;
 
+const MANAGED_PROVIDER = {
+  type: 'kimi',
+  baseUrl: 'https://api.example.test/coding/v1',
+  oauth: { storage: 'file', key: 'kimi-code' },
+} as const;
+
+describe('SessionAPIImpl auto title', () => {
+  it('replaces the easy title with the generated one when the flag is on', async () => {
+    const fetchMock = stubChatTitleFetch('生成的标题');
+    const { api, session, events, agent } = await setupAutoTitleSession({
+      autoTitle: true,
+    });
+
+    await api.prompt({ agentId: 'main', input: [{ type: 'text', text: '帮我看个 Go 报错' }] });
+    if (agent.turn.hasActiveTurn) {
+      await agent.turn.waitForCurrentTurn();
+    }
+
+    await waitFor(() =>
+      events.some((e) => e['type'] === 'session.meta.updated' && e['title'] === '生成的标题'),
+    );
+    expect(session.metadata.isCustomTitle).toBe(false);
+    const [, init] = chatTitleCalls(fetchMock)[0]!;
+    expect(JSON.parse(init?.body as string)).toEqual({
+      method: 'chat_title',
+      params: { chat_content: 'user: 帮我看个 Go 报错' },
+    });
+    const titleEvents = events.filter((e) => e['type'] === 'session.meta.updated');
+    expect(titleEvents.at(-1)).toMatchObject({ title: '生成的标题' });
+  });
+
+  it('keeps the easy title when the flag is off', async () => {
+    const fetchMock = stubChatTitleFetch('生成的标题');
+    const { api, session, agent } = await setupAutoTitleSession({ autoTitle: false });
+
+    await api.prompt({ agentId: 'main', input: [{ type: 'text', text: '帮我看个 Go 报错' }] });
+    if (agent.turn.hasActiveTurn) {
+      await agent.turn.waitForCurrentTurn();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(chatTitleCalls(fetchMock)).toHaveLength(0);
+    expect(session.metadata.title).toBe('帮我看个 Go 报错');
+  });
+
+  it('keeps the easy title when the managed provider is not OAuth-backed', async () => {
+    const fetchMock = stubChatTitleFetch('生成的标题');
+    const { api, session, agent } = await setupAutoTitleSession({
+      autoTitle: true,
+      managedOAuth: false,
+    });
+
+    await api.prompt({ agentId: 'main', input: [{ type: 'text', text: '帮我看个 Go 报错' }] });
+    if (agent.turn.hasActiveTurn) {
+      await agent.turn.waitForCurrentTurn();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(chatTitleCalls(fetchMock)).toHaveLength(0);
+    expect(session.metadata.title).toBe('帮我看个 Go 报错');
+  });
+});
+
+function chatTitleCalls(fetchMock: ReturnType<typeof vi.fn>): [string, RequestInit?][] {
+  return (fetchMock.mock.calls as unknown as [string, RequestInit?][]).filter(([url]) =>
+    String(url).includes('/tools'),
+  );
+}
+
+function stubChatTitleFetch(title: string) {
+  const fetchMock = vi.fn(
+    async () =>
+      new Response(JSON.stringify({ title }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+  );
+  vi.stubGlobal('fetch', fetchMock);
+  return fetchMock;
+}
+
+async function waitFor(condition: () => boolean, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error('waitFor: condition not met before timeout');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+async function setupAutoTitleSession(options: { autoTitle: boolean; managedOAuth?: boolean }) {
+  const sessionDir = await makeTempDir();
+  const events: Array<Record<string, unknown>> = [];
+  const scripted = createScriptedGenerate();
+  const flags = new FlagResolver({});
+  flags.setConfigOverrides({ 'auto-title': options.autoTitle });
+  const managed =
+    options.managedOAuth === false
+      ? { type: 'kimi', apiKey: 'sk-test' }
+      : MANAGED_PROVIDER;
+  const session = track(
+    new Session({
+      id: 'auto-title',
+      kaos: testKaos.withCwd(sessionDir),
+      homedir: sessionDir,
+      rpc: createSessionRpc(events),
+      skills: { explicitDirs: [join(sessionDir, 'missing-skills')] },
+      providerManager: new ProviderManager({
+        config: {
+          providers: {
+            test: { type: MOCK_PROVIDER.type, apiKey: MOCK_PROVIDER.apiKey },
+            'managed:kimi-code': managed,
+          },
+          models: {
+            [MOCK_PROVIDER.model]: {
+              provider: 'test',
+              model: MOCK_PROVIDER.model,
+              maxContextSize: 1_000_000,
+            },
+          },
+        },
+        resolveOAuthTokenProvider: () => ({ getAccessToken: async () => 'test-token' }),
+      }),
+      experimentalFlags: flags,
+    }),
+  );
+  const { agent } = await session.createAgent(
+    { type: 'main', generate: scripted.generate },
+    { profile: testProfile() },
+  );
+  agent.config.update({ modelAlias: MOCK_PROVIDER.model, thinkingEffort: 'off' });
+  agent.permission.setMode('yolo');
+  const api = new SessionAPIImpl(session);
+  return { api, session, events, agent };
+}
+
 const tempDirs: string[] = [];
 const openSessions: Session[] = [];
 
@@ -116,6 +252,7 @@ function track(session: Session): Session {
 }
 
 afterEach(async () => {
+  vi.unstubAllGlobals();
   // Close sessions first so their async metadata/wire writes settle before the
   // temp dirs are removed (otherwise rm races with a write -> ENOTEMPTY).
   await Promise.allSettled(openSessions.splice(0).map((s) => s.close()));

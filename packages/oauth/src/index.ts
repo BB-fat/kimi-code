@@ -94,6 +94,13 @@ export type {
   UsageWindow,
 } from './managed-usage';
 
+export { fetchChatTitle, kimiCodeToolsUrl } from './managed-tools';
+export type {
+  FetchChatTitleError,
+  FetchChatTitleOk,
+  FetchChatTitleResult,
+} from './managed-tools';
+
 export { fetchSubmitFeedback, kimiCodeFeedbackUrl } from './managed-feedback';
 export type {
   FetchSubmitFeedbackError,
