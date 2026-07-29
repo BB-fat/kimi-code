@@ -7,8 +7,11 @@
  * self-gates on `agentId === 'main'`; Agent scope creation instantiates it for
  * every agent, so other agents construct it as a no-op. Resolves
  * session prompt context through `sessionContext` and reports missing skills
- * through `log`. Bound at Agent scope.
+ * through `log`. Persists the last rendered fingerprint through `wire`. Bound
+ * at Agent scope.
  */
+
+import { createHash } from 'node:crypto';
 
 import { Disposable } from '#/_base/di/lifecycle';
 import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
@@ -24,8 +27,13 @@ import type { SkillCatalog, SkillDefinition } from '#/app/skillCatalog/types';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
 import { PLUGIN_SKILL_SOURCE_ID } from '#/session/sessionSkillCatalog/pluginSkillSource';
+import { IWireService } from '#/wire/wire';
 
 import { IAgentPluginService } from './agentPlugin';
+import {
+  AgentPluginModel,
+  setPluginSessionStartBaseline,
+} from './agentPluginOps';
 
 const SESSION_START_INJECTION_VARIANT = 'plugin_session_start';
 
@@ -36,6 +44,8 @@ const MAIN_AGENT_ID = 'main';
 export class AgentPluginService extends Disposable implements IAgentPluginService {
   declare readonly _serviceBrand: undefined;
 
+  private operationTail: Promise<void> = Promise.resolve();
+
   constructor(
     @IAgentScopeContext scopeContext: IAgentScopeContext,
     @IAgentContextInjectorService injector: IAgentContextInjectorService,
@@ -44,6 +54,7 @@ export class AgentPluginService extends Disposable implements IAgentPluginServic
     @IPluginService private readonly plugins: IPluginService,
     @ISessionSkillCatalog private readonly skillCatalog: ISessionSkillCatalog,
     @ISessionContext private readonly sessionContext: ISessionContext,
+    @IWireService private readonly wire: IWireService,
     @ILogService private readonly log: ILogService,
   ) {
     super();
@@ -57,7 +68,12 @@ export class AgentPluginService extends Disposable implements IAgentPluginServic
         SESSION_START_INJECTION_VARIANT,
         async ({ injectedPositions }) => {
           if (injectedPositions.length > 0) return undefined;
-          return this.renderSessionStartReminder();
+          return this.enqueue(async () => {
+            const reminder = await this.renderSessionStartReminder();
+            if (hasPluginSessionStartReminder(this.context.get())) return undefined;
+            if (reminder !== undefined) this.markSessionStartBaseline(reminder);
+            return reminder;
+          });
         },
       ),
     );
@@ -83,20 +99,66 @@ export class AgentPluginService extends Disposable implements IAgentPluginServic
   }
 
   async appendFreshSessionStartReminder(): Promise<void> {
+    return this.enqueue(() => this.refreshSessionStartReminder());
+  }
+
+  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const next = this.operationTail.then(operation);
+    this.operationTail = next.then(
+      () => undefined,
+      (error: unknown) => {
+        this.log.warn('failed to refresh plugin sessionStart reminder', error);
+      },
+    );
+    return next;
+  }
+
+  private async refreshSessionStartReminder(): Promise<void> {
     const reminder = await this.renderSessionStartReminder();
+    const baseline = this.wire.getModel(AgentPluginModel);
+    const fingerprint = pluginSessionStartFingerprint(reminder);
+    const active = reminder !== undefined;
+    if (
+      baseline.sessionStartFingerprint === fingerprint &&
+      baseline.sessionStartActive === active
+    ) {
+      return;
+    }
     if (reminder !== undefined) {
       this.reminders.appendSystemReminder(
         `${reminder}\n\nThis supersedes any earlier plugin_session_start reminder in this session.`,
         { kind: 'injection', variant: SESSION_START_INJECTION_VARIANT },
       );
-    } else if (shouldNeutralizePluginSessionStart(this.context.get())) {
+    } else if (
+      baseline.sessionStartActive ||
+      (baseline.sessionStartFingerprint === undefined &&
+        shouldNeutralizePluginSessionStart(this.context.get()))
+    ) {
       this.reminders.appendSystemReminder(
         'There are currently no active plugin session starts. ' +
           'This supersedes any earlier plugin_session_start reminder in this session.',
         { kind: 'injection', variant: SESSION_START_INJECTION_VARIANT },
       );
     }
+    this.markSessionStartBaseline(reminder);
   }
+
+  private markSessionStartBaseline(reminder: string | undefined): void {
+    const fingerprint = pluginSessionStartFingerprint(reminder);
+    const active = reminder !== undefined;
+    const baseline = this.wire.getModel(AgentPluginModel);
+    if (
+      baseline.sessionStartFingerprint === fingerprint &&
+      baseline.sessionStartActive === active
+    ) {
+      return;
+    }
+    this.wire.dispatch(setPluginSessionStartBaseline({ fingerprint, active }));
+  }
+}
+
+function pluginSessionStartFingerprint(reminder: string | undefined): string {
+  return createHash('sha256').update(reminder ?? '').digest('hex');
 }
 
 interface RenderPluginSessionStartReminderInput {
@@ -132,13 +194,25 @@ function renderPluginSessionStartReminder(
 function shouldNeutralizePluginSessionStart(
   history: readonly { readonly origin?: { readonly kind: string; readonly variant?: string } }[],
 ): boolean {
-  return history.some((message) => {
-    const kind = message.origin?.kind;
-    if (kind === 'injection') {
-      return message.origin?.variant === SESSION_START_INJECTION_VARIANT;
-    }
-    return kind === 'compaction_summary';
-  });
+  return history.some(
+    (message) =>
+      isPluginSessionStartReminder(message) || message.origin?.kind === 'compaction_summary',
+  );
+}
+
+function hasPluginSessionStartReminder(
+  history: readonly { readonly origin?: { readonly kind: string; readonly variant?: string } }[],
+): boolean {
+  return history.some((message) => isPluginSessionStartReminder(message));
+}
+
+function isPluginSessionStartReminder(message: {
+  readonly origin?: { readonly kind: string; readonly variant?: string };
+}): boolean {
+  return (
+    message.origin?.kind === 'injection' &&
+    message.origin.variant === SESSION_START_INJECTION_VARIANT
+  );
 }
 
 function renderSessionStartBlock(

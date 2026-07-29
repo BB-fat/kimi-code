@@ -21,7 +21,7 @@
 // owning model offloads inline media to blob storage), cross-reducers
 // (foreign models that also reduce this record on dispatch and replay).
 
-// Index (45 record types)
+// Index (46 record types)
 //   config.update                      profile              persisted  src/agent/profile/profileOps.ts
 //   context_size.measured              contextSize          transient  src/agent/contextSize/contextSizeOps.ts
 //   context.append_loop_event          contextMemory        persisted  src/agent/contextMemory/contextOps.ts
@@ -51,6 +51,7 @@
 //   plan_mode.enter                    plan                 persisted  src/agent/plan/planOps.ts
 //   plan_mode.exit                     plan                 persisted  src/agent/plan/planOps.ts
 //   plan.revision                      plan                 persisted  src/agent/plan/planOps.ts
+//   plugin.session_start.set_baseline  agentPlugin          persisted  src/agent/plugin/agentPluginOps.ts
 //   profile.bind                       profile              persisted  src/agent/profile/profileOps.ts
 //   skill.activate                     skill                transient  src/agent/skill/skillOps.ts
 //   skill.disclosure.set               skillDisclosure      persisted  src/agent/skillDisclosure/skillDisclosureOps.ts
@@ -441,6 +442,16 @@ interface PlanRevisionPayload {
 }
 
 /**
+ * model: agentPlugin · persisted
+ * owner: src/agent/plugin/agentPluginOps.ts
+ */
+interface PluginSessionStartSetBaselinePayload {
+  _name: 'plugin.session_start.set_baseline';
+  fingerprint: string;
+  active: boolean;
+}
+
+/**
  * model: profile · persisted · cross-reducers: profile.activeTools
  * owner: src/agent/profile/profileOps.ts
  */
@@ -654,6 +665,7 @@ interface WirePayloadMap {
   "plan_mode.enter": PlanModeEnterPayload;
   "plan_mode.exit": PlanModeExitPayload;
   "plan.revision": PlanRevisionPayload;
+  "plugin.session_start.set_baseline": PluginSessionStartSetBaselinePayload;
   "profile.bind": ProfileBindPayload;
   "skill.activate": SkillActivatePayload;
   "skill.disclosure.set": SkillDisclosureSetPayload;

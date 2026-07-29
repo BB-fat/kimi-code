@@ -21,8 +21,16 @@ import type { EnabledPluginSessionStart, ReloadSummary } from '#/app/plugin/type
 import { InMemorySkillCatalog } from '#/app/skillCatalog/registry';
 import type { SkillDefinition } from '#/app/skillCatalog/types';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
+import { IWireService } from '#/wire/wire';
 
-import { agentService, appService, createTestAgent, skillServices, type TestAgentContext } from '../../harness';
+import {
+  agentService,
+  appService,
+  createTestAgent,
+  InMemoryWireRecordPersistence,
+  skillServices,
+  type TestAgentContext,
+} from '../../harness';
 
 function pluginSkill(): SkillDefinition {
   return {
@@ -39,6 +47,7 @@ function pluginSkill(): SkillDefinition {
 
 interface PluginServiceStubOptions {
   readonly sessionStarts: readonly EnabledPluginSessionStart[];
+  readonly sessionStartsReader?: () => Promise<readonly EnabledPluginSessionStart[]>;
   readonly reloadEmitter?: Emitter<ReloadSummary>;
 }
 
@@ -59,7 +68,7 @@ function pluginServiceStub(options: PluginServiceStubOptions): IPluginService {
     listPluginCommands: async () => [],
     checkUpdates: async () => [],
     pluginSkillRoots: async () => [],
-    enabledSessionStarts: async () => options.sessionStarts,
+    enabledSessionStarts: options.sessionStartsReader ?? (async () => options.sessionStarts),
     enabledMcpServers: async () => ({}),
     enabledHooks: async () => [],
   };
@@ -219,15 +228,215 @@ describe('AgentPluginService plugin session-start wiring', () => {
 
     expect(findPluginSessionStartMessages(ctx)).toHaveLength(1);
 
+    const refreshedSkill = pluginSkill();
+    catalog.register({ ...refreshedSkill, content: 'Do the refreshed demo thing.' }, { replace: true });
+
     const appended = waitForPluginSessionStartMessage(ctx);
     sinkChange.fire('plugin');
     await appended;
 
     const messages = findPluginSessionStartMessages(ctx);
-    expect(messages.length).toBeGreaterThanOrEqual(2);
+    expect(messages).toHaveLength(2);
     const latest = messageText(messages.at(-1)!);
     expect(latest).toContain('<plugin_session_start plugin="demo" skill="demo-skill">');
+    expect(latest).toContain('Do the refreshed demo thing.');
     expect(latest).toContain('supersedes any earlier plugin_session_start reminder');
+    sinkChange.dispose();
+  });
+
+  it('does not append when a plugin source refresh renders the same reminder', async () => {
+    const catalog = new InMemorySkillCatalog();
+    catalog.register(pluginSkill());
+    const sinkChange = new Emitter<string>();
+    const skillCatalog: ISessionSkillCatalog = {
+      _serviceBrand: undefined,
+      catalog,
+      ready: Promise.resolve(),
+      onDidChange: sinkChange.event,
+      load: async () => {},
+      reload: async () => {},
+    };
+
+    ctx = createTestAgent(
+      { autoConfigure: true },
+      appService(
+        IPluginService,
+        pluginServiceStub({
+          sessionStarts: [{ pluginId: 'demo', skillName: 'demo-skill' }],
+        }),
+      ),
+      skillServices(skillCatalog),
+      agentService(
+        IAgentPluginService,
+        new SyncDescriptor(AgentPluginService),
+      ),
+    );
+
+    const service = ctx.get(IAgentPluginService) as AgentPluginService;
+
+    await injectRegistered(ctx);
+    expect(findPluginSessionStartMessages(ctx)).toHaveLength(1);
+
+    sinkChange.fire('plugin');
+    await service.appendFreshSessionStartReminder();
+
+    expect(findPluginSessionStartMessages(ctx)).toHaveLength(1);
+    sinkChange.dispose();
+  });
+
+  it('serializes a plugin refresh that overlaps the initial reminder render', async () => {
+    const catalog = new InMemorySkillCatalog();
+    catalog.register(pluginSkill());
+    const sinkChange = new Emitter<string>();
+    const sessionStarts: EnabledPluginSessionStart[] = [
+      { pluginId: 'demo', skillName: 'demo-skill' },
+    ];
+    let reads = 0;
+    let releaseFirstRead!: () => void;
+    let markFirstReadStarted!: () => void;
+    const firstReadStarted = new Promise<void>((resolve) => {
+      markFirstReadStarted = resolve;
+    });
+    const firstRead = new Promise<void>((resolve) => {
+      releaseFirstRead = resolve;
+    });
+    const skillCatalog: ISessionSkillCatalog = {
+      _serviceBrand: undefined,
+      catalog,
+      ready: Promise.resolve(),
+      onDidChange: sinkChange.event,
+      load: async () => {},
+      reload: async () => {},
+    };
+    const pluginService = pluginServiceStub({
+      sessionStarts,
+      sessionStartsReader: async () => {
+        reads += 1;
+        if (reads === 1) {
+          markFirstReadStarted();
+          await firstRead;
+        }
+        return sessionStarts;
+      },
+    });
+
+    ctx = createTestAgent(
+      { autoConfigure: true },
+      appService(IPluginService, pluginService),
+      skillServices(skillCatalog),
+      agentService(
+        IAgentPluginService,
+        new SyncDescriptor(AgentPluginService),
+      ),
+    );
+    const service = ctx.get(IAgentPluginService) as AgentPluginService;
+    const initialInjection = injectRegistered(ctx);
+
+    await firstReadStarted;
+    sinkChange.fire('plugin');
+    releaseFirstRead();
+    await initialInjection;
+    await service.appendFreshSessionStartReminder();
+
+    expect(findPluginSessionStartMessages(ctx)).toHaveLength(1);
+    sinkChange.dispose();
+  });
+
+  it('neutralizes removed plugin session starts only once', async () => {
+    const catalog = new InMemorySkillCatalog();
+    catalog.register(pluginSkill());
+    const sinkChange = new Emitter<string>();
+    const sessionStarts: EnabledPluginSessionStart[] = [
+      { pluginId: 'demo', skillName: 'demo-skill' },
+    ];
+    const skillCatalog: ISessionSkillCatalog = {
+      _serviceBrand: undefined,
+      catalog,
+      ready: Promise.resolve(),
+      onDidChange: sinkChange.event,
+      load: async () => {},
+      reload: async () => {},
+    };
+
+    ctx = createTestAgent(
+      { autoConfigure: true },
+      appService(IPluginService, pluginServiceStub({ sessionStarts })),
+      skillServices(skillCatalog),
+      agentService(
+        IAgentPluginService,
+        new SyncDescriptor(AgentPluginService),
+      ),
+    );
+
+    const service = ctx.get(IAgentPluginService) as AgentPluginService;
+    await injectRegistered(ctx);
+    sessionStarts.length = 0;
+
+    const neutralized = waitForPluginSessionStartMessage(ctx);
+    sinkChange.fire('plugin');
+    await neutralized;
+    sinkChange.fire('plugin');
+    await service.appendFreshSessionStartReminder();
+
+    const messages = findPluginSessionStartMessages(ctx);
+    expect(messages).toHaveLength(2);
+    expect(messageText(messages.at(-1)!)).toContain(
+      'There are currently no active plugin session starts.',
+    );
+    sinkChange.dispose();
+  });
+
+  it('restores the rendered reminder fingerprint across agent resumes', async () => {
+    const persistence = new InMemoryWireRecordPersistence();
+    const catalog = new InMemorySkillCatalog();
+    catalog.register(pluginSkill());
+    const firstSkillCatalog: ISessionSkillCatalog = {
+      _serviceBrand: undefined,
+      catalog,
+      ready: Promise.resolve(),
+      onDidChange: () => ({ dispose: () => {} }),
+      load: async () => {},
+      reload: async () => {},
+    };
+    const pluginService = pluginServiceStub({
+      sessionStarts: [{ pluginId: 'demo', skillName: 'demo-skill' }],
+    });
+
+    ctx = createTestAgent(
+      { autoConfigure: true, persistence },
+      appService(IPluginService, pluginService),
+      skillServices(firstSkillCatalog),
+      agentService(
+        IAgentPluginService,
+        new SyncDescriptor(AgentPluginService),
+      ),
+    );
+    ctx.get(IAgentPluginService);
+    await injectRegistered(ctx);
+    await ctx.get(IWireService).flush();
+    await ctx.dispose();
+
+    const sinkChange = new Emitter<string>();
+    const resumedSkillCatalog: ISessionSkillCatalog = {
+      ...firstSkillCatalog,
+      onDidChange: sinkChange.event,
+    };
+    ctx = createTestAgent(
+      { autoConfigure: false, persistence },
+      appService(IPluginService, pluginService),
+      skillServices(resumedSkillCatalog),
+      agentService(
+        IAgentPluginService,
+        new SyncDescriptor(AgentPluginService),
+      ),
+    );
+    const service = ctx.get(IAgentPluginService) as AgentPluginService;
+    await ctx.restorePersisted();
+
+    sinkChange.fire('plugin');
+    await service.appendFreshSessionStartReminder();
+
+    expect(findPluginSessionStartMessages(ctx)).toHaveLength(1);
     sinkChange.dispose();
   });
 
@@ -264,6 +473,8 @@ describe('AgentPluginService plugin session-start wiring', () => {
     await injectRegistered(ctx);
     expect(findPluginSessionStartMessages(ctx)).toHaveLength(1);
 
+    const refreshedSkill = pluginSkill();
+    catalog.register({ ...refreshedSkill, content: 'Do the refreshed demo thing.' }, { replace: true });
     const appended = waitForPluginSessionStartMessage(ctx);
     sinkChange.fire('user');
     sinkChange.fire('plugin');
