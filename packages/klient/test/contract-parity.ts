@@ -44,7 +44,7 @@ import type {
   CreateChildSessionOptions,
   CreateSessionOptions,
   ForkSessionOptions,
-} from '@moonshot-ai/agent-core-v2/app/sessionLifecycle/sessionLifecycle';
+} from '@moonshot-ai/agent-core-v2/workspace/workspaceHandler/workspaceHandler';
 import type {
   ApprovalRequest,
   ApprovalResponse,
@@ -396,7 +396,6 @@ type _bootstrapStringProps = AssertStringProps<
     | 'homeDir'
     | 'configPath'
     | 'clientVersion'
-    | 'sessionsDir'
     | 'blobsDir'
     | 'storeDir'
     | 'cacheDir'

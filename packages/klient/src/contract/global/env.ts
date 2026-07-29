@@ -18,7 +18,6 @@ export const envContract = {
   homeDir: stringRead,
   configPath: stringRead,
   clientVersion: stringRead,
-  sessionsDir: stringRead,
   blobsDir: stringRead,
   storeDir: stringRead,
   cacheDir: stringRead,

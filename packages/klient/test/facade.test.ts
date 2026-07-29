@@ -99,7 +99,7 @@ describe('facade routing', () => {
     const env = await klient.global.env();
     expect(env.platform).toBe('v');
     expect(env.logsDir).toBe('v');
-    expect(channel.calls).toHaveLength(12);
+    expect(channel.calls).toHaveLength(11);
     expect(channel.calls.every((call) => call.service === 'bootstrapService')).toBe(true);
   });
 
@@ -108,11 +108,11 @@ describe('facade routing', () => {
     const klient = createKlientFromChannel(channel);
     channel.result = 'v';
     await klient.global.env();
-    expect(channel.calls).toHaveLength(12);
+    expect(channel.calls).toHaveLength(11);
 
     const again = await klient.global.env();
     expect(again.platform).toBe('v');
-    expect(channel.calls).toHaveLength(12);
+    expect(channel.calls).toHaveLength(11);
   });
 });
 
