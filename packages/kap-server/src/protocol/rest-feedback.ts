@@ -22,7 +22,7 @@ export const feedbackDiagnosticsSchema = z.enum(['none', 'logs', 'logs_and_codeb
 export type FeedbackDiagnostics = z.infer<typeof feedbackDiagnosticsSchema>;
 
 export const feedbackSubmitBodySchema = z.object({
-  type: feedbackTypeSchema,
+  type: feedbackTypeSchema.optional(),
   content: z.string().min(1).max(20000),
   title: z.string().min(1).max(256).optional(),
   contact: z.string().min(1).max(256).optional(),

@@ -10,7 +10,7 @@ import type { FeedbackDiagnostics, FeedbackType } from '../../protocol/rest-feed
  * naming so the log can be shipped to a collection backend unchanged.
  */
 export interface FeedbackEntry {
-  readonly type: FeedbackType;
+  readonly type?: FeedbackType;
   readonly content: string;
   readonly title?: string;
   readonly contact?: string;

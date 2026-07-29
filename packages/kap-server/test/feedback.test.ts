@@ -49,7 +49,7 @@ function submit(api: AppLike, payload: unknown) {
 interface StoredRecord {
   id: string;
   time: number;
-  type: string;
+  type?: string;
   content: string;
   title?: string;
   contact?: string;
@@ -100,6 +100,16 @@ describe('server-v2 feedback routes', () => {
     expect(records[0]).toMatchObject({ type: 'bug', content: 'the session list flashes on open' });
     expect(typeof records[0]?.id).toBe('string');
     expect(typeof records[0]?.time).toBe('number');
+  });
+
+  it('accepts feedback without a type', async () => {
+    const res = await submit(appOf(server as RunningServer), { content: 'quick note from the cli' });
+    expect(envelopeOf<null>(res.json()).code).toBe(0);
+
+    const records = await readRecords(home as string);
+    expect(records).toHaveLength(1);
+    expect(records[0]?.content).toBe('quick note from the cli');
+    expect(records[0]?.type).toBeUndefined();
   });
 
   it('persists the optional detail fields', async () => {
