@@ -112,6 +112,15 @@ export class SessionMetadata extends Disposable implements ISessionMetadata {
     await this.update({ title, isCustomTitle: true });
   }
 
+  async setGeneratedTitleIfUncustomized(title: string): Promise<boolean> {
+    return this.enqueueUpdate(async () => {
+      await this.ready;
+      if (this.data.isCustomTitle === true) return false;
+      await this.applyUpdate({ title, isCustomTitle: false });
+      return true;
+    });
+  }
+
   async setArchived(archived: boolean): Promise<void> {
     await this.update({ archived });
   }
@@ -126,9 +135,12 @@ export class SessionMetadata extends Disposable implements ISessionMetadata {
     });
   }
 
-  private enqueueUpdate(work: () => Promise<void>): Promise<void> {
+  private enqueueUpdate<T>(work: () => Promise<T>): Promise<T> {
     const run = this.updateQueue.then(work, work);
-    this.updateQueue = run.catch(() => {});
+    this.updateQueue = run.then(
+      () => undefined,
+      () => undefined,
+    );
     return run;
   }
 
@@ -216,8 +228,14 @@ export function normalizeSessionMeta(raw: SessionMeta, sessionId: string): Sessi
       : undefined);
   const legacyCustomTitle =
     typeof legacy.customTitle === 'string' ? legacy.customTitle : undefined;
-  const title = legacyCustomTitle ?? raw.title;
-  const isCustomTitle = legacyCustomTitle === undefined ? raw.isCustomTitle : true;
+  const hasModernTitleState =
+    typeof raw.title === 'string' && typeof raw.isCustomTitle === 'boolean';
+  const title = hasModernTitleState ? raw.title : (legacyCustomTitle ?? raw.title);
+  const isCustomTitle = hasModernTitleState
+    ? raw.isCustomTitle
+    : legacyCustomTitle === undefined
+      ? raw.isCustomTitle
+      : true;
   if (raw.version === SESSION_META_VERSION) {
     if (cwd === raw.cwd && title === raw.title && isCustomTitle === raw.isCustomTitle) {
       return raw;

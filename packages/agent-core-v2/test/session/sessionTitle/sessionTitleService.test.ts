@@ -5,7 +5,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
-import { OAuthUnauthorizedError } from '@moonshot-ai/kimi-code-oauth';
+import { OAuthConnectionError, OAuthUnauthorizedError } from '@moonshot-ai/kimi-code-oauth';
 
 import { DisposableStore, type IDisposable } from '#/_base/di/lifecycle';
 import { createServices, type TestInstantiationService } from '#/_base/di/test';
@@ -88,6 +88,12 @@ class FakeSessionMetadata implements ISessionMetadata {
     return this.update({ title, isCustomTitle: true });
   }
 
+  async setGeneratedTitleIfUncustomized(title: string): Promise<boolean> {
+    if (this.meta.isCustomTitle === true) return false;
+    await this.update({ title, isCustomTitle: false });
+    return true;
+  }
+
   setArchived(archived: boolean): Promise<void> {
     return this.update({ archived });
   }
@@ -168,7 +174,6 @@ describe('SessionTitleService', () => {
         reg.define(ISessionTitleService, SessionTitleService);
       },
     });
-    // Construct the SUT so its bus subscription is live.
     ix.get(ISessionTitleService);
   });
 
@@ -300,6 +305,24 @@ describe('SessionTitleService', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('returns unavailable when OAuth token retrieval has an operational failure', async () => {
+    tokenError = new OAuthConnectionError('connection failed');
+    await metadata.update({ lastPrompt: 'hello' });
+
+    await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('propagates unexpected token provider failures', async () => {
+    tokenError = new Error('unexpected failure');
+    await metadata.update({ lastPrompt: 'hello' });
+
+    await expect(ix.get(ISessionTitleService).generateTitle()).rejects.toThrow(
+      'unexpected failure',
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('includes environment custom headers', async () => {
     vi.stubEnv('KIMI_CODE_CUSTOM_HEADERS', 'X-Proxy-Header: from-env\n');
     await metadata.update({ lastPrompt: 'hello' });
@@ -336,6 +359,19 @@ describe('SessionTitleService', () => {
 
     await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('trusts a modern non-custom title over a stale legacy customTitle', async () => {
+    metadata.meta = {
+      ...metadata.meta,
+      title: 'easy title',
+      isCustomTitle: false,
+      lastPrompt: 'hello',
+      customTitle: 'stale legacy title',
+    } as SessionMeta;
+
+    await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBe('生成的标题');
+    expect(metadata.meta.title).toBe('生成的标题');
   });
 
   it('shares an in-flight generation between automatic and manual requests', async () => {

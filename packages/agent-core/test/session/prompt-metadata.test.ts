@@ -147,6 +147,31 @@ describe('SessionAPIImpl auto title', () => {
     expect(titleEvents.at(-1)).toMatchObject({ title: '生成的标题' });
   });
 
+  it('trusts modern non-custom title state over a stale legacy customTitle', async () => {
+    stubChatTitleFetch('生成的标题');
+    const { api, session, events, agent } = await setupAutoTitleSession({
+      autoTitle: true,
+    });
+    session.metadata = {
+      ...session.metadata,
+      title: 'New Session',
+      isCustomTitle: false,
+      customTitle: 'stale legacy title',
+    } as typeof session.metadata;
+
+    await api.prompt({ agentId: 'main', input: [{ type: 'text', text: '帮我看个 Go 报错' }] });
+    if (agent.turn.hasActiveTurn) {
+      await agent.turn.waitForCurrentTurn();
+    }
+
+    await waitFor(() =>
+      events.some((event) =>
+        event['type'] === 'session.meta.updated' && event['title'] === '生成的标题'
+      ),
+    );
+    expect(session.metadata.title).toBe('生成的标题');
+  });
+
   it('sends managed request headers with the established layer precedence', async () => {
     vi.stubEnv(
       'KIMI_CODE_CUSTOM_HEADERS',

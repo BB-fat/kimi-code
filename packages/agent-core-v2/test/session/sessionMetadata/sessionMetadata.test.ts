@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SyncDescriptor } from '#/_base/di/descriptors';
 import { DisposableStore } from '#/_base/di/lifecycle';
@@ -60,7 +60,10 @@ describe('SessionMetadata', () => {
     ix.set(ISessionMetadata, new SyncDescriptor(SessionMetadata));
   });
 
-  afterEach(() => { disposables.dispose(); });
+  afterEach(() => {
+    disposables.dispose();
+    vi.restoreAllMocks();
+  });
 
   it('creates an initial document on first read', async () => {
     const meta = ix.get(ISessionMetadata);
@@ -91,6 +94,16 @@ describe('SessionMetadata', () => {
     await meta.setTitle('t');
     await meta.setArchived(true);
     expect(await meta.read()).toMatchObject({ title: 't', archived: true });
+  });
+
+  it('sets a generated title while the metadata remains uncustomized', async () => {
+    const meta = ix.get(ISessionMetadata);
+
+    await expect(meta.setGeneratedTitleIfUncustomized('generated title')).resolves.toBe(true);
+    await expect(meta.read()).resolves.toMatchObject({
+      title: 'generated title',
+      isCustomTitle: false,
+    });
   });
 
   it('persists across instances', async () => {
@@ -149,7 +162,7 @@ describe('SessionMetadata', () => {
     });
   });
 
-  it('preserves a legacy customTitle when title is also present', async () => {
+  it('trusts modern custom title state over a stale legacy customTitle', async () => {
     const store = ix.get(IAtomicDocumentStore);
     await store.set(META_SCOPE, 'state.json', {
       id: 's1',
@@ -157,22 +170,61 @@ describe('SessionMetadata', () => {
       createdAt: 1700000000000,
       updatedAt: 1700000000000,
       archived: false,
-      title: 'base title',
+      title: 'renamed title',
+      isCustomTitle: true,
       customTitle: 'legacy custom title',
     });
 
     const meta = ix.get(ISessionMetadata);
     await expect(meta.read()).resolves.toMatchObject({
-      title: 'legacy custom title',
+      title: 'renamed title',
       isCustomTitle: true,
     });
 
     await meta.update({ archived: true });
     const fresh = createFreshMetadata(ix);
     await expect(fresh.read()).resolves.toMatchObject({
-      title: 'legacy custom title',
+      title: 'renamed title',
       isCustomTitle: true,
       archived: true,
+    });
+  });
+
+  it('keeps a queued custom title when a generated title is enqueued afterward', async () => {
+    const meta = ix.get(ISessionMetadata);
+    await meta.ready;
+    const store = ix.get(IAtomicDocumentStore);
+    const set = store.set.bind(store);
+    let releaseWrite: (() => void) | undefined;
+    let markWriteStarted: (() => void) | undefined;
+    const writeStarted = new Promise<void>((resolve) => {
+      markWriteStarted = resolve;
+    });
+    const writeReleased = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    let shouldBlock = true;
+    vi.spyOn(store, 'set').mockImplementation(async (scope, key, value) => {
+      if (shouldBlock) {
+        shouldBlock = false;
+        markWriteStarted?.();
+        await writeReleased;
+      }
+      await set(scope, key, value);
+    });
+
+    const priorWrite = meta.update({ lastPrompt: 'hello' });
+    await writeStarted;
+    const rename = meta.setTitle('user title');
+    const generated = meta.setGeneratedTitleIfUncustomized('generated title');
+    releaseWrite?.();
+
+    await priorWrite;
+    await rename;
+    await expect(generated).resolves.toBe(false);
+    await expect(meta.read()).resolves.toMatchObject({
+      title: 'user title',
+      isCustomTitle: true,
     });
   });
 

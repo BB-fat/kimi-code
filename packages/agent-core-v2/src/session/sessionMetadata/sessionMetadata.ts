@@ -54,6 +54,7 @@ export interface ISessionMetadata {
   read(): Promise<SessionMeta>;
   update(patch: SessionMetaPatch): Promise<void>;
   setTitle(title: string): Promise<void>;
+  setGeneratedTitleIfUncustomized(title: string): Promise<boolean>;
   setArchived(archived: boolean): Promise<void>;
   registerAgent(agentId: string, meta: AgentMeta): Promise<void>;
 }

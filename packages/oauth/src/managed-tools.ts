@@ -41,14 +41,13 @@ export async function fetchChatTitle(
     controller.abort();
   }, opts.timeoutMs ?? 8000);
   try {
+    const headers = new Headers(opts.headers);
+    headers.set('Authorization', `Bearer ${accessToken}`);
+    headers.set('Accept', 'application/json');
+    headers.set('Content-Type', 'application/json');
     const res = await fetch(url, {
       method: 'POST',
-      headers: {
-        ...opts.headers,
-        Authorization: `Bearer ${accessToken}`,
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-      },
+      headers,
       body: JSON.stringify({
         method: 'chat_title',
         params: { chat_content: chatContent },

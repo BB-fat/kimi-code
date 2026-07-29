@@ -107,6 +107,7 @@ function metadataStub(): ISessionMetadata {
     read: () => Promise.resolve({} as never),
     update: () => Promise.resolve(),
     setTitle: () => Promise.resolve(),
+    setGeneratedTitleIfUncustomized: () => Promise.resolve(false),
     setArchived: () => Promise.resolve(),
     registerAgent: () => Promise.resolve(),
   };

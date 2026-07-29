@@ -17,7 +17,7 @@
 
 import {
   KIMI_CODE_PROVIDER_NAME,
-  OAuthUnauthorizedError,
+  OAuthError,
   fetchChatTitle,
   kimiCodeToolsUrl,
   parseKimiCodeCustomHeaders,
@@ -119,7 +119,7 @@ export class SessionTitleService extends Disposable implements ISessionTitleServ
     try {
       token = await tokenProvider.getAccessToken();
     } catch (error) {
-      if (!(error instanceof OAuthUnauthorizedError)) throw error;
+      if (!(error instanceof OAuthError)) throw error;
       this.log.debug(`chat_title request unavailable: ${error.message}`);
       return undefined;
     }
@@ -139,11 +139,9 @@ export class SessionTitleService extends Disposable implements ISessionTitleServ
       this.log.debug(`chat_title request failed: ${result.message}`);
       return undefined;
     }
-    // The user may have renamed the session while the request was in flight.
-    const currentAfterRequest = await this.metadata.read();
-    if (hasCustomTitle(currentAfterRequest)) return undefined;
     const title = result.title.slice(0, MAX_GENERATED_TITLE_LENGTH);
-    await this.metadata.update({ title, isCustomTitle: false });
+    const applied = await this.metadata.setGeneratedTitleIfUncustomized(title);
+    if (!applied) return undefined;
     this.eventService.publish({
       type: 'session.meta.updated',
       payload: {
@@ -158,9 +156,13 @@ export class SessionTitleService extends Disposable implements ISessionTitleServ
 }
 
 function hasCustomTitle(metadata: {
-  readonly isCustomTitle?: boolean;
+  readonly title?: unknown;
+  readonly isCustomTitle?: unknown;
   readonly customTitle?: unknown;
 }): boolean {
+  if (typeof metadata.title === 'string' && typeof metadata.isCustomTitle === 'boolean') {
+    return metadata.isCustomTitle;
+  }
   return metadata.isCustomTitle === true || typeof metadata.customTitle === 'string';
 }
 

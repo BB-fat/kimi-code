@@ -60,7 +60,7 @@ describe('fetchChatTitle', () => {
     });
   });
 
-  it('keeps protocol headers authoritative when custom headers collide', async () => {
+  it('keeps protocol headers authoritative when custom header casing differs', async () => {
     const fetchMock = vi.fn(
       async () =>
         new Response(JSON.stringify({ title: '标题' }), {
@@ -72,9 +72,9 @@ describe('fetchChatTitle', () => {
 
     await fetchChatTitle('https://api.example/tools', 'access-token', 'user: hi', {
       headers: {
-        Authorization: 'Bearer wrong-token',
-        Accept: 'text/plain',
-        'Content-Type': 'text/plain',
+        authorization: 'Bearer wrong-token',
+        aCcEpT: 'text/plain',
+        'content-TYPE': 'text/plain',
         'X-Proxy-Header': 'present',
       },
     });

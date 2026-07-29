@@ -394,6 +394,11 @@ function isUntitled(title: unknown): boolean {
 }
 
 function hasCustomTitle(metadata: SessionMeta): boolean {
-  if (metadata.isCustomTitle) return true;
-  return typeof (metadata as SessionMeta & { customTitle?: unknown }).customTitle === 'string';
+  if (typeof metadata.title === 'string' && typeof metadata.isCustomTitle === 'boolean') {
+    return metadata.isCustomTitle;
+  }
+  return (
+    metadata.isCustomTitle ||
+    typeof (metadata as SessionMeta & { customTitle?: unknown }).customTitle === 'string'
+  );
 }
