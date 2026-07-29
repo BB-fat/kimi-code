@@ -27,12 +27,12 @@
  *   every read behind its own initial load, so there is no ready trap here.
  * - `listSessions` / `createSession` / `renameSession` / `forkSession` /
  *   `closeSession` / `resumeSession` / `reloadSession` /
- *   `updateSessionMetadata` / `addAdditionalDir` → the session lifecycle
+ *   `updateSessionMetadata` → the session lifecycle
  *   batch: `klient.global.sessions.list` plus the `klient.session(id)`
  *   metadata mutations where the facade reaches, and the
  *   `ISessionLifecycleService` / session-scope services through
  *   {@link engineAccessor} where it does not (explicit session ids, resume,
- *   fork ids, workspace commands). The v1 `SessionSummary` / `SessionMeta`
+ *   fork ids). The v1 `SessionSummary` / `SessionMeta`
  *   shapes are restored by the pure mapping layer in
  *   `src/v2/session-mapper.ts`. `deleteSession` stays `not_implemented` —
  *   the v2 engine has no session-deletion capability anywhere (tracked in
@@ -168,7 +168,6 @@ import {
   IHostEnvironment,
   IHostFileSystem,
   IModelService,
-  IProjectLocalConfigService,
   IProviderService,
   ISessionBtwService,
   ISessionContext,
@@ -180,7 +179,6 @@ import {
   ISessionMcpService,
   ISessionMetadata,
   ISessionSkillCatalog,
-  ISessionWorkspaceCommandService,
   ISessionWorkspaceContext,
   ISkillCatalogRuntimeOptions,
   ISkillDiscovery,
@@ -233,8 +231,6 @@ import {
   type UpdateSessionMetadataRpcInput,
 } from '#/rpc';
 import type {
-  AddAdditionalDirInput,
-  AddAdditionalDirResult,
   BackgroundTaskInfo,
   CompactOptions,
   ConfigDiagnostics,
@@ -1017,19 +1013,14 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    * most recent N user turns via the shared `limitAgentReplayByTurns`.
    */
   override async resumeSession(input: ResumeSessionInput): Promise<ResumedSessionSummary> {
-    const handle = await this.sessionLifecycle.resume(input.id);
+    // v1 re-resolves caller-provided additional dirs on every resume and
+    // merges them over the workspace-local set; the engine's resume options
+    // do the same while the session scope is materialized.
+    const handle = await this.sessionLifecycle.resume(input.id, {
+      additionalDirs: input.additionalDirs,
+    });
     if (handle === undefined) throw SDKRpcClientV2.sessionNotFound(input.id);
     this.wireSession(handle);
-    // v1 re-resolves caller-provided additional dirs on every resume and
-    // merges them over the workspace-local set; the engine's own resume only
-    // restores the workspace-local ones.
-    if (input.additionalDirs !== undefined && input.additionalDirs.length > 0) {
-      const workspace = handle.accessor.get(ISessionWorkspaceContext);
-      const resolved = await this.engineAccessor
-        .get(IProjectLocalConfigService)
-        .resolveAdditionalDirs(workspace.workDir, input.additionalDirs);
-      workspace.setAdditionalDirs([...workspace.additionalDirs, ...resolved]);
-    }
     return this.resumedSessionSummary(handle, {
       includeSubagents: input.includeSubagents,
       replayTurnLimit: input.replayTurnLimit,
@@ -1085,21 +1076,6 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     const current = await this.klient.session(input.sessionId).get();
     const custom = { ...current.custom, ...input.metadata };
     await this.klient.session(input.sessionId).update({ custom });
-  }
-
-  /**
-   * Through `engineAccessor` (`ISessionWorkspaceCommandService`, session
-   * scope) — no klient facade exists for workspace commands. The v2 service
-   * returns the same `{additionalDirs, projectRoot, configPath, persisted}`
-   * shape as v1. Gap: with `persist: false` v1 also writes the dir into the
-   * session metadata so it survives a resume; v2 keeps it in memory only, so
-   * a non-persisted dir is lost on resume.
-   */
-  override async addAdditionalDir(input: AddAdditionalDirInput): Promise<AddAdditionalDirResult> {
-    const handle = this.requireLiveSession(input.id);
-    return handle.accessor
-      .get(ISessionWorkspaceCommandService)
-      .addAdditionalDir({ path: input.path, persist: input.persist });
   }
 
   /**

@@ -1248,10 +1248,6 @@ export class AgentTestContext {
 
     this.get(IAgentProfileService).configure({
       cwd: () => this.cwd,
-      chdir: async (nextCwd: string) => {
-        this.cwd = nextCwd;
-        workspace.setWorkDir(nextCwd);
-      },
     });
 
     this.initializeRestorableServices();
@@ -1369,7 +1365,6 @@ export class AgentTestContext {
     this.configureRuntimeModel(provider, modelCapabilities);
     const profile = this.get(IAgentProfileService);
     profile.update({
-      cwd: process.cwd(),
       modelAlias: provider.model,
       systemPrompt: DEFAULT_TEST_SYSTEM_PROMPT,
       thinkingLevel: 'off',
@@ -2103,8 +2098,8 @@ function createWorkspaceContextStub(
   initialWorkDir: string,
   initialAdditionalDirs: readonly string[],
 ): ISessionWorkspaceContext {
-  let workDir = resolve(initialWorkDir);
-  let additionalDirs = initialAdditionalDirs.map((dir) => resolve(dir));
+  const workDir = resolve(initialWorkDir);
+  const additionalDirs = initialAdditionalDirs.map((dir) => resolve(dir));
   const isWithin = (absPath: string): boolean => {
     const target = resolve(absPath);
     if (target === workDir) return true;
@@ -2117,18 +2112,8 @@ function createWorkspaceContextStub(
   };
   return {
     _serviceBrand: undefined,
-    get workDir() {
-      return workDir;
-    },
-    get additionalDirs() {
-      return additionalDirs;
-    },
-    setWorkDir: (next) => {
-      workDir = resolve(next);
-    },
-    setAdditionalDirs: (dirs) => {
-      additionalDirs = dirs.map((dir) => resolve(dir));
-    },
+    workDir,
+    additionalDirs,
     resolve: (path) => (isAbsolute(path) ? resolve(path) : resolve(workDir, path)),
     isWithin,
     assertAllowed: (absPath: string, op: PathAccessOperation) => {
@@ -2137,14 +2122,6 @@ function createWorkspaceContextStub(
         throw new Error(`Path outside workspace (${op}): ${target}`);
       }
       return target;
-    },
-    addAdditionalDir: (dir) => {
-      const resolved = resolve(dir);
-      if (!additionalDirs.includes(resolved)) additionalDirs = [...additionalDirs, resolved];
-    },
-    removeAdditionalDir: (dir) => {
-      const resolved = resolve(dir);
-      additionalDirs = additionalDirs.filter((candidate) => candidate !== resolved);
     },
   };
 }

@@ -45,7 +45,6 @@ export interface AgentConfigData {
 }
 
 export type AgentConfigUpdateData = Partial<{
-  cwd: string;
   modelAlias: string;
   profileName: string;
   thinkingLevel: string;
@@ -65,7 +64,6 @@ export interface ProfileData extends AgentConfigData {
 }
 
 export type ProfileUpdateData = Partial<{
-  cwd: string;
   modelAlias: string;
   profileName: string;
   thinkingLevel: string;
@@ -87,7 +85,6 @@ export interface ProfileBindingSnapshot {
 
 export interface ProfileServiceOptions {
   readonly cwd?: string | (() => string | undefined);
-  readonly chdir?: (cwd: string) => void | Promise<void>;
   readonly emitStatusUpdated?: () => void;
 }
 

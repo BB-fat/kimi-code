@@ -21,9 +21,9 @@
  * so no restore-ordering coupling with `userTool` arises. Profile and client
  * policy are persisted independently. The `agent.status.updated`
  * / `warning` events now ride `IEventBus` (`agent.status.updated` canonical in
- * `usageOps`). `chdir` and
- * `emitStatusUpdated` run live-only after the dispatch, so `wire.replay`
- * rebuilds the Models silently; the same live-only path mirrors the resolved
+ * `usageOps`). `emitStatusUpdated` runs live-only after the dispatch, so
+ * `wire.replay` rebuilds the Models silently; the same live-only path mirrors
+ * the resolved
  * model protocol into the ambient telemetry context (`provider_type` /
  * `protocol`) whenever the model alias changes.
  * `bind()` is first-bind only — a profile is the session's identity: the
@@ -46,7 +46,7 @@
  * The mutable plain-data state (`activeToolNamesOverlay` / `agentsMdWarning`
  * / the two emitted-warning dedupe sets) is registered into `agentState`
  * (`IAgentStateService`) and read/written through it; `optionsValue` (holds
- * the `cwd` / `chdir` / `emitStatusUpdated` callbacks) and `activeProfile`
+ * the `cwd` / `emitStatusUpdated` callbacks) and `activeProfile`
  * (a `ResolvedAgentProfile` carrying the `systemPrompt` function) stay plain
  * fields because the container only holds pure data structures. Bound at
  * Agent scope.
@@ -248,7 +248,6 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
   configure(options: ProfileServiceOptions): void {
     this.optionsValue = {
       cwd: options.cwd ?? this.optionsValue.cwd,
-      chdir: options.chdir ?? this.optionsValue.chdir,
       emitStatusUpdated: options.emitStatusUpdated ?? this.optionsValue.emitStatusUpdated,
     };
   }
@@ -286,7 +285,6 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       }),
     );
     this.afterConfigDispatch({
-      cwd: snapshot.cwd,
       modelAlias: snapshot.modelAlias,
       profileName: snapshot.profileName,
       thinkingLevel: snapshot.thinkingLevel,
@@ -348,7 +346,6 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       subagents: profile.subagents,
     }));
     this.afterConfigDispatch({
-      cwd: input.cwd,
       modelAlias: alias,
       profileName: profile.name,
       thinkingLevel,
@@ -558,7 +555,6 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     const payload: {
       -readonly [K in keyof PayloadOf<typeof configUpdate>]: PayloadOf<typeof configUpdate>[K];
     } = {};
-    if (changed.cwd !== undefined) payload.cwd = changed.cwd;
     if (changed.modelAlias !== undefined) payload.modelAlias = changed.modelAlias;
     if (changed.profileName !== undefined) payload.profileName = changed.profileName;
     if (changed.thinkingLevel !== undefined || changed.modelAlias !== undefined) {
@@ -575,9 +571,6 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
   }
 
   private afterConfigDispatch(changed: Omit<ProfileUpdateData, 'activeToolNames'>): void {
-    if (changed.cwd !== undefined) {
-      void this.optionsValue.chdir?.(changed.cwd);
-    }
     if (changed.modelAlias !== undefined) {
       const model = this.tryResolveRawModel();
       this.telemetryContext.set({

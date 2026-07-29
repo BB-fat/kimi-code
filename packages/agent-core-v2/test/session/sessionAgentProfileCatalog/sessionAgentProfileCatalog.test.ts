@@ -103,13 +103,9 @@ function workspaceStub(workDir: string): ISessionWorkspaceContext {
     _serviceBrand: undefined,
     workDir,
     additionalDirs: [],
-    setWorkDir: () => {},
-    setAdditionalDirs: () => {},
     resolve: (rel: string) => rel,
     isWithin: () => true,
     assertAllowed: (p: string) => p,
-    addAdditionalDir: () => {},
-    removeAdditionalDir: () => {},
   };
 }
 
