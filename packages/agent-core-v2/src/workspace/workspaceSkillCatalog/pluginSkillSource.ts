@@ -5,8 +5,10 @@
  * (roots from `plugin.pluginSkillRoots()`), contributing them at priority 5
  * (above builtin, below extra / user / workspace, so project, user and extra
  * skills win name collisions). Re-emits `plugin.onDidReload` as `onDidChange`
- * so the catalog re-pulls plugin skills when plugins reload. Bound at
- * Workspace scope so every session of the handler shares one scan.
+ * so the catalog re-pulls plugin skills when plugins reload; install / enable /
+ * remove mutations deliberately do not refresh the catalog — those take effect
+ * on the next explicit reload. Bound at Workspace scope so every session of
+ * the handler shares one scan.
  */
 
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';
