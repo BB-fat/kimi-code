@@ -1,8 +1,9 @@
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { IOAuthService } from '@moonshot-ai/agent-core-v2';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { type RunningServer, startServer } from '../src/start';
 
@@ -42,41 +43,66 @@ function envelopeOf<T>(body: unknown): Envelope<T> {
   return body as Envelope<T>;
 }
 
-function submit(api: AppLike, payload: unknown) {
-  return api.inject({ method: 'POST', url: '/api/v1/feedback', payload });
+function post(api: AppLike, url: string, payload: unknown) {
+  return api.inject({ method: 'POST', url, payload });
 }
 
-interface StoredRecord {
-  id: string;
-  time: number;
-  type?: string;
-  content: string;
-  title?: string;
-  contact?: string;
-  diagnostics?: string;
-  session_id?: string;
-  agent_id?: string;
-  info?: Record<string, unknown>;
+function jsonResponse(payload: unknown, status = 200): Response {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
 }
 
-async function readRecords(home: string): Promise<StoredRecord[]> {
-  const text = await readFile(join(home, 'feedback', 'feedback.jsonl'), 'utf-8');
-  return text
-    .split('\n')
-    .filter((line) => line.length > 0)
-    .map((line) => JSON.parse(line) as StoredRecord);
+interface BackendCall {
+  readonly url: string;
+  readonly method: string;
+  readonly authorization: string;
+  readonly body: Record<string, unknown>;
+}
+
+function backendCall(fetchMock: ReturnType<typeof vi.fn>, index = 0): BackendCall {
+  const call = fetchMock.mock.calls[index] as [string, RequestInit];
+  const rawBody = call[1].body;
+  if (typeof rawBody !== 'string') {
+    throw new TypeError('expected the backend request body to be a JSON string');
+  }
+  return {
+    url: call[0],
+    method: call[1].method ?? 'GET',
+    authorization: (call[1].headers as Record<string, string>)['Authorization'] ?? '',
+    body: JSON.parse(rawBody) as Record<string, unknown>,
+  };
 }
 
 describe('server-v2 feedback routes', () => {
   let home: string | undefined;
   let server: RunningServer | undefined;
+  let loggedIn: boolean;
+  const fetchMock = vi.fn();
 
   beforeEach(async () => {
+    loggedIn = true;
+    fetchMock.mockReset();
+    vi.stubGlobal('fetch', fetchMock);
+    const fakeOAuth = {
+      status: async () => ({ loggedIn }),
+      resolveTokenProvider: () => ({
+        getAccessToken: async () => 'test-access-token',
+      }),
+    } as unknown as IOAuthService;
     home = await mkdtemp(join(tmpdir(), 'kimi-server-v2-feedback-'));
-    server = await startServer({ host: '127.0.0.1', port: 0, homeDir: home, logLevel: 'silent' });
+    server = await startServer({
+      host: '127.0.0.1',
+      port: 0,
+      homeDir: home,
+      logLevel: 'silent',
+      seeds: [[IOAuthService, fakeOAuth]],
+    });
   });
 
   afterEach(async () => {
+    vi.unstubAllGlobals();
     if (server !== undefined) {
       await server.close();
       server = undefined;
@@ -87,90 +113,140 @@ describe('server-v2 feedback routes', () => {
     }
   });
 
-  it('accepts feedback and appends a stamped JSON line to feedback.jsonl', async () => {
-    const res = await submit(appOf(server as RunningServer), {
-      type: 'bug',
+  it('forwards feedback to the managed backend and returns feedback_id', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ feedback_id: 7 }));
+    const res = await post(appOf(server as RunningServer), '/api/v1/feedback', {
       content: 'the session list flashes on open',
+      session_id: 's-1',
+      type: 'bug',
+      title: 'session list flashes',
+      contact: 'user@example.com',
+      diagnostics: 'logs',
+      agent_id: 'a-1',
+      info: { surface: 'settings' },
     });
+
     expect(res.statusCode).toBe(200);
-    expect(envelopeOf<null>(res.json()).code).toBe(0);
+    const env = envelopeOf<{ feedback_id: number }>(res.json());
+    expect(env.code).toBe(0);
+    expect(env.data?.feedback_id).toBe(7);
 
-    const records = await readRecords(home as string);
-    expect(records).toHaveLength(1);
-    expect(records[0]).toMatchObject({ type: 'bug', content: 'the session list flashes on open' });
-    expect(typeof records[0]?.id).toBe('string');
-    expect(typeof records[0]?.time).toBe('number');
-  });
-
-  it('accepts feedback without a type', async () => {
-    const res = await submit(appOf(server as RunningServer), { content: 'quick note from the cli' });
-    expect(envelopeOf<null>(res.json()).code).toBe(0);
-
-    const records = await readRecords(home as string);
-    expect(records).toHaveLength(1);
-    expect(records[0]?.content).toBe('quick note from the cli');
-    expect(records[0]?.type).toBeUndefined();
-  });
-
-  it('persists the optional detail fields', async () => {
-    await submit(appOf(server as RunningServer), {
-      type: 'feature',
-      content: 'bring back the skills section under general settings',
-      title: 'move skills settings back',
-      contact: 'user@example.com',
-      diagnostics: 'logs',
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const call = backendCall(fetchMock);
+    expect(call.url).toMatch(/\/feedback$/);
+    expect(call.method).toBe('POST');
+    expect(call.authorization).toBe('Bearer test-access-token');
+    expect(call.body).toMatchObject({
       session_id: 's-1',
-      agent_id: 'a-1',
-      info: { surface: 'settings', channel: 'web' },
+      content: 'the session list flashes on open',
+      contact: 'user@example.com',
+      model: null,
+      info: {
+        type: 'bug',
+        title: 'session list flashes',
+        diagnostics: 'logs',
+        agent_id: 'a-1',
+        surface: 'settings',
+      },
+    });
+    expect(String(call.body['version'])).toMatch(/^kimi-code-/);
+    expect(typeof call.body['os']).toBe('string');
+    expect(String(call.body['os']).length).toBeGreaterThan(0);
+  });
+
+  it('omits info when no detail fields are present', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ feedback_id: 8 }));
+    await post(appOf(server as RunningServer), '/api/v1/feedback', {
+      content: 'quick note',
+      session_id: 's-1',
     });
 
-    const records = await readRecords(home as string);
-    expect(records).toHaveLength(1);
-    expect(records[0]).toMatchObject({
-      type: 'feature',
-      content: 'bring back the skills section under general settings',
-      title: 'move skills settings back',
-      contact: 'user@example.com',
-      diagnostics: 'logs',
-      session_id: 's-1',
-      agent_id: 'a-1',
-      info: { surface: 'settings', channel: 'web' },
-    });
+    const call = backendCall(fetchMock);
+    expect('info' in call.body).toBe(false);
+    expect('contact' in call.body).toBe(false);
   });
 
-  it('appends multiple submissions as separate lines', async () => {
-    const api = appOf(server as RunningServer);
-    await Promise.all([
-      submit(api, { type: 'bug', content: 'first' }),
-      submit(api, { type: 'other', content: 'second' }),
+  it('returns 40111 when not signed in and never calls the backend', async () => {
+    loggedIn = false;
+    const res = await post(appOf(server as RunningServer), '/api/v1/feedback', {
+      content: 'hello',
+      session_id: 's-1',
+    });
+
+    expect(envelopeOf(res.json()).code).toBe(40111);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('maps a backend failure to 50001', async () => {
+    fetchMock.mockResolvedValue(new Response('boom', { status: 500 }));
+    const res = await post(appOf(server as RunningServer), '/api/v1/feedback', {
+      content: 'hello',
+      session_id: 's-1',
+    });
+
+    expect(envelopeOf(res.json()).code).toBe(50001);
+  });
+
+  it('proxies upload_url to the backend', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        upload: {
+          id: 3,
+          parts: [{ part_number: 1, url: 'https://example.com/upload-part-1', method: 'PUT', size: 64 }],
+        },
+      }),
+    );
+    const res = await post(appOf(server as RunningServer), '/api/v1/feedback/upload_url', {
+      feedback_id: 7,
+      file_name: 'session.zip',
+      file_size: 64,
+      file_hash: 'deadbeef',
+    });
+
+    const env = envelopeOf<{ upload_id: number; parts: unknown[] }>(res.json());
+    expect(env.code).toBe(0);
+    expect(env.data?.upload_id).toBe(3);
+    expect(env.data?.parts).toEqual([
+      { part_number: 1, url: 'https://example.com/upload-part-1', method: 'PUT', size: 64 },
     ]);
 
-    const records = await readRecords(home as string);
-    expect(records).toHaveLength(2);
-    expect(records.map((r) => r.content).toSorted()).toEqual(['first', 'second']);
+    const call = backendCall(fetchMock);
+    expect(call.url).toMatch(/\/feedback\/upload_url$/);
+    expect(call.body).toMatchObject({
+      feedback_id: 7,
+      file_name: 'session.zip',
+      file_size: 64,
+      file_hash: 'deadbeef',
+    });
   });
 
-  it('rejects an empty content', async () => {
-    const res = await submit(appOf(server as RunningServer), { type: 'bug', content: '' });
-    expect(envelopeOf(res.json()).code).toBe(40001);
+  it('proxies upload_complete to the backend', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({}));
+    const res = await post(appOf(server as RunningServer), '/api/v1/feedback/upload_complete', {
+      upload_id: 3,
+      parts: [{ part_number: 1, etag: 'etag-1' }],
+    });
+
+    expect(envelopeOf<null>(res.json()).code).toBe(0);
+    const call = backendCall(fetchMock);
+    expect(call.url).toMatch(/\/feedback\/upload_complete$/);
+    expect(call.body).toMatchObject({
+      upload_id: 3,
+      parts: [{ part_number: 1, etag: 'etag-1' }],
+    });
   });
 
   it('rejects a missing content', async () => {
-    const res = await submit(appOf(server as RunningServer), { type: 'bug' });
-    expect(envelopeOf(res.json()).code).toBe(40001);
-  });
-
-  it('rejects an unknown feedback type', async () => {
-    const res = await submit(appOf(server as RunningServer), {
-      type: 'praise',
-      content: 'love it',
+    const res = await post(appOf(server as RunningServer), '/api/v1/feedback', {
+      session_id: 's-1',
     });
     expect(envelopeOf(res.json()).code).toBe(40001);
   });
 
-  it.skipIf(process.platform === 'win32')('writes feedback.jsonl with 0600 permissions', async () => {
-    await submit(appOf(server as RunningServer), { type: 'other', content: 'perm check' });
-    const mode = (await stat(join(home as string, 'feedback', 'feedback.jsonl'))).mode & 0o777;
-    expect(mode).toBe(0o600);
+  it('rejects a missing session_id', async () => {
+    const res = await post(appOf(server as RunningServer), '/api/v1/feedback', {
+      content: 'hello',
+    });
+    expect(envelopeOf(res.json()).code).toBe(40001);
   });
 });

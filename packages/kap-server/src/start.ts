@@ -12,6 +12,8 @@ import {
   hostIdentitySeed,
   hostRequestHeadersSeed,
   IConfigService,
+  IModelService,
+  IOAuthService,
   IProviderDiscoveryService,
   IWorkspaceService,
   logSeed,
@@ -206,7 +208,6 @@ export async function startServer(opts: ServerStartOptions = {}): Promise<Runnin
 
   const configPath = resolveConfigPath({ homeDir, configPath: opts.configPath });
   const guiStore = new GuiStoreService(homeDir, logger);
-  const feedback = new FeedbackService(homeDir);
   let authTokenService: IAuthTokenService;
   // Whether a password credential is configured (only meaningful for the real,
   // non-injected auth impl). Drives the token-only warning on a public bind.
@@ -279,6 +280,14 @@ export async function startServer(opts: ServerStartOptions = {}): Promise<Runnin
     core.accessor.get(IConfigService),
     logger,
   );
+  // Forwards feedback to the managed collection backend with the managed
+  // provider's OAuth token; the host version stamps the backend `version`
+  // field (mirroring the CLI's `/feedback`).
+  const feedback = new FeedbackService({
+    oauth: core.accessor.get(IOAuthService),
+    model: core.accessor.get(IModelService),
+    version: hostVersion,
+  });
 
   // Sync the workspace catalog from the legacy session index once at startup,
   // so sessions created by the v1 TUI surface as workspaces on the very first
