@@ -13,11 +13,11 @@
 
 import { z } from 'zod';
 
-/** 反馈类型:报错 / 疑似 bug、功能许愿、其他。 */
+/** Feedback category: bug report, feature request, or anything else. */
 export const feedbackTypeSchema = z.enum(['bug', 'feature', 'other']);
 export type FeedbackType = z.infer<typeof feedbackTypeSchema>;
 
-/** 附带诊断信息:不提供、本地日志、本地日志 + 代码仓库。 */
+/** Attached diagnostics: nothing extra, local logs, or local logs plus the codebase. */
 export const feedbackDiagnosticsSchema = z.enum(['none', 'logs', 'logs_and_codebase']);
 export type FeedbackDiagnostics = z.infer<typeof feedbackDiagnosticsSchema>;
 
