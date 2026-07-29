@@ -9,7 +9,8 @@
  *     whether it is a standalone text part or merged into the user's text
  *   - SessionAPIImpl.steer updates title/lastPrompt exactly like prompt —
  *     a steer can launch the session's first turn (e.g. goal mode)
- *   - auto-title sends env < host < provider request-header layers
+ *   - auto-title sends the effective managed endpoint, credentials, and
+ *     env < host < provider request-header layers
  *
  * Wiring: real Session / ProviderManager with scripted model output; only the
  * external fetch boundary is stubbed. Run with:
@@ -23,7 +24,7 @@ import { join } from 'pathe';
 import type { ProviderConfig } from '@moonshot-ai/kosong';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { ProviderConfig as ConfigProviderConfig } from '../../src/config';
+import type { OAuthRef, ProviderConfig as ConfigProviderConfig } from '../../src/config';
 import { FlagResolver } from '../../src/flags';
 import type { ResolvedAgentProfile } from '../../src/profile';
 import type { SDKSessionRPC } from '../../src/rpc';
@@ -198,6 +199,32 @@ describe('SessionAPIImpl auto title', () => {
     expect(chatTitleCalls(fetchMock)).toHaveLength(0);
     expect(session.metadata.title).toBe('帮我看个 Go 报错');
   });
+
+  it('pairs the environment endpoint with its credential slot when it overrides persisted config', async () => {
+    vi.stubEnv('KIMI_CODE_BASE_URL', 'https://api.env.example.test/coding/v1');
+    vi.stubEnv('KIMI_CODE_OAUTH_HOST', 'https://auth.env.example.test');
+    const fetchMock = stubChatTitleFetch('生成的标题');
+    const { api, events, agent, resolvedOAuthRefs } = await setupAutoTitleSession({
+      autoTitle: true,
+    });
+
+    await api.prompt({ agentId: 'main', input: [{ type: 'text', text: '帮我看个 Go 报错' }] });
+    if (agent.turn.hasActiveTurn) {
+      await agent.turn.waitForCurrentTurn();
+    }
+    await waitFor(() =>
+      events.some((e) => e['type'] === 'session.meta.updated' && e['title'] === '生成的标题'),
+    );
+
+    expect(chatTitleCalls(fetchMock)[0]?.[0]).toBe(
+      'https://api.env.example.test/coding/v1/tools',
+    );
+    expect(resolvedOAuthRefs[0]).toMatchObject({
+      storage: 'file',
+      oauthHost: 'https://auth.env.example.test',
+    });
+    expect(resolvedOAuthRefs[0]?.key).not.toBe(MANAGED_PROVIDER.oauth.key);
+  });
 });
 
 function chatTitleCalls(fetchMock: ReturnType<typeof vi.fn>): [string, RequestInit?][] {
@@ -231,6 +258,7 @@ async function setupAutoTitleSession(options: { autoTitle: boolean; managedOAuth
   const events: Array<Record<string, unknown>> = [];
   const scripted = createScriptedGenerate();
   const flags = new FlagResolver({});
+  const resolvedOAuthRefs: Array<OAuthRef | undefined> = [];
   flags.setConfigOverrides({ 'auto-title': options.autoTitle });
   const managed: ConfigProviderConfig =
     options.managedOAuth === false
@@ -262,7 +290,10 @@ async function setupAutoTitleSession(options: { autoTitle: boolean; managedOAuth
           'X-Msh-Platform': 'host-platform',
           'X-Msh-Device-Id': 'device-test',
         },
-        resolveOAuthTokenProvider: () => ({ getAccessToken: async () => 'test-token' }),
+        resolveOAuthTokenProvider: (_providerName, oauthRef) => {
+          resolvedOAuthRefs.push(oauthRef);
+          return { getAccessToken: async () => 'test-token' };
+        },
       }),
       experimentalFlags: flags,
     }),
@@ -274,7 +305,7 @@ async function setupAutoTitleSession(options: { autoTitle: boolean; managedOAuth
   agent.config.update({ modelAlias: MOCK_PROVIDER.model, thinkingEffort: 'off' });
   agent.permission.setMode('yolo');
   const api = new SessionAPIImpl(session);
-  return { api, session, events, agent };
+  return { api, session, events, agent, resolvedOAuthRefs };
 }
 
 const tempDirs: string[] = [];

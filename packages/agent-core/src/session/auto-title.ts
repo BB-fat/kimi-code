@@ -2,6 +2,7 @@ import {
   KIMI_CODE_PROVIDER_NAME,
   fetchChatTitle,
   kimiCodeToolsUrl,
+  resolveKimiCodeRuntimeAuth,
 } from '@moonshot-ai/kimi-code-oauth';
 
 import type { Logger } from '#/logging/types';
@@ -24,13 +25,17 @@ export async function generateSessionTitle(
   if (providerManager === undefined) return undefined;
   const provider = providerManager.getProviderConfig(KIMI_CODE_PROVIDER_NAME);
   if (provider?.oauth === undefined) return undefined;
+  const runtimeAuth = resolveKimiCodeRuntimeAuth({
+    configuredBaseUrl: provider.baseUrl,
+    configuredOAuthRef: provider.oauth,
+  });
   const tokenProvider = providerManager.resolveOAuthTokenProvider(
     KIMI_CODE_PROVIDER_NAME,
-    provider.oauth,
+    runtimeAuth.oauthRef,
   );
   if (tokenProvider === undefined) return undefined;
   const result = await fetchChatTitle(
-    kimiCodeToolsUrl(provider.baseUrl),
+    kimiCodeToolsUrl(runtimeAuth.baseUrl),
     await tokenProvider.getAccessToken(),
     `user: ${chatContent}`,
     { headers: providerManager.resolveManagedRequestHeaders(KIMI_CODE_PROVIDER_NAME) },

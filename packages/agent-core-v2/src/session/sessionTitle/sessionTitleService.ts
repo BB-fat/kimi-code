@@ -21,6 +21,7 @@ import {
   fetchChatTitle,
   kimiCodeToolsUrl,
   parseKimiCodeCustomHeaders,
+  resolveKimiCodeRuntimeAuth,
 } from '@moonshot-ai/kimi-code-oauth';
 
 import { Disposable } from '#/_base/di/lifecycle';
@@ -105,7 +106,14 @@ export class SessionTitleService extends Disposable implements ISessionTitleServ
     ) {
       return undefined;
     }
-    const tokenProvider = this.oauth.resolveTokenProvider(KIMI_CODE_PROVIDER_NAME, provider.oauth);
+    const runtimeAuth = resolveKimiCodeRuntimeAuth({
+      configuredBaseUrl: provider.baseUrl,
+      configuredOAuthRef: provider.oauth,
+    });
+    const tokenProvider = this.oauth.resolveTokenProvider(
+      KIMI_CODE_PROVIDER_NAME,
+      runtimeAuth.oauthRef,
+    );
     if (tokenProvider === undefined) return undefined;
     let token: string;
     try {
@@ -116,7 +124,7 @@ export class SessionTitleService extends Disposable implements ISessionTitleServ
       return undefined;
     }
     const result = await fetchChatTitle(
-      kimiCodeToolsUrl(provider.baseUrl),
+      kimiCodeToolsUrl(runtimeAuth.baseUrl),
       token,
       `user: ${chatContent}`,
       {

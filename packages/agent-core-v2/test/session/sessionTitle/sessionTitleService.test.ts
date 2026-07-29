@@ -15,7 +15,11 @@ import { IOAuthService } from '#/app/auth/auth';
 import { type DomainEvent, IEventService } from '#/app/event/event';
 import { IFlagService } from '#/app/flag/flag';
 import { HostRequestHeaders, IHostRequestHeaders } from '#/kosong/model/hostRequestHeaders';
-import { IProviderService, type ProviderConfig } from '#/kosong/provider/provider';
+import {
+  IProviderService,
+  type OAuthRef,
+  type ProviderConfig,
+} from '#/kosong/provider/provider';
 import { ISessionContext, makeSessionContext } from '#/session/sessionContext/sessionContext';
 import {
   ISessionMetadata,
@@ -110,10 +114,12 @@ describe('SessionTitleService', () => {
   let providers: Record<string, ProviderConfig>;
   let fetchMock: Mock<(url: string, init?: RequestInit) => Promise<Response>>;
   let tokenError: Error | undefined;
+  let resolvedOAuthRefs: Array<OAuthRef | undefined>;
 
   beforeEach(() => {
     flagEnabled = true;
     tokenError = undefined;
+    resolvedOAuthRefs = [];
     providers = { 'managed:kimi-code': MANAGED_PROVIDER };
     metadata = new FakeSessionMetadata();
     events = new FakeEventService();
@@ -148,12 +154,15 @@ describe('SessionTitleService', () => {
         );
         reg.defineInstance(IProviderService, stubProviderService(providers));
         reg.definePartialInstance(IOAuthService, {
-          resolveTokenProvider: () => ({
-            getAccessToken: async () => {
-              if (tokenError !== undefined) throw tokenError;
-              return 'test-token';
-            },
-          }),
+          resolveTokenProvider: (_provider, oauthRef) => {
+            resolvedOAuthRefs.push(oauthRef);
+            return {
+              getAccessToken: async () => {
+                if (tokenError !== undefined) throw tokenError;
+                return 'test-token';
+              },
+            };
+          },
         });
         reg.defineInstance(IHostRequestHeaders, new HostRequestHeaders({ 'User-Agent': 'test' }));
         reg.define(ISessionTitleService, SessionTitleService);
@@ -301,6 +310,21 @@ describe('SessionTitleService', () => {
     const headers = new Headers(init?.headers as Record<string, string>);
     expect(headers.get('x-proxy-header')).toBe('from-env');
     expect(headers.get('user-agent')).toBe('test');
+  });
+
+  it('pairs the environment endpoint with its credential slot when it overrides persisted config', async () => {
+    vi.stubEnv('KIMI_CODE_BASE_URL', 'https://api.env.example.test/coding/v1');
+    vi.stubEnv('KIMI_CODE_OAUTH_HOST', 'https://auth.env.example.test');
+    await metadata.update({ lastPrompt: 'hello' });
+
+    await ix.get(ISessionTitleService).generateTitle();
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('https://api.env.example.test/coding/v1/tools');
+    expect(resolvedOAuthRefs[0]).toMatchObject({
+      storage: 'file',
+      oauthHost: 'https://auth.env.example.test',
+    });
+    expect(resolvedOAuthRefs[0]?.key).not.toBe(MANAGED_PROVIDER.oauth?.key);
   });
 
   it('does not generate over a legacy customTitle', async () => {
