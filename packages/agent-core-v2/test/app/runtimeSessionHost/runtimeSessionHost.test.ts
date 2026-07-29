@@ -365,7 +365,7 @@ async function planRoundTrip(handle: ISessionScopeHandle): Promise<void> {
   const hostFs = mainAgent(handle).accessor.get(IHostFileSystem);
   await hostFs.writeText(status!.path!, PLAN_CONTENT);
   await plan.recordRevision();
-  await plan.exit();
+  plan.exit();
 }
 
 async function persistMedia(handle: ISessionScopeHandle): Promise<void> {
