@@ -6,12 +6,12 @@
  * aligned. Pure policy; no scoped state.
  */
 
-import type { FileSourceWatchOptions } from '#/app/fileSourceMonitor/fileSourceMonitor';
+import type { PathWatchOptions } from '#/app/pathWatch/pathWatch';
 
 export const SKILL_SCAN_MAX_DEPTH = 8;
 export const SKILL_WATCH_MAX_DEPTH = SKILL_SCAN_MAX_DEPTH + 2;
 
-export const SKILL_ROOT_WATCH_OPTIONS: FileSourceWatchOptions = {
+export const SKILL_ROOT_WATCH_OPTIONS: PathWatchOptions = {
   target: 'directory',
   recursive: true,
   depth: SKILL_WATCH_MAX_DEPTH,

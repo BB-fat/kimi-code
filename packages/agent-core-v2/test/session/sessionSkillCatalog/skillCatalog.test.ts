@@ -28,8 +28,8 @@ import type { ReloadSummary } from '#/app/plugin/types';
 import { IProviderService } from '#/kosong/provider/provider';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 import { IConfigService } from '#/app/config/config';
-import { IFileSourceMonitor } from '#/app/fileSourceMonitor/fileSourceMonitor';
-import { FileSourceMonitorService } from '#/app/fileSourceMonitor/fileSourceMonitorService';
+import { IPathWatchService } from '#/app/pathWatch/pathWatch';
+import { PathWatchService } from '#/app/pathWatch/pathWatchService';
 import {
   EXTRA_SKILL_DIRS_SECTION,
   MERGE_ALL_AVAILABLE_SKILLS_SECTION,
@@ -60,7 +60,7 @@ import { createFakeHostFs } from '../../tools/fixtures/fake-exec';
 
 const bootstrapStub = stubBootstrap('/home');
 
-function fileSourceMonitorHostFs(): IHostFileSystem {
+function pathWatchHostFs(): IHostFileSystem {
   return createFakeHostFs({
     stat: async () => ({ isFile: false, isDirectory: true, size: 0 }),
     realpath: async (path) => path,
@@ -180,7 +180,7 @@ function makeHost(
     stubPair(IConfigService, config),
     stubPair(ISkillCatalogRuntimeOptions, runtimeOptions),
     stubPair(IPluginService, pluginStub(pluginRoots, pluginReloadEmitter)),
-    stubPair(IHostFileSystem, fileSourceMonitorHostFs()),
+    stubPair(IHostFileSystem, pathWatchHostFs()),
     stubPair(IHostFsWatchService, watch),
   ]);
   const session = host.child(LifecycleScope.Session, 's1', [stubPair(ISessionWorkspaceContext, ws)]);
@@ -242,10 +242,10 @@ describe('SessionSkillCatalogService', () => {
     registerScopedService(LifecycleScope.App, IPluginService, PluginService);
     registerScopedService(
       LifecycleScope.App,
-      IFileSourceMonitor,
-      FileSourceMonitorService,
+      IPathWatchService,
+      PathWatchService,
       ScopeActivation.OnScopeCreated,
-      'fileSourceMonitor',
+      'pathWatch',
     );
     registerScopedService(LifecycleScope.Session, ISessionSkillCatalog, SessionSkillCatalogService);
     registerScopedService(LifecycleScope.Session, IExplicitFileSkillSource, ExplicitFileSkillSource);
@@ -386,7 +386,7 @@ describe('SessionSkillCatalogService', () => {
       stubPair(IConfigService, config),
       stubPair(ISkillCatalogRuntimeOptions, runtimeOptions),
       stubPair(IPluginService, pluginStub()),
-      stubPair(IHostFileSystem, fileSourceMonitorHostFs()),
+      stubPair(IHostFileSystem, pathWatchHostFs()),
       stubPair(IHostFsWatchService, stubHostFsWatch()),
     ]);
     const session = host.child(LifecycleScope.Session, 's1', [stubPair(ISessionWorkspaceContext, ws)]);
@@ -428,7 +428,7 @@ describe('SessionSkillCatalogService', () => {
         _serviceBrand: undefined,
       } as unknown as ISkillCatalogRuntimeOptions),
       stubPair(IPluginService, pluginStub()),
-      stubPair(IHostFileSystem, fileSourceMonitorHostFs()),
+      stubPair(IHostFileSystem, pathWatchHostFs()),
       stubPair(IHostFsWatchService, watch),
     ]);
     const session = host.child(LifecycleScope.Session, 's1', [
@@ -467,7 +467,7 @@ describe('SessionSkillCatalogService', () => {
       stubPair(IConfigService, config),
       stubPair(ISkillCatalogRuntimeOptions, runtimeOptions),
       stubPair(IPluginService, pluginStub()),
-      stubPair(IHostFileSystem, fileSourceMonitorHostFs()),
+      stubPair(IHostFileSystem, pathWatchHostFs()),
       stubPair(IHostFsWatchService, stubHostFsWatch()),
     ]);
     const session = host.child(LifecycleScope.Session, 's1', [stubPair(ISessionWorkspaceContext, ws)]);
@@ -686,7 +686,7 @@ describe('SessionSkillCatalogService', () => {
         _serviceBrand: undefined,
       } as unknown as ISkillCatalogRuntimeOptions),
       stubPair(IPluginService, pluginStub()),
-      stubPair(IHostFileSystem, fileSourceMonitorHostFs()),
+      stubPair(IHostFileSystem, pathWatchHostFs()),
       stubPair(IHostFsWatchService, stubHostFsWatch()),
     ]);
     const session = host.child(LifecycleScope.Session, 's1', [
@@ -758,7 +758,7 @@ describe('SessionSkillCatalogService', () => {
         _serviceBrand: undefined,
       } as unknown as ISkillCatalogRuntimeOptions),
       stubPair(IPluginService, pluginStub()),
-      stubPair(IHostFileSystem, fileSourceMonitorHostFs()),
+      stubPair(IHostFileSystem, pathWatchHostFs()),
       stubPair(IHostFsWatchService, stubHostFsWatch()),
     ]);
     const session = host.child(LifecycleScope.Session, 's1', [
@@ -790,7 +790,7 @@ describe('SessionSkillCatalogService', () => {
         _serviceBrand: undefined,
       } as unknown as ISkillCatalogRuntimeOptions),
       stubPair(IPluginService, pluginService),
-      stubPair(IHostFileSystem, fileSourceMonitorHostFs()),
+      stubPair(IHostFileSystem, pathWatchHostFs()),
       stubPair(IHostFsWatchService, stubHostFsWatch()),
     ]);
     const session = host.child(LifecycleScope.Session, 's1', [
@@ -850,7 +850,7 @@ describe('SessionSkillCatalogService', () => {
         _serviceBrand: undefined,
       } as unknown as ISkillCatalogRuntimeOptions),
       stubPair(IProviderService, stubProviderService()),
-      stubPair(IHostFileSystem, fileSourceMonitorHostFs()),
+      stubPair(IHostFileSystem, pathWatchHostFs()),
       stubPair(IHostFsWatchService, stubHostFsWatch()),
     ]);
     const { stub: ws } = workspaceStub('/work');

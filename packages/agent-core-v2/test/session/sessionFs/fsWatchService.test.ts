@@ -1,7 +1,7 @@
 /**
  * `sessionFsWatch` domain (L2) — verifies confinement to the declared subtree,
  * workspace-relative path mapping, debounce coalescing, window truncation,
- * `.gitignore` filtering and handle lifecycle, using a fake os watcher.
+ * `.gitignore` filtering and handle lifecycle, using a fake shared path watch.
  */
 
 import { isAbsolute, join, relative, resolve } from 'node:path';
@@ -10,12 +10,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { LifecycleScope } from '#/_base/di/scope';
 import { createScopedTestHost, stubPair } from '#/_base/di/test';
-import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import {
-  type HostFsChange,
-  type IHostFsWatchHandle,
-  IHostFsWatchService,
-} from '#/os/interface/hostFsWatch';
+  type IPathWatch,
+  IPathWatchService,
+  type PathWatchEvent,
+  type PathWatchOptions,
+} from '#/app/pathWatch/pathWatch';
+import { IHostFileSystem } from '#/os/interface/hostFileSystem';
+import type { HostFsChange } from '#/os/interface/hostFsWatch';
 import { ISessionStateService } from '#/session/state/sessionState';
 import { SessionStateService } from '#/session/state/sessionStateService';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
@@ -47,40 +49,45 @@ function stubWorkspace(): ISessionWorkspaceContext {
 }
 
 interface FakeWatch {
-  readonly service: IHostFsWatchService;
-  readonly watchCalls: string[];
+  readonly service: IPathWatchService;
+  readonly createOptions: readonly PathWatchOptions[];
+  readonly watchedPaths: () => readonly string[];
   fire: (rel: string, action: HostFsChange['action'], kind?: HostFsChange['kind']) => void;
   readonly disposed: () => boolean;
 }
 
-function fakeHostFsWatch(): FakeWatch {
-  const watchCalls: string[] = [];
-  let listener: ((e: HostFsChange) => void) | undefined;
+function fakePathWatch(): FakeWatch {
+  const createOptions: PathWatchOptions[] = [];
+  let watchedPaths: readonly string[] = [];
+  let listener: ((event: PathWatchEvent) => void) | undefined;
   let disposed = false;
-  const handle: IHostFsWatchHandle = {
-    ready: Promise.resolve(),
-    onDidChange: (l) => {
-      listener = l;
-      return { dispose: () => (listener = undefined) };
-    },
-    dispose: () => {
-      disposed = true;
-      listener = undefined;
-    },
-  };
-  const service: IHostFsWatchService = {
+  const service: IPathWatchService = {
     _serviceBrand: undefined,
-    watch: (path) => {
-      watchCalls.push(path);
+    createWatch: (options, onDidChange): IPathWatch => {
+      createOptions.push(options);
+      listener = onDidChange;
       disposed = false;
-      return handle;
+      return {
+        setPaths: async (paths) => {
+          watchedPaths = [...paths];
+        },
+        dispose: () => {
+          disposed = true;
+          watchedPaths = [];
+          listener = undefined;
+        },
+      };
     },
   };
   return {
     service,
-    watchCalls,
+    createOptions,
+    watchedPaths: () => watchedPaths,
     fire: (rel, action, kind = 'file') =>
-      listener?.({ path: join(WORK_DIR, rel), action, kind }),
+      listener?.({
+        watchedPath: WORK_DIR,
+        change: { path: join(WORK_DIR, rel), action, kind },
+      }),
     disposed: () => disposed,
   };
 }
@@ -104,18 +111,20 @@ interface Harness {
 }
 
 function makeSession(gitignore?: string): Harness {
-  const watch = fakeHostFsWatch();
+  const watch = fakePathWatch();
   const host = createScopedTestHost();
   const session = host.child(LifecycleScope.Session, 's1', [
     stubPair(ISessionStateService, new SessionStateService()),
     stubPair(ISessionWorkspaceContext, stubWorkspace()),
-    stubPair(IHostFsWatchService, watch.service),
+    stubPair(IPathWatchService, watch.service),
     stubPair(IHostFileSystem, fakeHostFs(gitignore)),
   ]);
   const svc = session.accessor.get(ISessionFsWatchService);
   const events: FsChangeEvent[] = [];
   svc.onDidChangeFiles((e) => events.push(e));
-  disposers.push(() => host.dispose());
+  disposers.push(() => {
+    host.dispose();
+  });
   return { svc, watch, events };
 }
 
@@ -130,10 +139,13 @@ describe('SessionFsWatchService', () => {
     vi.useRealTimers();
   });
 
-  it('starts the os watcher on the workspace root for a non-empty subscription', () => {
+  it('starts a raw shared path watch on the workspace root for a non-empty subscription', () => {
     const { svc, watch } = makeSession();
     svc.setWatchedPaths(['src']);
-    expect(watch.watchCalls).toEqual([WORK_DIR]);
+    expect(watch.watchedPaths()).toEqual([WORK_DIR]);
+    expect(watch.createOptions).toEqual([
+      { target: 'directory', recursive: true, debounceMs: 0 },
+    ]);
     expect(svc.watchedPaths).toEqual(['src']);
   });
 
@@ -192,11 +204,15 @@ describe('SessionFsWatchService', () => {
 
   it('rejects paths that escape the workspace', () => {
     const { svc } = makeSession();
-    expect(() => svc.setWatchedPaths(['../x'])).toThrowError(/escapes workspace|rejected/);
-    expect(() => svc.setWatchedPaths(['/abs'])).toThrowError(/rejected/);
+    expect(() => {
+      svc.setWatchedPaths(['../x']);
+    }).toThrowError(/escapes workspace|rejected/);
+    expect(() => {
+      svc.setWatchedPaths(['/abs']);
+    }).toThrowError(/rejected/);
   });
 
-  it('disposes the os handle when the subscription set becomes empty', () => {
+  it('disposes the shared path-watch handle when the subscription set becomes empty', () => {
     const { svc, watch } = makeSession();
     svc.setWatchedPaths(['src']);
     expect(watch.disposed()).toBe(false);

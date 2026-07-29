@@ -3,7 +3,7 @@
  *
  * Exercises the real provider through the harness injector against a fake
  * host fs whose AGENTS.md files the test edits and deletes, with a stub
- * `IFileSourceMonitor` driving change events: baselines come from the last
+ * `IPathWatchService` driving change events: baselines come from the last
  * reminder in history, then the fenced AGENTS.md block of the system prompt,
  * then a silent adoption for blockless prompts. Edits, creations, and
  * removals all announce. Run: `pnpm --filter @moonshot-ai/agent-core-v2 exec
@@ -18,10 +18,11 @@ import type { ContextMessage } from '#/agent/contextMemory/types';
 import { loadAgentsMd } from '#/agent/profile/context';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import {
-  IFileSourceMonitor,
-  type FileSourceWatchOptions,
-  type IFileSourceWatch,
-} from '#/app/fileSourceMonitor/fileSourceMonitor';
+  type IPathWatch,
+  IPathWatchService,
+  type PathWatchEvent,
+  type PathWatchOptions,
+} from '#/app/pathWatch/pathWatch';
 import type { HostFileStat, IHostFileSystem } from '#/os/interface/hostFileSystem';
 
 import { createFakeHostFs } from '../../tools/fixtures/fake-exec';
@@ -34,21 +35,21 @@ type InjectableDynamicInjector = {
 const TEST_HOME_DIR = '/home/test';
 const BRAND_HOME_DIR = '/tmp/kimi-code-agent-app-v2-test';
 
-interface StubFileSourceMonitor extends IFileSourceMonitor {
+interface StubPathWatchService extends IPathWatchService {
   fire(path: string): void;
 }
 
-function stubFileSourceMonitor(): StubFileSourceMonitor {
+function stubPathWatchService(): StubPathWatchService {
   const watches: Array<{
     paths: readonly string[];
-    readonly onDidChange: () => void;
+    readonly onDidChange: (event: PathWatchEvent) => void;
   }> = [];
   return {
     _serviceBrand: undefined,
     createWatch(
-      _options: FileSourceWatchOptions,
-      onDidChange: () => void,
-    ): IFileSourceWatch {
+      _options: PathWatchOptions,
+      onDidChange: (event: PathWatchEvent) => void,
+    ): IPathWatch {
       const watch = { paths: [] as readonly string[], onDidChange };
       watches.push(watch);
       return {
@@ -63,7 +64,12 @@ function stubFileSourceMonitor(): StubFileSourceMonitor {
     },
     fire(path: string): void {
       for (const watch of watches) {
-        if (watch.paths.includes(path)) watch.onDidChange();
+        if (watch.paths.includes(path)) {
+          watch.onDidChange({
+            watchedPath: path,
+            change: { path, action: 'modified', kind: 'file' },
+          });
+        }
       }
     },
   };
@@ -110,7 +116,7 @@ describe('AgentAgentsMdReminderService', () => {
   let files: Map<string, string>;
   let dirs: Set<string>;
   let hostFs: IHostFileSystem;
-  let watch: StubFileSourceMonitor;
+  let watch: StubPathWatchService;
   let ctx: TestAgentContext;
   let context: IAgentContextMemoryService;
   let injector: InjectableDynamicInjector;
@@ -151,10 +157,10 @@ describe('AgentAgentsMdReminderService', () => {
       readdir: async () => [],
       realpath: async (path: string) => path,
     });
-    watch = stubFileSourceMonitor();
+    watch = stubPathWatchService();
     ctx = createTestAgent(
       execEnvServices({ hostFs }),
-      appService(IFileSourceMonitor, watch),
+      appService(IPathWatchService, watch),
     );
     context = ctx.get(IAgentContextMemoryService);
     injector = ctx.get(IAgentContextInjectorService) as unknown as InjectableDynamicInjector;

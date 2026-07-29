@@ -4,7 +4,7 @@
  * Discovers project skills from the session's current `workDir`
  * (`workspaceContext`) through `ISkillDiscovery`, contributing them at priority
  * 30 (above user / extra / plugin / builtin). Watches the candidate root paths
- * (existing or not) through `fileSourceMonitor` and re-fires `onDidChange` on
+ * (existing or not) through `pathWatch` and re-fires `onDidChange` on
  * debounced fs changes. Bound at Session scope so each session reads its own
  * workspace root.
  */
@@ -15,9 +15,9 @@ import { Emitter, type Event } from '#/_base/event';
 import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { IConfigService } from '#/app/config/config';
 import {
-  IFileSourceMonitor,
-  type IFileSourceWatch,
-} from '#/app/fileSourceMonitor/fileSourceMonitor';
+  type IPathWatch,
+  IPathWatchService,
+} from '#/app/pathWatch/pathWatch';
 import {
   MERGE_ALL_AVAILABLE_SKILLS_SECTION,
   type MergeAllAvailableSkillsConfig,
@@ -48,18 +48,20 @@ export class WorkspaceFileSkillSource extends Disposable implements IWorkspaceFi
   readonly priority = SKILL_SOURCE_PRIORITY.workspace;
   private readonly onDidChangeEmitter = this._register(new Emitter<void>());
   readonly onDidChange: Event<void> = this.onDidChangeEmitter.event;
-  private readonly watcher: IFileSourceWatch;
+  private readonly watcher: IPathWatch;
 
   constructor(
     @ISkillDiscovery private readonly discovery: ISkillDiscovery,
     @ISessionWorkspaceContext private readonly workspace: ISessionWorkspaceContext,
     @IConfigService private readonly config: IConfigService,
     @ISkillCatalogRuntimeOptions private readonly runtimeOptions: ISkillCatalogRuntimeOptions,
-    @IFileSourceMonitor fileSourceMonitor: IFileSourceMonitor,
+    @IPathWatchService pathWatch: IPathWatchService,
   ) {
     super();
     this.watcher = this._register(
-      fileSourceMonitor.createWatch(SKILL_ROOT_WATCH_OPTIONS, () => this.onDidChangeEmitter.fire()),
+      pathWatch.createWatch(SKILL_ROOT_WATCH_OPTIONS, () => {
+        this.onDidChangeEmitter.fire();
+      }),
     );
     this._register(
       this.config.onDidSectionChange((event) => {

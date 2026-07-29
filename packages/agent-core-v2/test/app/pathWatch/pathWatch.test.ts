@@ -1,11 +1,11 @@
 /**
- * Scenario: shared live-file-source monitoring across lifecycle boundaries.
+ * Scenario: shared absolute-path monitoring across lifecycle boundaries.
  *
  * Resolves the real App service by interface. Unit cases use the topology-aware
  * host-watch fake and a mutable host-fs boundary; integration cases use the
  * node-local host services against isolated temporary directories. Run:
  * `pnpm --filter @moonshot-ai/agent-core-v2 exec vitest run
- * test/app/fileSourceMonitor/fileSourceMonitor.test.ts`.
+ * test/app/pathWatch/pathWatch.test.ts`.
  */
 
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
@@ -17,10 +17,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { createServices, type TestInstantiationService } from '#/_base/di/test';
 import {
-  IFileSourceMonitor,
-  type IFileSourceWatch,
-} from '#/app/fileSourceMonitor/fileSourceMonitor';
-import { FileSourceMonitorService } from '#/app/fileSourceMonitor/fileSourceMonitorService';
+  type IPathWatch,
+  IPathWatchService,
+  type PathWatchEvent,
+} from '#/app/pathWatch/pathWatch';
+import { PathWatchService } from '#/app/pathWatch/pathWatchService';
 import { SKILL_ROOT_WATCH_OPTIONS } from '#/app/skillCatalog/skillTraversal';
 import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
 import { HostFsWatchService } from '#/os/backends/node-local/hostFsWatchService';
@@ -54,7 +55,7 @@ function mutableDirectoryFs(
   });
 }
 
-describe('file source monitor (shared handles and path state)', () => {
+describe('path watch (shared handles and path state)', () => {
   let disposables: DisposableStore;
   let ix: TestInstantiationService;
 
@@ -66,15 +67,15 @@ describe('file source monitor (shared handles and path state)', () => {
     disposables.dispose();
   });
 
-  function build(hostFs: IHostFileSystem, hostWatch: IHostFsWatchService): IFileSourceMonitor {
+  function build(hostFs: IHostFileSystem, hostWatch: IHostFsWatchService): IPathWatchService {
     ix = createServices(disposables, {
       additionalServices: (reg) => {
         reg.defineInstance(IHostFileSystem, hostFs);
         reg.defineInstance(IHostFsWatchService, hostWatch);
-        reg.define(IFileSourceMonitor, FileSourceMonitorService);
+        reg.define(IPathWatchService, PathWatchService);
       },
     });
-    return ix.get(IFileSourceMonitor);
+    return ix.get(IPathWatchService);
   }
 
   it('reuses raw handles when two consumers watch the same path and releases on the last dispose', async () => {
@@ -110,6 +111,36 @@ describe('file source monitor (shared handles and path state)', () => {
     expect(target?.options?.ignored?.('/workspace/skills/.cache.md/SKILL.md')).toBe(true);
     expect(target?.options?.ignored?.('/workspace/skills/.skill.md')).toBe(false);
     expect(target?.options?.ignored?.('/workspace/skills/review/SKILL.md')).toBe(false);
+  });
+
+  it('preserves the watched path and raw host change for domain projections', async () => {
+    const directories = new Set(['/workspace', '/workspace/skills']);
+    const raw = stubHostFsWatch();
+    const monitor = build(mutableDirectoryFs(directories), raw);
+    const events: PathWatchEvent[] = [];
+    const watch = monitor.createWatch(
+      { ...SKILL_ROOT_WATCH_OPTIONS, debounceMs: 0 },
+      (event) => {
+        events.push(event);
+      },
+    );
+
+    await watch.setPaths(['/workspace/skills']);
+    raw.fire('/workspace/skills/review/SKILL.md', {
+      action: 'modified',
+      kind: 'file',
+    });
+
+    expect(events).toEqual([
+      {
+        watchedPath: '/workspace/skills',
+        change: {
+          path: '/workspace/skills/review/SKILL.md',
+          action: 'modified',
+          kind: 'file',
+        },
+      },
+    ]);
   });
 
   it('advances from the nearest existing ancestor when a deep missing root appears', async () => {
@@ -215,7 +246,7 @@ describe('file source monitor (shared handles and path state)', () => {
   });
 });
 
-describe('file source monitor (node-local integration)', () => {
+describe('path watch (node-local integration)', () => {
   let disposables: DisposableStore;
   let roots: string[];
 
@@ -229,19 +260,19 @@ describe('file source monitor (node-local integration)', () => {
     await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
   });
 
-  function build(): IFileSourceMonitor {
+  function build(): IPathWatchService {
     const ix = createServices(disposables, {
       additionalServices: (reg) => {
         reg.define(IHostFileSystem, HostFileSystem);
         reg.define(IHostFsWatchService, HostFsWatchService);
-        reg.define(IFileSourceMonitor, FileSourceMonitorService);
+        reg.define(IPathWatchService, PathWatchService);
       },
     });
-    return ix.get(IFileSourceMonitor);
+    return ix.get(IPathWatchService);
   }
 
   it('detects a deep root created after the subscription is ready', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'file-source-monitor-missing-'));
+    const root = await mkdtemp(join(tmpdir(), 'path-watch-missing-'));
     roots.push(root);
     const target = join(root, 'a', 'b', 'skills');
     const monitor = build();
@@ -265,7 +296,7 @@ describe('file source monitor (node-local integration)', () => {
   it.runIf(process.platform !== 'win32')(
     'detects content changes through an existing symlink target',
     async () => {
-      const root = await mkdtemp(join(tmpdir(), 'file-source-monitor-symlink-'));
+      const root = await mkdtemp(join(tmpdir(), 'path-watch-symlink-'));
       roots.push(root);
       const target = join(root, 'target');
       const lexical = join(root, 'skills-link');
@@ -273,7 +304,7 @@ describe('file source monitor (node-local integration)', () => {
       await symlink(target, lexical, 'dir');
       const monitor = build();
       let changes = 0;
-      const watch: IFileSourceWatch = monitor.createWatch(
+      const watch: IPathWatch = monitor.createWatch(
         { ...SKILL_ROOT_WATCH_OPTIONS, debounceMs: 0, pollingIntervalMs: 25 },
         () => {
           changes += 1;
@@ -292,7 +323,7 @@ describe('file source monitor (node-local integration)', () => {
   it.runIf(process.platform !== 'win32')(
     'detects content changes inside a symlinked bundle under a watched root',
     async () => {
-      const root = await mkdtemp(join(tmpdir(), 'file-source-monitor-nested-symlink-'));
+      const root = await mkdtemp(join(tmpdir(), 'path-watch-nested-symlink-'));
       roots.push(root);
       const skillRoot = join(root, 'skills');
       const bundleTarget = join(root, 'bundle-target');
@@ -321,7 +352,7 @@ describe('file source monitor (node-local integration)', () => {
   it.runIf(process.platform !== 'win32')(
     'detects a missing root created below a symlink ancestor',
     async () => {
-      const root = await mkdtemp(join(tmpdir(), 'file-source-monitor-symlink-missing-'));
+      const root = await mkdtemp(join(tmpdir(), 'path-watch-symlink-missing-'));
       roots.push(root);
       const target = join(root, 'target');
       const lexical = join(root, 'skills-link');

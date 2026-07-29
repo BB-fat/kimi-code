@@ -1,10 +1,10 @@
 /**
- * `fileSourceMonitor` domain (L2) — `IFileSourceMonitor` implementation.
+ * `pathWatch` domain (L2) — `IPathWatchService` implementation.
  *
  * Probes through `hostFs`, watches through `hostFsWatch`, and owns the shared
  * raw-handle pool, missing-path ancestor progression, lexical/canonical target
- * tracking, per-consumer debounce, reference counts, and disposal barriers.
- * Bound at App scope.
+ * tracking, raw-change fanout, per-consumer debounce, reference counts, and
+ * disposal barriers. Bound at App scope.
  */
 
 import { dirname, join, normalize, relative } from 'pathe';
@@ -20,10 +20,11 @@ import {
 } from '#/os/interface/hostFsWatch';
 
 import {
-  type FileSourceWatchOptions,
-  IFileSourceMonitor,
-  type IFileSourceWatch,
-} from './fileSourceMonitor';
+  type IPathWatch,
+  IPathWatchService,
+  type PathWatchEvent,
+  type PathWatchOptions,
+} from './pathWatch';
 
 const DEFAULT_DEBOUNCE_MS = 300;
 
@@ -67,7 +68,7 @@ interface SharedPathState {
   readonly key: string;
   readonly lexicalPath: string;
   readonly options: NormalizedWatchOptions;
-  readonly subscribers: Set<FileSourceWatch>;
+  readonly subscribers: Set<PathWatch>;
   targetSlot: WatchSlot | undefined;
   lexicalSlot: WatchSlot | undefined;
   targetAncestorSlot: WatchSlot | undefined;
@@ -78,12 +79,12 @@ interface SharedPathState {
   advanceTail: Promise<void>;
 }
 
-export class FileSourceMonitorService extends Disposable implements IFileSourceMonitor {
+export class PathWatchService extends Disposable implements IPathWatchService {
   declare readonly _serviceBrand: undefined;
 
   private readonly states = new Map<string, SharedPathState>();
   private readonly rawWatches = new Map<string, RawWatchEntry>();
-  private readonly subscriptions = new Set<FileSourceWatch>();
+  private readonly subscriptions = new Set<PathWatch>();
   private disposed = false;
 
   constructor(
@@ -94,10 +95,10 @@ export class FileSourceMonitorService extends Disposable implements IFileSourceM
   }
 
   createWatch(
-    options: FileSourceWatchOptions,
-    onDidChange: () => void,
-  ): IFileSourceWatch {
-    const watch = new FileSourceWatch(this, normalizeOptions(options), onDidChange);
+    options: PathWatchOptions,
+    onDidChange: (event: PathWatchEvent) => void,
+  ): IPathWatch {
+    const watch = new PathWatch(this, normalizeOptions(options), onDidChange);
     if (this.disposed) {
       watch.dispose();
       return watch;
@@ -106,7 +107,7 @@ export class FileSourceMonitorService extends Disposable implements IFileSourceM
     return watch;
   }
 
-  setPaths(watch: FileSourceWatch, paths: readonly string[]): Promise<void> {
+  setPaths(watch: PathWatch, paths: readonly string[]): Promise<void> {
     if (this.disposed || watch.isDisposed) return Promise.resolve();
     const nextKeys = new Set<string>();
     const waits: Promise<void>[] = [];
@@ -126,7 +127,7 @@ export class FileSourceMonitorService extends Disposable implements IFileSourceM
     return Promise.all(waits).then(() => undefined);
   }
 
-  releaseWatch(watch: FileSourceWatch): void {
+  releaseWatch(watch: PathWatch): void {
     this.subscriptions.delete(watch);
     for (const key of watch.stateKeys) this.releaseState(key, watch);
     watch.replaceStateKeys(new Set());
@@ -147,7 +148,7 @@ export class FileSourceMonitorService extends Disposable implements IFileSourceM
     key: string,
     lexicalPath: string,
     options: NormalizedWatchOptions,
-    subscriber: FileSourceWatch,
+    subscriber: PathWatch,
   ): SharedPathState {
     let state = this.states.get(key);
     if (state === undefined) {
@@ -172,7 +173,7 @@ export class FileSourceMonitorService extends Disposable implements IFileSourceM
     return state;
   }
 
-  private releaseState(key: string, subscriber: FileSourceWatch): void {
+  private releaseState(key: string, subscriber: PathWatch): void {
     const state = this.states.get(key);
     if (state === undefined) return;
     state.subscribers.delete(subscriber);
@@ -310,7 +311,7 @@ export class FileSourceMonitorService extends Disposable implements IFileSourceM
 
   private onTargetChange(state: SharedPathState, change: HostFsChange): void {
     if (!this.isStateLive(state)) return;
-    this.notify(state);
+    this.notify(state, change);
     if (change.action === 'deleted') void this.queueAdvance(state);
   }
 
@@ -331,8 +332,9 @@ export class FileSourceMonitorService extends Disposable implements IFileSourceM
     if (isOnPathChain(target, change.path)) void this.queueAdvance(state);
   }
 
-  private notify(state: SharedPathState): void {
-    for (const subscriber of state.subscribers) subscriber.signal();
+  private notify(state: SharedPathState, change?: HostFsChange): void {
+    const event: PathWatchEvent = { watchedPath: state.lexicalPath, change };
+    for (const subscriber of state.subscribers) subscriber.signal(event);
   }
 
   private isStateLive(state: SharedPathState): boolean {
@@ -443,15 +445,16 @@ export class FileSourceMonitorService extends Disposable implements IFileSourceM
   }
 }
 
-class FileSourceWatch implements IFileSourceWatch {
+class PathWatch implements IPathWatch {
   private keys = new Set<string>();
   private timer: ReturnType<typeof setTimeout> | undefined;
+  private pendingEvent: PathWatchEvent | undefined;
   private disposed = false;
 
   constructor(
-    private readonly owner: FileSourceMonitorService,
+    private readonly owner: PathWatchService,
     readonly options: NormalizedWatchOptions,
-    private readonly onDidChange: () => void,
+    private readonly onDidChange: (event: PathWatchEvent) => void,
   ) {}
 
   get isDisposed(): boolean {
@@ -470,15 +473,17 @@ class FileSourceWatch implements IFileSourceWatch {
     this.keys = keys;
   }
 
-  signal(): void {
-    if (this.disposed || this.timer !== undefined) return;
+  signal(event: PathWatchEvent): void {
+    if (this.disposed) return;
+    this.pendingEvent = event;
+    if (this.timer !== undefined) return;
     if (this.options.debounceMs === 0) {
-      this.onDidChange();
+      this.flush();
       return;
     }
     const timer = setTimeout(() => {
       this.timer = undefined;
-      if (!this.disposed) this.onDidChange();
+      this.flush();
     }, this.options.debounceMs);
     timer.unref?.();
     this.timer = timer;
@@ -491,11 +496,18 @@ class FileSourceWatch implements IFileSourceWatch {
       clearTimeout(this.timer);
       this.timer = undefined;
     }
+    this.pendingEvent = undefined;
     this.owner.releaseWatch(this);
+  }
+
+  private flush(): void {
+    const event = this.pendingEvent;
+    this.pendingEvent = undefined;
+    if (!this.disposed && event !== undefined) this.onDidChange(event);
   }
 }
 
-function normalizeOptions(options: FileSourceWatchOptions): NormalizedWatchOptions {
+function normalizeOptions(options: PathWatchOptions): NormalizedWatchOptions {
   return {
     target: options.target,
     recursive: options.recursive ?? false,
@@ -592,8 +604,8 @@ function normalizePath(value: string): string {
 
 registerScopedService(
   LifecycleScope.App,
-  IFileSourceMonitor,
-  FileSourceMonitorService,
+  IPathWatchService,
+  PathWatchService,
   ScopeActivation.OnScopeCreated,
-  'fileSourceMonitor',
+  'pathWatch',
 );

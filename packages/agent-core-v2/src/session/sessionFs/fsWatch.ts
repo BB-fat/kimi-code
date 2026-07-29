@@ -1,9 +1,9 @@
 /**
  * `sessionFsWatch` domain (L2) — workspace-confined filesystem change feed.
  *
- * Defines the `ISessionFsWatchService` that turns the os `IHostFsWatchService`
- * raw events into a workspace-relative, debounced, `.gitignore`-aware change
- * feed (`FsChangeEvent`) for the session. Callers declare the set of
+ * Defines the `ISessionFsWatchService` that projects shared `pathWatch` raw
+ * events into a workspace-relative, debounced, `.gitignore`-aware change feed
+ * (`FsChangeEvent`) for the session. Callers declare the set of
  * workspace-relative paths they care about; events outside that subtree are
  * dropped. Session-scoped — the scope itself is the session, so no
  * `sessionId` is threaded through.

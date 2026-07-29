@@ -4,7 +4,7 @@
  * Discovers user skills from the bootstrap home directories through
  * `ISkillDiscovery`, contributing them at priority 20 (above extra / plugin /
  * builtin, below workspace). Reads home paths from `bootstrap`. Watches the
- * candidate root paths (existing or not) through `fileSourceMonitor` and
+ * candidate root paths (existing or not) through `pathWatch` and
  * re-fires `onDidChange` on debounced fs changes. Bound at App scope.
  */
 
@@ -15,9 +15,9 @@ import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
 import {
-  IFileSourceMonitor,
-  type IFileSourceWatch,
-} from '#/app/fileSourceMonitor/fileSourceMonitor';
+  type IPathWatch,
+  IPathWatchService,
+} from '#/app/pathWatch/pathWatch';
 
 import {
   MERGE_ALL_AVAILABLE_SKILLS_SECTION,
@@ -48,18 +48,20 @@ export class UserFileSkillSource extends Disposable implements IUserFileSkillSou
   readonly priority = SKILL_SOURCE_PRIORITY.user;
   private readonly onDidChangeEmitter = this._register(new Emitter<void>());
   readonly onDidChange: Event<void> = this.onDidChangeEmitter.event;
-  private readonly watcher: IFileSourceWatch;
+  private readonly watcher: IPathWatch;
 
   constructor(
     @ISkillDiscovery private readonly discovery: ISkillDiscovery,
     @IBootstrapService private readonly bootstrap: IBootstrapService,
     @IConfigService private readonly config: IConfigService,
     @ISkillCatalogRuntimeOptions private readonly runtimeOptions: ISkillCatalogRuntimeOptions,
-    @IFileSourceMonitor fileSourceMonitor: IFileSourceMonitor,
+    @IPathWatchService pathWatch: IPathWatchService,
   ) {
     super();
     this.watcher = this._register(
-      fileSourceMonitor.createWatch(SKILL_ROOT_WATCH_OPTIONS, () => this.onDidChangeEmitter.fire()),
+      pathWatch.createWatch(SKILL_ROOT_WATCH_OPTIONS, () => {
+        this.onDidChangeEmitter.fire();
+      }),
     );
     this._register(
       this.config.onDidSectionChange((event) => {

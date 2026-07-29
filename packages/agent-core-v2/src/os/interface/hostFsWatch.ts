@@ -4,9 +4,8 @@
  * Defines the `IHostFsWatchService`, a thin primitive over the host OS file
  * watcher. It reports raw create/modify/delete events under an absolute path
  * and knows nothing about sessions, connections, workspaces or wire frames.
- * App-scoped — one shared instance. Higher layers (e.g. `sessionFsWatch`)
- * subscribe, confine events to a workspace, debounce/coalesce and re-expose
- * them as domain events.
+ * App-scoped — one shared instance. The higher `pathWatch` layer pools raw
+ * handles and preserves these changes for domain-specific projections.
  */
 
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';

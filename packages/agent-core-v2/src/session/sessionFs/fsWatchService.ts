@@ -1,11 +1,12 @@
 /**
  * `sessionFsWatch` domain (L2) — `ISessionFsWatchService` implementation.
  *
- * Subscribes to the os `IHostFsWatchService` on the workspace root, confines
- * events to the caller-declared subtree and to non-`.gitignore`d paths,
+ * Subscribes to the shared `pathWatch` service on the workspace root, confines
+ * its raw events to the caller-declared subtree and to non-`.gitignore`d paths,
  * debounces them into fixed windows and re-exposes them as workspace-relative
- * `FsChangeEvent`s. The os watcher is started lazily on the first non-empty
+ * `FsChangeEvent`s. The path watch is started lazily on the first non-empty
  * subscription and stopped when the subscription set becomes empty. The
+ * workspace `.gitignore` is read through `hostFs`. The
  * plain-data state (`watched`, `pending`, `rawCount`, `truncated`,
  * `gitignoreLoaded`) is registered into `sessionState` (`ISessionStateService`)
  * and read/written through it. Path confinement is lexical
@@ -16,17 +17,14 @@ import { isAbsolute, join, relative, sep } from 'node:path';
 
 import ignore, { type Ignore } from 'ignore';
 
-import { Disposable, type IDisposable } from '#/_base/di/lifecycle';
+import { Disposable } from '#/_base/di/lifecycle';
 import { Emitter, type Event } from '#/_base/event';
 import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { defineState } from '#/_base/state/stateRegistry';
+import { type IPathWatch, IPathWatchService } from '#/app/pathWatch/pathWatch';
 import { ErrorCodes, Error2 } from '#/errors';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
-import {
-  type HostFsChange,
-  type IHostFsWatchHandle,
-  IHostFsWatchService,
-} from '#/os/interface/hostFsWatch';
+import type { HostFsChange } from '#/os/interface/hostFsWatch';
 import { ISessionStateService } from '#/session/state/sessionState';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 import type { FsChangeEntry, FsChangeEvent } from './fsWatch';
@@ -61,8 +59,7 @@ export class SessionFsWatchService extends Disposable implements ISessionFsWatch
   private readonly emitter = this._register(new Emitter<FsChangeEvent>());
   readonly onDidChangeFiles: Event<FsChangeEvent> = this.emitter.event;
 
-  private handle: IHostFsWatchHandle | undefined;
-  private handleSub: IDisposable | undefined;
+  private handle: IPathWatch | undefined;
 
   private debounceTimer: NodeJS.Timeout | undefined;
 
@@ -80,7 +77,7 @@ export class SessionFsWatchService extends Disposable implements ISessionFsWatch
   constructor(
     @ISessionStateService private readonly states: ISessionStateService,
     @ISessionWorkspaceContext private readonly workspace: ISessionWorkspaceContext,
-    @IHostFsWatchService private readonly hostFsWatch: IHostFsWatchService,
+    @IPathWatchService private readonly pathWatch: IPathWatchService,
     @IHostFileSystem private readonly hostFs: IHostFileSystem,
   ) {
     super();
@@ -153,14 +150,17 @@ export class SessionFsWatchService extends Disposable implements ISessionFsWatch
   private ensureHandle(): void {
     if (this.handle !== undefined) return;
     this.loadGitignore();
-    const handle = this.hostFsWatch.watch(this.workspace.workDir, { recursive: true });
+    const handle = this.pathWatch.createWatch(
+      { target: 'directory', recursive: true, debounceMs: 0 },
+      ({ change }) => {
+        if (change !== undefined) this.onRaw(change);
+      },
+    );
     this.handle = handle;
-    this.handleSub = handle.onDidChange((e) => this.onRaw(e));
+    void handle.setPaths([this.workspace.workDir]);
   }
 
   private teardownHandle(): void {
-    this.handleSub?.dispose();
-    this.handleSub = undefined;
     this.handle?.dispose();
     this.handle = undefined;
   }
@@ -192,7 +192,9 @@ export class SessionFsWatchService extends Disposable implements ISessionFsWatch
       this.pending = [];
     }
     if (this.debounceTimer === undefined) {
-      const timer = setTimeout(() => this.flush(), this.debounceMs);
+      const timer = setTimeout(() => {
+        this.flush();
+      }, this.debounceMs);
       timer.unref?.();
       this.debounceTimer = timer;
     }

@@ -11,7 +11,7 @@
  * AGENTS.md block of the current system prompt, else the volatile
  * `seededContent` adopted at first evaluation (custom profiles without the
  * fenced block). The live content is read once and then only re-read when the
- * shared `fileSourceMonitor` subscription reports a candidate change — never
+ * shared `pathWatch` subscription reports a candidate change — never
  * per step, so the step pipeline carries no filesystem IO (fake-timer retry
  * loops included); cwd changes re-arm the watch and force one re-read. The
  * plain-data state (`seededContent`) is registered into `agentState`
@@ -31,9 +31,9 @@ import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import {
-  IFileSourceMonitor,
-  type IFileSourceWatch,
-} from '#/app/fileSourceMonitor/fileSourceMonitor';
+  type IPathWatch,
+  IPathWatchService,
+} from '#/app/pathWatch/pathWatch';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 
@@ -56,7 +56,7 @@ export const agentsMdReminderSeededContentKey = defineState<string | undefined>(
 export class AgentAgentsMdReminderService extends Disposable implements IAgentAgentsMdReminderService {
   declare readonly _serviceBrand: undefined;
 
-  private readonly watcher: IFileSourceWatch;
+  private readonly watcher: IPathWatch;
   private watchCwd: string | undefined;
   private changeVersion = 0;
   private loadedVersion = -1;
@@ -70,12 +70,12 @@ export class AgentAgentsMdReminderService extends Disposable implements IAgentAg
     @IHostFileSystem private readonly fs: IHostFileSystem,
     @IHostEnvironment private readonly env: IHostEnvironment,
     @IBootstrapService private readonly bootstrap: IBootstrapService,
-    @IFileSourceMonitor fileSourceMonitor: IFileSourceMonitor,
+    @IPathWatchService pathWatch: IPathWatchService,
   ) {
     super();
     this.states.register(agentsMdReminderSeededContentKey);
     this.watcher = this._register(
-      fileSourceMonitor.createWatch({ target: 'file' }, () => {
+      pathWatch.createWatch({ target: 'file' }, () => {
         this.changeVersion += 1;
       }),
     );

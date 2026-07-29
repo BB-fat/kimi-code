@@ -141,7 +141,7 @@ const DOMAIN_LAYER = new Map([
   ['model', 2],
   ['sessionIndex', 2],
   ['sessionStore', 2],
-  ['fileSourceMonitor', 2],
+  ['pathWatch', 2],
   // L3 — registries & capabilities
   ['tool', 3],
   ['skill', 3],

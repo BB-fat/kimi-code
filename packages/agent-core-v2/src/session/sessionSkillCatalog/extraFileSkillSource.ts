@@ -5,7 +5,7 @@
  * `ISkillDiscovery`, contributing them at priority 10 (above plugin / builtin,
  * below user / workspace). Relative paths resolve against the session project
  * root; `~` and `~/...` resolve against the bootstrap home dir. Watches the
- * configured directories through `fileSourceMonitor` and re-fires
+ * configured directories through `pathWatch` and re-fires
  * `onDidChange` on debounced fs changes. Bound at Session scope so each
  * session reads its own workspace root.
  */
@@ -17,9 +17,9 @@ import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
 import {
-  IFileSourceMonitor,
-  type IFileSourceWatch,
-} from '#/app/fileSourceMonitor/fileSourceMonitor';
+  type IPathWatch,
+  IPathWatchService,
+} from '#/app/pathWatch/pathWatch';
 import {
   EXTRA_SKILL_DIRS_SECTION,
   type ExtraSkillDirsConfig,
@@ -49,18 +49,20 @@ export class ExtraFileSkillSource extends Disposable implements IExtraFileSkillS
   readonly priority = SKILL_SOURCE_PRIORITY.extra;
   private readonly onDidChangeEmitter = this._register(new Emitter<void>());
   readonly onDidChange: Event<void> = this.onDidChangeEmitter.event;
-  private readonly watcher: IFileSourceWatch;
+  private readonly watcher: IPathWatch;
 
   constructor(
     @ISkillDiscovery private readonly discovery: ISkillDiscovery,
     @IConfigService private readonly config: IConfigService,
     @ISessionWorkspaceContext private readonly workspace: ISessionWorkspaceContext,
     @IBootstrapService private readonly bootstrap: IBootstrapService,
-    @IFileSourceMonitor fileSourceMonitor: IFileSourceMonitor,
+    @IPathWatchService pathWatch: IPathWatchService,
   ) {
     super();
     this.watcher = this._register(
-      fileSourceMonitor.createWatch(SKILL_ROOT_WATCH_OPTIONS, () => this.onDidChangeEmitter.fire()),
+      pathWatch.createWatch(SKILL_ROOT_WATCH_OPTIONS, () => {
+        this.onDidChangeEmitter.fire();
+      }),
     );
     this._register(
       this.config.onDidSectionChange((event) => {
