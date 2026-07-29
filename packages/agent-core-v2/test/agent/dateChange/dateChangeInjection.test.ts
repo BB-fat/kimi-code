@@ -127,7 +127,6 @@ describe('AgentDateChangeService', () => {
   });
 
   it('adopts today silently when the system prompt carries no date line', async () => {
-    // The harness default system prompt has no date line.
     await injector.inject();
 
     expect(dateReminders(context)).toHaveLength(0);

@@ -1098,8 +1098,6 @@ export class AgentTestContext {
             );
           }
           reg.defineInstance(IHostTerminalService, createHostTerminalService());
-          // Real fs watching belongs outside the harness: sessions otherwise
-          // spin up chokidar handles on candidate skill roots for every test.
           reg.defineInstance(IHostFsWatchService, createHostFsWatchService());
           reg.defineInstance(
             IHostEnvironment,

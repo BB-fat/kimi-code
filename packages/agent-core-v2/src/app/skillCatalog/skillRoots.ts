@@ -97,11 +97,6 @@ export async function configuredRoots(
   return (await resolveConfiguredSkillRoots(dirs, workDir, osHomeDir, source)).roots;
 }
 
-/**
- * Watch candidates: every plausible root path WITHOUT existence filtering, so
- * file watchers can also observe a skills directory being created mid-session
- * (chokidar reports paths that appear after the watch was armed).
- */
 export function userRootCandidates(homeDir: string, osHomeDir: string): readonly string[] {
   return [
     ...USER_BRAND_DIRS.map((dir) => path.join(homeDir, dir)),

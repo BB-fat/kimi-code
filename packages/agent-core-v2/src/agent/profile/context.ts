@@ -72,11 +72,6 @@ export async function loadAgentsMd(
   return result.content;
 }
 
-/**
- * Every AGENTS.md path the loader chain can draw from, in chain order and
- * without existence filtering — the watch candidates for change detection
- * (`agentsMdReminder`).
- */
 export async function agentsMdCandidatePaths(
   deps: ProfileContextDeps,
   brandHome: string | undefined,
