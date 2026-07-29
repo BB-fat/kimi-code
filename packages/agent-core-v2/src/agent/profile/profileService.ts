@@ -92,6 +92,7 @@ import { ISessionInstructionsProvider } from '#/session/sessionInstructions/inst
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
 import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
 import { ISessionToolPolicy } from '#/session/sessionToolPolicy/sessionToolPolicy';
+import { ISessionToolPolicyGate } from '#/session/sessionToolPolicyGate/sessionToolPolicyGate';
 import type { ResolvedAgentProfile, SystemPromptContext } from '#/agent/profile/profile';
 import { IAgentStateService } from '#/agent/state/agentState';
 
@@ -203,6 +204,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     @ISessionSkillCatalog private readonly skillCatalog: ISessionSkillCatalog,
     @ISessionInstructionsProvider private readonly instructions: ISessionInstructionsProvider,
     @ISessionToolPolicy private readonly sessionToolPolicy: ISessionToolPolicy,
+    @ISessionToolPolicyGate private readonly toolPolicyGate: ISessionToolPolicyGate,
     @IAgentToolRegistryService private readonly toolRegistry: IAgentToolRegistryService,
     @IAgentProfileCatalogService private readonly builtinProfiles: IAgentProfileCatalogService,
     @IAgentStateService private readonly states: IAgentStateService,
@@ -887,6 +889,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
   ): boolean {
     return isToolActiveComposed(
       {
+        workspaceDisabledTools: this.toolPolicyGate.disabledTools,
         profile,
         global: this.config.get<ToolsConfig>(TOOLS_SECTION),
         sessionDisabledTools: this.sessionToolPolicy.disabledTools(),
