@@ -1,6 +1,7 @@
 /**
- * Scenario: managed chat_title generation through the session-scoped service,
- * including OAuth failures, legacy custom titles, request headers, and races.
+ * Scenario: on-demand managed chat_title generation through the session-scoped
+ * service, including OAuth failures, legacy custom titles, request headers,
+ * and races.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
@@ -10,7 +11,6 @@ import { OAuthConnectionError, OAuthUnauthorizedError } from '@moonshot-ai/kimi-
 import { DisposableStore, type IDisposable } from '#/_base/di/lifecycle';
 import { createServices, type TestInstantiationService } from '#/_base/di/test';
 import { Emitter } from '#/_base/event';
-import { ILogService } from '#/_base/log/log';
 import { IOAuthService } from '#/app/auth/auth';
 import { type DomainEvent, IEventService } from '#/app/event/event';
 import { IFlagService } from '#/app/flag/flag';
@@ -183,22 +183,13 @@ describe('SessionTitleService', () => {
     vi.unstubAllEnvs();
   });
 
-  function publishEasyTitle(lastPrompt: string, sessionId = SESSION_ID): void {
-    events.publish({
-      type: 'session.meta.updated',
-      payload: {
-        agentId: 'main',
-        sessionId,
-        title: lastPrompt.slice(0, 200),
-        patch: { title: lastPrompt.slice(0, 200), isCustomTitle: false, lastPrompt },
-      },
-    });
-  }
+  it('replaces the easy title with the generated one', async () => {
+    await metadata.update({ lastPrompt: '帮我看一下这个 Go 的 nil pointer 报错' });
 
-  it('replaces the easy title with the generated one after the first prompt', async () => {
-    publishEasyTitle('帮我看一下这个 Go 的 nil pointer 报错');
+    const title = await ix.get(ISessionTitleService).generateTitle();
 
-    await waitFor(() => metadata.meta.title === '生成的标题');
+    expect(title).toBe('生成的标题');
+    expect(metadata.meta.title).toBe('生成的标题');
     expect(metadata.meta.isCustomTitle).toBe(false);
 
     const [, init] = fetchMock.mock.calls[0]!;
@@ -218,49 +209,12 @@ describe('SessionTitleService', () => {
     expect(rebroadcast).toBeDefined();
   });
 
-  it('does nothing when the auto-title flag is off', async () => {
-    flagEnabled = false;
-    publishEasyTitle('hello');
-
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(metadata.meta.title).toBeUndefined();
-  });
-
   it('does nothing without a managed OAuth provider', async () => {
     delete providers['managed:kimi-code'];
     await metadata.update({ lastPrompt: 'hello' });
 
     await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
     expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it('ignores easy-title events from other sessions', async () => {
-    publishEasyTitle('hello', 'sess-other');
-
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it('ignores manual renames (custom title patches)', async () => {
-    events.publish({
-      type: 'session.meta.updated',
-      payload: {
-        agentId: 'main',
-        sessionId: SESSION_ID,
-        title: 'mine',
-        patch: { title: 'mine', isCustomTitle: true },
-      },
-    });
-
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it('attempts generation only once per session scope', async () => {
-    publishEasyTitle('first');
-    await waitFor(() => metadata.meta.title === '生成的标题');
-
-    publishEasyTitle('second');
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(metadata.meta.title).toBe('生成的标题');
   });
 
   it('never overwrites a custom title set while generation is in flight', async () => {
@@ -374,7 +328,7 @@ describe('SessionTitleService', () => {
     expect(metadata.meta.title).toBe('生成的标题');
   });
 
-  it('shares an in-flight generation between automatic and manual requests', async () => {
+  it('shares an in-flight generation between concurrent requests', async () => {
     let resolveFetch: ((response: Response) => void) | undefined;
     fetchMock.mockImplementationOnce(
       async () =>
@@ -383,11 +337,10 @@ describe('SessionTitleService', () => {
         }),
     );
 
-    publishEasyTitle('first');
+    await metadata.update({ lastPrompt: 'hello' });
+    const first = ix.get(ISessionTitleService).generateTitle();
+    const second = ix.get(ISessionTitleService).generateTitle();
     await waitFor(() => fetchMock.mock.calls.length === 1);
-    await metadata.update({ lastPrompt: 'second' });
-    const manual = ix.get(ISessionTitleService).generateTitle();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
 
     resolveFetch?.(
       new Response(JSON.stringify({ title: '生成的标题' }), {
@@ -395,19 +348,9 @@ describe('SessionTitleService', () => {
         headers: { 'Content-Type': 'application/json' },
       }),
     );
-    await expect(manual).resolves.toBe('生成的标题');
-    expect(metadata.meta.title).toBe('生成的标题');
-  });
-
-  it('generateTitle() regenerates from the stored lastPrompt on demand', async () => {
-    await metadata.update({ lastPrompt: '帮我把这个脚本改成异步' });
-
-    const svc = ix.get(ISessionTitleService);
-    const title = await svc.generateTitle();
-
-    expect(title).toBe('生成的标题');
-    expect(metadata.meta.title).toBe('生成的标题');
-    expect(metadata.meta.isCustomTitle).toBe(false);
+    await expect(first).resolves.toBe('生成的标题');
+    await expect(second).resolves.toBe('生成的标题');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('generateTitle() returns undefined when the flag is off or no prompt was seen', async () => {

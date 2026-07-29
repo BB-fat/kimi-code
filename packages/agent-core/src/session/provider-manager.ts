@@ -157,27 +157,6 @@ export class ProviderManager implements ModelProvider {
     };
   }
 
-  /** Read a provider entry from the current config (live when constructed with a config getter). */
-  getProviderConfig(providerName: string): ProviderConfig | undefined {
-    return this.config.providers[providerName];
-  }
-
-  /** Resolve managed-request headers with the same env < host < provider precedence as model calls. */
-  resolveManagedRequestHeaders(providerName: string): Record<string, string> | undefined {
-    const provider = this.getProviderConfig(providerName);
-    return provider === undefined
-      ? undefined
-      : composeManagedRequestHeaders(provider, this.options.kimiRequestHeaders);
-  }
-
-  /** Resolve an OAuth bearer-token provider for a configured provider entry. */
-  resolveOAuthTokenProvider(
-    providerName: string,
-    oauthRef?: OAuthRef,
-  ): BearerTokenProvider | undefined {
-    return this.options.resolveOAuthTokenProvider?.(providerName, oauthRef);
-  }
-
   resolveAuth(
     model: string,
     options?: { readonly log?: Logger },
@@ -329,7 +308,7 @@ function toKosongProviderConfig(
         // still win on conflict.
         ...defaultHeadersField(
           provider.type === 'kimi' && modelProtocol === 'anthropic'
-            ? composeManagedRequestHeaders(provider, kimiRequestHeaders, envCustomHeaders)
+            ? { ...envCustomHeaders, ...kimiRequestHeaders, ...provider.customHeaders }
             : { ...envCustomHeaders, ...kimiUserAgentHeader(kimiRequestHeaders), ...provider.customHeaders },
         ),
       };
@@ -363,9 +342,11 @@ function toKosongProviderConfig(
         baseUrl: modelBaseUrl ?? providerValue(provider.baseUrl, provider.env, 'KIMI_BASE_URL'),
         apiKey: providerApiKey(provider),
         generationKwargs: { prompt_cache_key: promptCacheKey },
-        ...defaultHeadersField(
-          composeManagedRequestHeaders(provider, kimiRequestHeaders, envCustomHeaders),
-        ),
+        ...defaultHeadersField({
+          ...envCustomHeaders,
+          ...kimiRequestHeaders,
+          ...provider.customHeaders,
+        }),
       };
     case 'google-genai':
       return {
@@ -439,14 +420,6 @@ function defaultHeadersField(
 ): { defaultHeaders?: Record<string, string> } {
   if (headers === undefined || Object.keys(headers).length === 0) return {};
   return { defaultHeaders: { ...headers } };
-}
-
-function composeManagedRequestHeaders(
-  provider: Pick<ProviderConfig, 'customHeaders'>,
-  kimiRequestHeaders: Record<string, string> | undefined,
-  envCustomHeaders = parseKimiCodeCustomHeaders(),
-): Record<string, string> {
-  return { ...envCustomHeaders, ...kimiRequestHeaders, ...provider.customHeaders };
 }
 
 // Extract just the `User-Agent` from the Kimi identity headers so non-Kimi

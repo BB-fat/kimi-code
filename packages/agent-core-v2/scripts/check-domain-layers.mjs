@@ -239,9 +239,9 @@ const DOMAIN_LAYER = new Map([
   // L6 beside the other cross-agent coordinators.
   ['undo', 6],
   ['sessionActivity', 6],
-  // `sessionTitle` generates the session title through the managed platform's
-  // `chat_title` tool: it watches the `event` bus for the easy-title moment
-  // and persists through `sessionMetadata`, so it sits in L6 beside it.
+  // `sessionTitle` generates the session title on demand through the managed
+  // platform's `chat_title` tool and persists through `sessionMetadata`, so
+  // it sits in L6 beside it.
   ['sessionTitle', 6],
   ['session', 6],
   ['terminal', 6],

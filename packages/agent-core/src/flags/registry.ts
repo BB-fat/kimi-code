@@ -32,15 +32,6 @@ export const FLAG_DEFINITIONS = [
     default: false,
     surface: 'core',
   },
-  {
-    id: 'auto-title',
-    title: 'Auto session title',
-    description:
-      'Generate the session title from the first prompt through the managed chat_title tool instead of keeping the truncated prompt. Requires a managed Kimi Code OAuth login.',
-    env: 'KIMI_CODE_EXPERIMENTAL_AUTO_TITLE',
-    default: false,
-    surface: 'both',
-  },
 ] as const satisfies readonly FlagDefinitionInput[];
 
 /** Literal union of registered flag ids. */

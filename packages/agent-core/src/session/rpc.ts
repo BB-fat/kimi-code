@@ -40,7 +40,6 @@ import type {
 import type { PromisableMethods } from '#/utils/types';
 
 import type { Session, SessionMeta } from '.';
-import { generateSessionTitle } from './auto-title';
 import {
   promptMetadataTextFromPayload,
   promptMetadataTextFromPluginCommand,
@@ -350,42 +349,6 @@ export class SessionAPIImpl implements PromisableMethods<SessionAPI> {
         lastPrompt,
       },
     });
-    if (title !== undefined) {
-      void this.applyGeneratedTitle(lastPrompt);
-    }
-  }
-
-  private async applyGeneratedTitle(lastPrompt: string): Promise<void> {
-    try {
-      if (!this.session.experimentalFlags.enabled('auto-title')) return;
-      const generated = await generateSessionTitle(
-        lastPrompt,
-        this.session.options.providerManager,
-        this.session.log,
-      );
-      if (generated === undefined) return;
-      // The user may have renamed the session while the request was in flight.
-      if (hasCustomTitle(this.session.metadata)) return;
-      this.session.metadata = {
-        ...this.session.metadata,
-        title: generated,
-        isCustomTitle: false,
-        updatedAt: new Date().toISOString(),
-      };
-      await this.session.writeMetadata();
-      await this.session.rpc.emitEvent({
-        type: 'session.meta.updated',
-        agentId: 'main',
-        title: generated,
-        patch: {
-          title: generated,
-          isCustomTitle: false,
-          lastPrompt: undefined,
-        },
-      });
-    } catch (error) {
-      this.session.log.warn('auto session title failed', { error });
-    }
   }
 }
 
@@ -394,11 +357,6 @@ function isUntitled(title: unknown): boolean {
 }
 
 function hasCustomTitle(metadata: SessionMeta): boolean {
-  if (typeof metadata.title === 'string' && typeof metadata.isCustomTitle === 'boolean') {
-    return metadata.isCustomTitle;
-  }
-  return (
-    metadata.isCustomTitle ||
-    typeof (metadata as SessionMeta & { customTitle?: unknown }).customTitle === 'string'
-  );
+  if (metadata.isCustomTitle) return true;
+  return typeof (metadata as SessionMeta & { customTitle?: unknown }).customTitle === 'string';
 }
