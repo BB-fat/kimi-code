@@ -11,7 +11,7 @@ import path from 'node:path';
 
 import { Error2, PluginErrors } from '#/errors';
 import type { HookDef } from '#/agent/externalHooks/types';
-import type { McpServerConfig } from '#/agent/mcp/config-schema';
+import type { McpServerConfig } from '#/mcpCore/config-schema';
 import { discoverFileSkills } from '#/app/skillCatalog/fileSkillDiscovery';
 import type { SkillDiscoveryResult } from '#/app/skillCatalog/skillDiscovery';
 import type { SkillRoot } from '#/app/skillCatalog/types';
