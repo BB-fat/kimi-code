@@ -21,6 +21,19 @@ export type FeedbackType = z.infer<typeof feedbackTypeSchema>;
 export const feedbackDiagnosticsSchema = z.enum(['none', 'logs', 'logs_and_codebase']);
 export type FeedbackDiagnostics = z.infer<typeof feedbackDiagnosticsSchema>;
 
+const feedbackInfoReservedKeys = ['type', 'title', 'diagnostics', 'agent_id'] as const;
+const feedbackInfoSchema = z.record(z.string(), z.unknown()).superRefine((info, ctx) => {
+  for (const key of feedbackInfoReservedKeys) {
+    if (Object.hasOwn(info, key)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: `${key} is reserved; use the top-level field instead`,
+        path: [key],
+      });
+    }
+  }
+});
+
 export const feedbackSubmitBodySchema = z.object({
   content: z.string().min(1).max(20000),
   session_id: z.string().min(1).max(256),
@@ -29,7 +42,7 @@ export const feedbackSubmitBodySchema = z.object({
   contact: z.string().min(1).max(256).optional(),
   diagnostics: feedbackDiagnosticsSchema.optional(),
   agent_id: z.string().min(1).max(256).optional(),
-  info: z.record(z.string(), z.unknown()).optional(),
+  info: feedbackInfoSchema.optional(),
 });
 export type FeedbackSubmitBody = z.infer<typeof feedbackSubmitBodySchema>;
 

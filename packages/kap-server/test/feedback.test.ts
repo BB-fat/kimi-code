@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -79,9 +79,18 @@ describe('server-v2 feedback routes', () => {
   let home: string | undefined;
   let server: RunningServer | undefined;
   let loggedIn: boolean;
+  let kimiCodeBaseUrl: string | undefined;
+  let refreshInterval: string | undefined;
+  let refreshOnStart: string | undefined;
   const fetchMock = vi.fn();
 
   beforeEach(async () => {
+    kimiCodeBaseUrl = process.env['KIMI_CODE_BASE_URL'];
+    refreshInterval = process.env['KIMI_CODE_MODEL_CATALOG_REFRESH_INTERVAL_MS'];
+    refreshOnStart = process.env['KIMI_CODE_MODEL_CATALOG_REFRESH_ON_START'];
+    delete process.env['KIMI_CODE_BASE_URL'];
+    process.env['KIMI_CODE_MODEL_CATALOG_REFRESH_INTERVAL_MS'] = '0';
+    process.env['KIMI_CODE_MODEL_CATALOG_REFRESH_ON_START'] = '0';
     loggedIn = true;
     fetchMock.mockReset();
     vi.stubGlobal('fetch', fetchMock);
@@ -92,6 +101,16 @@ describe('server-v2 feedback routes', () => {
       }),
     } as unknown as IOAuthService;
     home = await mkdtemp(join(tmpdir(), 'kimi-server-v2-feedback-'));
+    await writeFile(
+      join(home, 'config.toml'),
+      [
+        '[providers."managed:kimi-code"]',
+        'type = "kimi"',
+        'base_url = "https://example.test/managed/"',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
     server = await startServer({
       host: '127.0.0.1',
       port: 0,
@@ -103,6 +122,9 @@ describe('server-v2 feedback routes', () => {
 
   afterEach(async () => {
     vi.unstubAllGlobals();
+    restoreEnv('KIMI_CODE_BASE_URL', kimiCodeBaseUrl);
+    restoreEnv('KIMI_CODE_MODEL_CATALOG_REFRESH_INTERVAL_MS', refreshInterval);
+    restoreEnv('KIMI_CODE_MODEL_CATALOG_REFRESH_ON_START', refreshOnStart);
     if (server !== undefined) {
       await server.close();
       server = undefined;
@@ -133,7 +155,7 @@ describe('server-v2 feedback routes', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const call = backendCall(fetchMock);
-    expect(call.url).toMatch(/\/feedback$/);
+    expect(call.url).toBe('https://example.test/managed/feedback');
     expect(call.method).toBe('POST');
     expect(call.authorization).toBe('Bearer test-access-token');
     expect(call.body).toMatchObject({
@@ -164,6 +186,18 @@ describe('server-v2 feedback routes', () => {
     const call = backendCall(fetchMock);
     expect('info' in call.body).toBe(false);
     expect('contact' in call.body).toBe(false);
+  });
+
+  it('rejects reserved info keys before forwarding feedback', async () => {
+    const res = await post(appOf(server as RunningServer), '/api/v1/feedback', {
+      content: 'the session list flashes on open',
+      session_id: 's-1',
+      type: 'bug',
+      info: { type: 'feature' },
+    });
+
+    expect(envelopeOf(res.json()).code).toBe(40001);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('returns 40111 when not signed in and never calls the backend', async () => {
@@ -211,7 +245,8 @@ describe('server-v2 feedback routes', () => {
     ]);
 
     const call = backendCall(fetchMock);
-    expect(call.url).toMatch(/\/feedback\/upload_url$/);
+    expect(call.url).toBe('https://example.test/managed/feedback/upload_url');
+    expect(call.authorization).toBe('Bearer test-access-token');
     expect(call.body).toMatchObject({
       feedback_id: 7,
       file_name: 'session.zip',
@@ -229,7 +264,8 @@ describe('server-v2 feedback routes', () => {
 
     expect(envelopeOf<null>(res.json()).code).toBe(0);
     const call = backendCall(fetchMock);
-    expect(call.url).toMatch(/\/feedback\/upload_complete$/);
+    expect(call.url).toBe('https://example.test/managed/feedback/upload_complete');
+    expect(call.authorization).toBe('Bearer test-access-token');
     expect(call.body).toMatchObject({
       upload_id: 3,
       parts: [{ part_number: 1, etag: 'etag-1' }],
@@ -250,3 +286,11 @@ describe('server-v2 feedback routes', () => {
     expect(envelopeOf(res.json()).code).toBe(40001);
   });
 });
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+  } else {
+    process.env[name] = value;
+  }
+}

@@ -15,6 +15,7 @@ import {
   IModelService,
   IOAuthService,
   IProviderDiscoveryService,
+  IProviderService,
   IWorkspaceService,
   logSeed,
   resolveConfigPath,
@@ -286,6 +287,7 @@ export async function startServer(opts: ServerStartOptions = {}): Promise<Runnin
   const feedback = new FeedbackService({
     oauth: core.accessor.get(IOAuthService),
     model: core.accessor.get(IModelService),
+    provider: core.accessor.get(IProviderService),
     version: hostVersion,
   });
 
