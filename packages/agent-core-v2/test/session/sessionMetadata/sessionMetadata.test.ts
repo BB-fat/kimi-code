@@ -149,6 +149,33 @@ describe('SessionMetadata', () => {
     });
   });
 
+  it('preserves a legacy customTitle when title is also present', async () => {
+    const store = ix.get(IAtomicDocumentStore);
+    await store.set(META_SCOPE, 'state.json', {
+      id: 's1',
+      version: 2,
+      createdAt: 1700000000000,
+      updatedAt: 1700000000000,
+      archived: false,
+      title: 'base title',
+      customTitle: 'legacy custom title',
+    });
+
+    const meta = ix.get(ISessionMetadata);
+    await expect(meta.read()).resolves.toMatchObject({
+      title: 'legacy custom title',
+      isCustomTitle: true,
+    });
+
+    await meta.update({ archived: true });
+    const fresh = createFreshMetadata(ix);
+    await expect(fresh.read()).resolves.toMatchObject({
+      title: 'legacy custom title',
+      isCustomTitle: true,
+      archived: true,
+    });
+  });
+
   it('leaves existing agents/custom maps untouched', async () => {
     const store = ix.get(IAtomicDocumentStore);
     await store.set(META_SCOPE, 'state.json', {

@@ -216,7 +216,7 @@ export function normalizeSessionMeta(raw: SessionMeta, sessionId: string): Sessi
       : undefined);
   const legacyCustomTitle =
     typeof legacy.customTitle === 'string' ? legacy.customTitle : undefined;
-  const title = raw.title ?? legacyCustomTitle;
+  const title = legacyCustomTitle ?? raw.title;
   const isCustomTitle = legacyCustomTitle === undefined ? raw.isCustomTitle : true;
   if (raw.version === SESSION_META_VERSION) {
     if (cwd === raw.cwd && title === raw.title && isCustomTitle === raw.isCustomTitle) {
