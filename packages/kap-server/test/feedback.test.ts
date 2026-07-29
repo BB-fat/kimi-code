@@ -49,10 +49,14 @@ function submit(api: AppLike, payload: unknown) {
 interface StoredRecord {
   id: string;
   time: number;
-  message: string;
-  rating?: string;
+  type: string;
+  content: string;
+  title?: string;
+  contact?: string;
+  diagnostics?: string;
   session_id?: string;
   agent_id?: string;
+  info?: Record<string, unknown>;
 }
 
 async function readRecords(home: string): Promise<StoredRecord[]> {
@@ -84,56 +88,78 @@ describe('server-v2 feedback routes', () => {
   });
 
   it('accepts feedback and appends a stamped JSON line to feedback.jsonl', async () => {
-    const res = await submit(appOf(server as RunningServer), { message: 'great session' });
+    const res = await submit(appOf(server as RunningServer), {
+      type: 'bug',
+      content: 'the session list flashes on open',
+    });
     expect(res.statusCode).toBe(200);
     expect(envelopeOf<null>(res.json()).code).toBe(0);
 
     const records = await readRecords(home as string);
     expect(records).toHaveLength(1);
-    expect(records[0]?.message).toBe('great session');
+    expect(records[0]).toMatchObject({ type: 'bug', content: 'the session list flashes on open' });
     expect(typeof records[0]?.id).toBe('string');
     expect(typeof records[0]?.time).toBe('number');
   });
 
-  it('persists the optional rating / session_id / agent_id fields', async () => {
+  it('persists the optional detail fields', async () => {
     await submit(appOf(server as RunningServer), {
-      message: 'wrong result',
-      rating: 'down',
+      type: 'feature',
+      content: 'bring back the skills section under general settings',
+      title: 'move skills settings back',
+      contact: 'user@example.com',
+      diagnostics: 'logs',
       session_id: 's-1',
       agent_id: 'a-1',
+      info: { surface: 'settings', channel: 'web' },
     });
 
     const records = await readRecords(home as string);
     expect(records).toHaveLength(1);
     expect(records[0]).toMatchObject({
-      message: 'wrong result',
-      rating: 'down',
+      type: 'feature',
+      content: 'bring back the skills section under general settings',
+      title: 'move skills settings back',
+      contact: 'user@example.com',
+      diagnostics: 'logs',
       session_id: 's-1',
       agent_id: 'a-1',
+      info: { surface: 'settings', channel: 'web' },
     });
   });
 
-  it('appends multiple submissions as separate lines in submission order', async () => {
+  it('appends multiple submissions as separate lines', async () => {
     const api = appOf(server as RunningServer);
-    await Promise.all([submit(api, { message: 'first' }), submit(api, { message: 'second' })]);
+    await Promise.all([
+      submit(api, { type: 'bug', content: 'first' }),
+      submit(api, { type: 'other', content: 'second' }),
+    ]);
 
     const records = await readRecords(home as string);
     expect(records).toHaveLength(2);
-    expect(records.map((r) => r.message).toSorted()).toEqual(['first', 'second']);
+    expect(records.map((r) => r.content).toSorted()).toEqual(['first', 'second']);
   });
 
-  it('rejects an empty message', async () => {
-    const res = await submit(appOf(server as RunningServer), { message: '' });
+  it('rejects an empty content', async () => {
+    const res = await submit(appOf(server as RunningServer), { type: 'bug', content: '' });
     expect(envelopeOf(res.json()).code).toBe(40001);
   });
 
-  it('rejects a missing message', async () => {
-    const res = await submit(appOf(server as RunningServer), { rating: 'up' });
+  it('rejects a missing content', async () => {
+    const res = await submit(appOf(server as RunningServer), { type: 'bug' });
+    expect(envelopeOf(res.json()).code).toBe(40001);
+  });
+
+  it('rejects an unknown feedback type', async () => {
+    const res = await submit(appOf(server as RunningServer), {
+      type: 'praise',
+      content: 'love it',
+    });
     expect(envelopeOf(res.json()).code).toBe(40001);
   });
 
   it.skipIf(process.platform === 'win32')('writes feedback.jsonl with 0600 permissions', async () => {
-    await submit(appOf(server as RunningServer), { message: 'perm check' });
+    await submit(appOf(server as RunningServer), { type: 'other', content: 'perm check' });
     const mode = (await stat(join(home as string, 'feedback', 'feedback.jsonl'))).mode & 0o777;
     expect(mode).toBe(0o600);
   });

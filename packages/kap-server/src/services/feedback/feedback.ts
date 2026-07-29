@@ -1,5 +1,7 @@
 import { createDecorator } from '@moonshot-ai/agent-core-v2';
 
+import type { FeedbackDiagnostics, FeedbackType } from '../../protocol/rest-feedback';
+
 /**
  * `IFeedbackService` — append-only sink for user feedback submitted over
  * `POST /api/v1/feedback`. Each submission is persisted as one JSON line in
@@ -8,10 +10,14 @@ import { createDecorator } from '@moonshot-ai/agent-core-v2';
  * naming so the log can be shipped to a collection backend unchanged.
  */
 export interface FeedbackEntry {
-  readonly message: string;
-  readonly rating?: 'up' | 'down';
+  readonly type: FeedbackType;
+  readonly content: string;
+  readonly title?: string;
+  readonly contact?: string;
+  readonly diagnostics?: FeedbackDiagnostics;
   readonly session_id?: string;
   readonly agent_id?: string;
+  readonly info?: Record<string, unknown>;
 }
 
 export interface FeedbackRecord extends FeedbackEntry {
