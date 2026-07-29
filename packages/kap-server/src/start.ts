@@ -62,6 +62,7 @@ import { createOriginHook, isOriginAllowed, parseCorsOrigins } from './middlewar
 import { createSecurityHeadersHook } from './middleware/securityHeaders';
 import { createAuthHook } from './middleware/auth';
 import { GuiStoreService } from './services/guiStore/guiStoreService';
+import { FeedbackService } from './services/feedback/feedbackService';
 import { loadSnapshotConfig, SnapshotReader } from './services/snapshot';
 import {
   initializeServerTelemetry,
@@ -205,6 +206,7 @@ export async function startServer(opts: ServerStartOptions = {}): Promise<Runnin
 
   const configPath = resolveConfigPath({ homeDir, configPath: opts.configPath });
   const guiStore = new GuiStoreService(homeDir, logger);
+  const feedback = new FeedbackService(homeDir);
   let authTokenService: IAuthTokenService;
   // Whether a password credential is configured (only meaningful for the real,
   // non-injected auth impl). Drives the token-only warning on a public bind.
@@ -411,6 +413,7 @@ export async function startServer(opts: ServerStartOptions = {}): Promise<Runnin
           { name: 'terminals', description: 'PTY terminal sessions' },
           { name: 'fs', description: 'Filesystem operations' },
           { name: 'files', description: 'File upload & download' },
+          { name: 'feedback', description: 'User feedback collection' },
         ],
       },
       transformObject: (documentObject) => {
@@ -432,6 +435,7 @@ export async function startServer(opts: ServerStartOptions = {}): Promise<Runnin
     enableShutdown,
     enableTerminals,
     guiStore,
+    feedback,
     onShutdown: () => {
       void close().catch((err: unknown) => logger.error({ err }, 'server close failed'));
     },
