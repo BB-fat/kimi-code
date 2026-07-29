@@ -347,22 +347,31 @@ export class StandaloneMemorySessionManager implements ISessionManager {
     sourceSessionId: string,
     patch: SameRuntimeForkInput['metadata'],
   ): Record<string, unknown> {
-    const metadata: Record<string, unknown> = {
-      ...structuredClone(sourceMetadata),
-      ...(patch === undefined ? {} : structuredClone(patch)),
-    };
+    // Undefined-valued patch keys must not overwrite the source: the runtime
+    // host passes `{ title: undefined, custom: undefined }` when the caller
+    // named no patch, and a naive spread would wipe `sourceMetadata.custom`
+    // before the merge below ever sees it.
+    const metadata: Record<string, unknown> = { ...structuredClone(sourceMetadata) };
+    if (patch !== undefined) {
+      for (const [key, value] of Object.entries(structuredClone(patch))) {
+        if (value !== undefined) metadata[key] = value;
+      }
+    }
     const titleFromInput = readMetadataString(patch, 'title');
     const sourceTitle = readMetadataString(sourceMetadata, 'title');
     metadata['title'] = titleFromInput ?? `Fork: ${sourceTitle ?? sourceSessionId}`;
     metadata['isCustomTitle'] =
       titleFromInput !== undefined ? true : metadata['isCustomTitle'] === true;
     metadata['forkedFrom'] = sourceSessionId;
-    const custom = readMetadataRecord(metadata['custom']);
-    if (custom !== undefined) {
-      const stripped = withoutGoal(custom);
-      if (Object.keys(stripped).length === 0) delete metadata['custom'];
-      else metadata['custom'] = stripped;
-    }
+    // `custom` MERGES source and patch with the fork's goal-dropping rule (the
+    // local runtime's `forkCustomMetadata`) — a partial patch must not replace
+    // the source's custom metadata wholesale.
+    const custom = forkCustomMetadata(
+      readMetadataRecord(sourceMetadata['custom']),
+      readMetadataRecord(patch?.['custom']),
+    );
+    if (custom === undefined) delete metadata['custom'];
+    else metadata['custom'] = custom;
     return metadata;
   }
 

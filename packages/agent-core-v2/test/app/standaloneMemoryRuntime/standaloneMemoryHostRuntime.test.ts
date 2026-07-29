@@ -711,6 +711,28 @@ describe('same-runtime fork (plan §5.8)', () => {
     ).rejects.toMatchObject({ code: 'session.already_exists' });
   });
 
+  it('preserves source custom metadata through undefined-valued and partial patches', async () => {
+    const runtime = new StandaloneMemoryHostRuntime({ id: 'rt-x' });
+    const source = await runtime.sessions.create({
+      metadata: { title: 'Origin', custom: { goal: { active: true }, keep: 1 } },
+    });
+
+    // The runtime session host forks with a `{ title: undefined, custom: undefined }`
+    // patch when the caller names no metadata — undefined patch keys must not
+    // wipe the source's custom metadata (only `goal` is dropped).
+    const undefinedPatch = await runtime.sessions.fork(source.ref.sessionId, {
+      metadata: { title: undefined, custom: undefined },
+    });
+    expect(undefinedPatch.metadata).toMatchObject({ title: 'Fork: Origin' });
+    expect(undefinedPatch.metadata['custom']).toEqual({ keep: 1 });
+
+    // A partial custom patch merges over the source's instead of replacing it.
+    const partialPatch = await runtime.sessions.fork(source.ref.sessionId, {
+      metadata: { custom: { extra: 2 } },
+    });
+    expect(partialPatch.metadata['custom']).toEqual({ keep: 1, extra: 2 });
+  });
+
   it('fork and export flush a live source lease first, so pending writes are included', async () => {
     const runtime = new StandaloneMemoryHostRuntime({ id: 'rt-x' });
     const source = await runtime.sessions.create({});
