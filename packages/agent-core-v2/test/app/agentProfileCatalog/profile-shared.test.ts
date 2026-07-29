@@ -2,8 +2,9 @@
  * Scenario: shared system-prompt rendering — the single `${var}` variable
  * table (`systemPromptVars`), user-template rendering with a lazily bound
  * `${base_prompt}` (`renderPromptTemplate`), and the builtin template renderer
- * (`renderSystemPrompt`) including its code-composed conditional sections
- * (Windows notes, additional directories, skills). Pure functions, no IO.
+ * (`renderSystemPrompt`) including structured environment disclosure metadata
+ * and its code-composed conditional sections (Windows notes, additional
+ * directories, skills). Pure functions, no IO.
  * Run: `pnpm --filter @moonshot-ai/agent-core-v2 exec vitest run
  * test/app/agentProfileCatalog/profile-shared.test.ts`.
  */
@@ -12,7 +13,9 @@ import { describe, expect, it } from 'vitest';
 
 import {
   renderPromptTemplate,
+  renderPromptTemplateResult,
   renderSystemPrompt,
+  renderSystemPromptResult,
   systemPromptVars,
 } from '#/app/agentProfileCatalog/profile-shared';
 
@@ -137,6 +140,76 @@ describe('renderPromptTemplate', () => {
       '${base_prompt}',
     );
   });
+
+  it('records the environment facts used by now and agents_md placeholders', () => {
+    const result = renderPromptTemplateResult(
+      'date=${now} agents=${agents_md}',
+      {
+        cwd: '/work',
+        now: '2026-07-29T12:00:00',
+        agentsMd: 'AGENTS',
+        agentsMdStatus: 'present',
+      },
+      { skillActive: true },
+    );
+
+    expect(result.text).toBe('date=2026-07-29T12:00:00 agents=AGENTS');
+    expect(result.environment.cwd).toBe('/work');
+    expect(result.environment.date).toMatchObject({
+      disclosed: true,
+      value: { localDate: '2026-07-29' },
+    });
+    expect(result.environment.agentsMd).toEqual({
+      disclosed: true,
+      value: {
+        fingerprint: '370f346f47cb65d94fd904ecb4ceeb17d784965984b0f8e52cce79ff95451a54',
+        status: 'present',
+      },
+    });
+  });
+
+  it('merges disclosure metadata from a structured base_prompt render', () => {
+    const result = renderPromptTemplateResult(
+      'custom\n\n${base_prompt}',
+      { cwd: '/work' },
+      { skillActive: true },
+      () => ({
+        text: 'BASE',
+        environment: {
+          cwd: '/base',
+          date: {
+            disclosed: true,
+            value: { localDate: '2026-07-28', timeZone: 'UTC' },
+          },
+          agentsMd: {
+            disclosed: true,
+            value: {
+              fingerprint:
+                'a3a18567b84af6528d171050e54bcf75e0a1c94c8db8a165d03e9866cfa95bce',
+              status: 'present',
+            },
+          },
+        },
+      }),
+    );
+
+    expect(result.text).toBe('custom\n\nBASE');
+    expect(result.environment).toEqual({
+      cwd: '/work',
+      date: {
+        disclosed: true,
+        value: { localDate: '2026-07-28', timeZone: 'UTC' },
+      },
+      agentsMd: {
+        disclosed: true,
+        value: {
+          fingerprint:
+            'a3a18567b84af6528d171050e54bcf75e0a1c94c8db8a165d03e9866cfa95bce',
+          status: 'present',
+        },
+      },
+    });
+  });
 });
 
 describe('renderSystemPrompt', () => {
@@ -214,5 +287,32 @@ describe('renderSystemPrompt', () => {
     expect(overridden).toContain('You are Kimi Desktop,');
     expect(overridden).toContain('GUI_STYLE');
     expect(overridden).not.toContain('Kimi Code CLI');
+  });
+
+  it('returns disclosure metadata for the builtin now and agents_md sections', () => {
+    const result = renderSystemPromptResult(
+      '',
+      {
+        cwd: '/work',
+        now: '2026-07-29T12:00:00',
+        agentsMd: 'AGENTS',
+        agentsMdStatus: 'present',
+      },
+      { skillActive: true },
+    );
+
+    expect(result.text).toContain('AGENTS');
+    expect(result.environment.cwd).toBe('/work');
+    expect(result.environment.date).toMatchObject({
+      disclosed: true,
+      value: { localDate: '2026-07-29' },
+    });
+    expect(result.environment.agentsMd).toEqual({
+      disclosed: true,
+      value: {
+        fingerprint: '370f346f47cb65d94fd904ecb4ceeb17d784965984b0f8e52cce79ff95451a54',
+        status: 'present',
+      },
+    });
   });
 });

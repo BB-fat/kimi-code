@@ -16,6 +16,7 @@ import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/
 import { ILogService } from '#/_base/log/log';
 import {
   IAgentProfileCatalogService,
+  renderAgentProfile,
   type AgentProfile,
 } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
@@ -78,7 +79,7 @@ export class UserFileAgentSource implements IUserFileAgentSource {
     this.defaultProfile = systemMd ?? this.builtin.getDefault();
     const contribution = profilesFromDiscovery(
       await discoverAgentFiles(this.fs, roots, (message) => this.log.warn(message)),
-      (context) => this.defaultProfile.systemPrompt(context),
+      (context) => renderAgentProfile(this.defaultProfile, context),
     );
     if (systemMd === undefined) return contribution;
     return { ...contribution, profiles: [...contribution.profiles, systemMd] };

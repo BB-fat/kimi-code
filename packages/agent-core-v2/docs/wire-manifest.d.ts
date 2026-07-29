@@ -83,6 +83,13 @@ interface ConfigUpdatePayload {
   /** ThinkingEffort */
   thinkingLevel?: 'off' | 'on' | (string & {});
   systemPrompt?: string;
+  /** EnvironmentDisclosureSnapshot */
+  environmentDisclosure?: {
+    cwd: string;
+    date: { disclosed: true, value: { localDate: string, timeZone: string } } | { disclosed: false };
+    agentsMd: { disclosed: true, value: { fingerprint: string, status: 'missing' | 'empty' | 'present' } } | { disclosed: false };
+  };
+  renderGeneration?: number;
   disallowedTools?: string[];
 }
 
@@ -463,6 +470,13 @@ interface ProfileBindPayload {
   /** ThinkingEffort */
   thinkingEffort: 'off' | 'on' | (string & {});
   systemPrompt: string;
+  /** EnvironmentDisclosureSnapshot */
+  environmentDisclosure?: {
+    cwd: string;
+    date: { disclosed: true, value: { localDate: string, timeZone: string } } | { disclosed: false };
+    agentsMd: { disclosed: true, value: { fingerprint: string, status: 'missing' | 'empty' | 'present' } } | { disclosed: false };
+  };
+  renderGeneration?: number;
   activeToolNames?: string[];
   disallowedTools: string[];
   subagents?: string[];

@@ -3,11 +3,11 @@
  *
  * Exercises the real provider through the harness injector against a fake
  * host fs whose AGENTS.md files the test edits and deletes, with a stub
- * `IPathWatchService` driving change events: baselines come from the last
- * reminder in history, then the fenced AGENTS.md block of the system prompt,
- * then a silent adoption for blockless prompts. Edits, creations, and
- * removals all announce. Run: `pnpm --filter @moonshot-ai/agent-core-v2 exec
- * vitest run test/agent/profile/agentsMdReminder.test.ts`.
+ * `IPathWatchService` driving change events: baselines come from typed
+ * reminder metadata and the persisted rendered snapshot. Edits, creations,
+ * and removals all announce. Run: `pnpm --filter
+ * @moonshot-ai/agent-core-v2 exec vitest run
+ * test/agent/profile/agentsMdReminder.test.ts`.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -17,6 +17,11 @@ import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory'
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { loadAgentsMd } from '#/agent/profile/context';
 import { IAgentProfileService } from '#/agent/profile/profile';
+import {
+  fingerprintDisclosureContent,
+  agentsMdStatus,
+} from '#/app/agentProfileCatalog/profile-shared';
+import type { EnvironmentDisclosureSnapshot } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import {
   type IPathWatch,
   IPathWatchService,
@@ -85,6 +90,27 @@ function systemPromptWithAgentsMd(content: string): string {
     content,
     '```````',
   ].join('\n');
+}
+
+function updateSystemPromptWithAgentsMd(
+  profile: IAgentProfileService,
+  content: string,
+): void {
+  const environment: EnvironmentDisclosureSnapshot = {
+    cwd: profile.data().cwd,
+    date: { disclosed: false },
+    agentsMd: {
+      disclosed: true,
+      value: {
+        fingerprint: fingerprintDisclosureContent(content),
+        status: agentsMdStatus(content),
+      },
+    },
+  };
+  profile.update({
+    systemPrompt: systemPromptWithAgentsMd(content),
+    environmentDisclosure: environment,
+  });
 }
 
 function agentsMdReminders(context: IAgentContextMemoryService): readonly ContextMessage[] {
@@ -184,7 +210,7 @@ describe('AgentAgentsMdReminderService', () => {
 
   it('stays quiet when the file content matches the system prompt block', async () => {
     files.set(agentsMdPath, 'rule one');
-    profile.update({ systemPrompt: systemPromptWithAgentsMd(await currentAgentsMd()) });
+    updateSystemPromptWithAgentsMd(profile, await currentAgentsMd());
 
     await injector.inject();
 
@@ -193,7 +219,7 @@ describe('AgentAgentsMdReminderService', () => {
 
   it('injects the fresh content after an edit, then stays quiet', async () => {
     files.set(agentsMdPath, 'rule one');
-    profile.update({ systemPrompt: systemPromptWithAgentsMd(await currentAgentsMd()) });
+    updateSystemPromptWithAgentsMd(profile, await currentAgentsMd());
     await injector.inject();
 
     files.set(agentsMdPath, 'rule two');
@@ -208,6 +234,15 @@ describe('AgentAgentsMdReminderService', () => {
     expect(text).toContain('rule two');
     expect(text).toContain('supersedes');
     expect(text).toContain('DO NOT mention this to the user explicitly');
+    expect(first?.origin).toMatchObject({
+      kind: 'injection',
+      variant: 'agents_md',
+      disclosure: {
+        kind: 'agents_md',
+        fingerprint: fingerprintDisclosureContent(await currentAgentsMd()),
+        status: 'present',
+      },
+    });
 
     await injector.inject();
     expect(agentsMdReminders(context)).toHaveLength(1);
@@ -215,7 +250,7 @@ describe('AgentAgentsMdReminderService', () => {
 
   it('keeps a watch event that arrives while fresh content is being read', async () => {
     files.set(agentsMdPath, 'rule one');
-    profile.update({ systemPrompt: systemPromptWithAgentsMd(await currentAgentsMd()) });
+    updateSystemPromptWithAgentsMd(profile, await currentAgentsMd());
     await injector.inject();
 
     files.set(agentsMdPath, 'rule two');
@@ -252,7 +287,7 @@ describe('AgentAgentsMdReminderService', () => {
 
   it('announces removal when the last AGENTS.md file disappears', async () => {
     files.set(agentsMdPath, 'rule one');
-    profile.update({ systemPrompt: systemPromptWithAgentsMd(await currentAgentsMd()) });
+    updateSystemPromptWithAgentsMd(profile, await currentAgentsMd());
     await injector.inject();
 
     files.clear();
@@ -264,10 +299,18 @@ describe('AgentAgentsMdReminderService', () => {
     const first = reminders[0];
     expect(first).toBeDefined();
     expect(messageText(first as ContextMessage)).toContain('removed');
+    expect(first?.origin).toMatchObject({
+      disclosure: {
+        kind: 'agents_md',
+        fingerprint:
+          'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+        status: 'missing',
+      },
+    });
   });
 
   it('announces a file created after the empty candidate chain is armed', async () => {
-    profile.update({ systemPrompt: systemPromptWithAgentsMd('') });
+    updateSystemPromptWithAgentsMd(profile, '');
     await injector.inject();
 
     files.set(agentsMdPath, 'fresh rule');

@@ -26,6 +26,7 @@ import type { Event } from '#/_base/event';
 import type {
   AgentProfile,
   AgentProfileContext,
+  SystemPromptRenderResult,
 } from '#/app/agentProfileCatalog/agentProfileCatalog';
 
 import { agentProfileFromFile } from './agentProfileFromFile';
@@ -55,7 +56,7 @@ export interface IAgentProfileSource {
 
 export function profilesFromDiscovery(
   result: AgentFileDiscoveryResult,
-  basePrompt: (context: AgentProfileContext) => string,
+  basePrompt: (context: AgentProfileContext) => string | SystemPromptRenderResult,
 ): AgentProfileContribution {
   return {
     profiles: result.agents.map((definition) => agentProfileFromFile(definition, basePrompt)),

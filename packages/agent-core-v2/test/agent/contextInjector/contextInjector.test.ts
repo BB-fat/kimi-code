@@ -120,6 +120,31 @@ describe('AgentContextInjectorService', () => {
     });
   });
 
+  it('persists provider disclosure metadata on the injected message origin', async () => {
+    injector(ix).register('date_test', () => ({
+      content: 'date reminder',
+      disclosure: {
+        kind: 'date',
+        renderGeneration: 4,
+        localDate: '2026-07-29',
+        timeZone: 'Asia/Shanghai',
+      },
+    }));
+
+    await injector(ix).inject();
+
+    expect(context.get().at(-1)?.origin).toEqual({
+      kind: 'injection',
+      variant: 'date_test',
+      disclosure: {
+        kind: 'date',
+        renderGeneration: 4,
+        localDate: '2026-07-29',
+        timeZone: 'Asia/Shanghai',
+      },
+    });
+  });
+
   it('appends provider content parts verbatim without system-reminder wrapping', async () => {
     injector(ix).register('media_test', () => [
       { type: 'text', text: 'caption' },

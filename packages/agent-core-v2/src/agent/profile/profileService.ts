@@ -72,7 +72,11 @@ import {
   type ThinkingConfig,
 } from '#/kosong/model/thinking';
 import { THINKING_SECTION } from '#/app/kosongConfig/configSection';
-import { DEFAULT_AGENT_PROFILE_NAME, IAgentProfileCatalogService } from '#/app/agentProfileCatalog/agentProfileCatalog';
+import {
+  DEFAULT_AGENT_PROFILE_NAME,
+  IAgentProfileCatalogService,
+  renderAgentProfile,
+} from '#/app/agentProfileCatalog/agentProfileCatalog';
 import { ErrorCodes, Error2 } from "#/errors";
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
@@ -289,6 +293,8 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
         profileName: snapshot.profileName,
         thinkingEffort: snapshot.thinkingLevel,
         systemPrompt: snapshot.systemPrompt,
+        environmentDisclosure: snapshot.environmentDisclosure,
+        renderGeneration: snapshot.renderGeneration,
         activeToolNames: snapshot.activeToolNames,
         disallowedTools: snapshot.disallowedTools ?? [],
         subagents: snapshot.subagents,
@@ -303,6 +309,8 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       profileName: snapshot.profileName,
       thinkingLevel: snapshot.thinkingLevel,
       systemPrompt: snapshot.systemPrompt,
+      environmentDisclosure: snapshot.environmentDisclosure,
+      renderGeneration: snapshot.renderGeneration,
       disallowedTools: snapshot.disallowedTools ?? [],
     });
   }
@@ -339,7 +347,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     const context = await this.buildSystemPromptContext(profile, input.cwd);
     this.assertBindable(profile.name);
     const currentProfileName = this.profileName;
-    const systemPrompt = profile.systemPrompt(context);
+    const rendered = renderAgentProfile(profile, context);
     this.systemPromptRevision += 1;
     this.activeProfile = profile;
     this.cacheAgentsMdWarning(context);
@@ -355,7 +363,9 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       modelAlias: alias,
       profileName: profile.name,
       thinkingEffort: thinkingLevel,
-      systemPrompt,
+      systemPrompt: rendered.text,
+      environmentDisclosure: rendered.environment,
+      renderGeneration: this.profileState.renderGeneration + 1,
       activeToolNames: profile.tools,
       disallowedTools: profile.disallowedTools ?? [],
       subagents: profile.subagents,
@@ -365,7 +375,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       modelAlias: alias,
       profileName: profile.name,
       thinkingLevel,
-      systemPrompt,
+      systemPrompt: rendered.text,
       disallowedTools: profile.disallowedTools ?? [],
     });
     this.recordSkillDisclosure(context);
@@ -425,9 +435,11 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
 
   useProfile(profile: ResolvedAgentProfile, context: SystemPromptContext): void {
     this.activeProfile = profile;
+    const rendered = renderAgentProfile(profile, context);
     this.update({
       profileName: profile.name,
-      systemPrompt: profile.systemPrompt(context),
+      systemPrompt: rendered.text,
+      environmentDisclosure: rendered.environment,
       disallowedTools: profile.disallowedTools ?? [],
     });
     this.recordSkillDisclosure(context);
@@ -461,9 +473,11 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     }
     if (revision !== this.systemPromptRevision) return;
     this.activeProfile = profile;
+    const rendered = renderAgentProfile(profile, context);
     this.update({
       profileName: profile.name,
-      systemPrompt: profile.systemPrompt(context),
+      systemPrompt: rendered.text,
+      environmentDisclosure: rendered.environment,
     });
     this.recordSkillDisclosure(context);
     this.cacheAgentsMdWarning(context);
@@ -488,6 +502,8 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       disclosedSkillNames: this.skillDisclosure.disclosedNames(),
       subagents:
         this.profileState.subagents === undefined ? undefined : [...this.profileState.subagents],
+      environmentDisclosure: this.profileState.environmentDisclosure,
+      renderGeneration: this.profileState.renderGeneration,
     };
   }
 
@@ -587,7 +603,14 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
         changed.thinkingLevel ?? (this.modelAlias === undefined ? undefined : this.thinkingLevel);
       payload.thinkingEffort = this.resolveThinkingEffort(requested, model);
     }
-    if (changed.systemPrompt !== undefined) payload.systemPrompt = changed.systemPrompt;
+    if (changed.systemPrompt !== undefined) {
+      payload.systemPrompt = changed.systemPrompt;
+      if (changed.environmentDisclosure !== undefined) {
+        payload.environmentDisclosure = changed.environmentDisclosure;
+        payload.renderGeneration =
+          changed.renderGeneration ?? this.profileState.renderGeneration + 1;
+      }
+    }
     if (changed.disallowedTools !== undefined) {
       payload.disallowedTools = [...changed.disallowedTools];
     }

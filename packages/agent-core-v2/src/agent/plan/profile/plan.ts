@@ -14,6 +14,7 @@
 import { registerAgentProfile } from '#/app/agentProfileCatalog/contribution';
 import {
   renderSystemPrompt,
+  renderSystemPromptResult,
   skillActiveFor,
   TASK_AGENT_ROLE_PREFIX,
 } from '#/app/agentProfileCatalog/profile-shared';
@@ -49,4 +50,6 @@ registerAgentProfile({
   tools: PLAN_TOOLS,
   systemPrompt: (context) =>
     renderSystemPrompt(PLAN_ROLE, context, { skillActive: skillActiveFor(PLAN_TOOLS) }),
+  renderSystemPrompt: (context) =>
+    renderSystemPromptResult(PLAN_ROLE, context, { skillActive: skillActiveFor(PLAN_TOOLS) }),
 });

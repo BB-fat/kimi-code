@@ -7,7 +7,10 @@ import { IAgentProfileService } from '#/agent/profile/profile';
 import { AgentProfileService } from '#/agent/profile/profileService';
 import { ActiveToolsModel, ProfileModel } from '#/agent/profile/profileOps';
 import { IAgentSkillDisclosureService } from '#/agent/skillDisclosure/skillDisclosure';
-import { DEFAULT_AGENT_PROFILE_NAME } from '#/app/agentProfileCatalog/agentProfileCatalog';
+import {
+  DEFAULT_AGENT_PROFILE_NAME,
+  type EnvironmentDisclosureSnapshot,
+} from '#/app/agentProfileCatalog/agentProfileCatalog';
 import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
@@ -343,6 +346,60 @@ describe('AgentProfileService (wire-backed config.update)', () => {
       await readRecords(),
     );
     expect(activeToolsOf(replay.wire)).toBeUndefined();
+    replay.ix.dispose();
+  });
+
+  it('persists the rendered prompt and disclosure snapshot in one bind record', async () => {
+    const environment: EnvironmentDisclosureSnapshot = {
+      cwd: '/work',
+      date: {
+        disclosed: true,
+        value: { localDate: '2026-07-29', timeZone: 'Asia/Shanghai' },
+      },
+      agentsMd: {
+        disclosed: true,
+        value: {
+          fingerprint:
+            'a3a18567b84af6528d171050e54bcf75e0a1c94c8db8a165d03e9866cfa95bce',
+          status: 'present',
+        },
+      },
+    };
+    svc.applyBindingSnapshot({
+      cwd: '/work',
+      modelAlias: 'kimi-code',
+      profileName: 'agent',
+      thinkingLevel: 'off',
+      systemPrompt: 'rendered prompt',
+      environmentDisclosure: environment,
+      renderGeneration: 7,
+      activeToolNames: undefined,
+      disallowedTools: [],
+    });
+
+    const records = await readRecords();
+    expect(records.filter((record) => record.type === 'profile.bind')).toEqual([
+      expect.objectContaining({
+        type: 'profile.bind',
+        systemPrompt: 'rendered prompt',
+        environmentDisclosure: environment,
+        renderGeneration: 7,
+      }),
+    ]);
+    expect(records.filter((record) => record.type === 'config.update')).toHaveLength(0);
+
+    const replay = buildHost('profile-replay-disclosure');
+    await restoreTestAgentWire(
+      replay.wire,
+      replay.log,
+      testWireScope(SCOPE, 'profile-replay-disclosure'),
+      records,
+    );
+    expect(modelOf(replay.wire)).toMatchObject({
+      systemPrompt: 'rendered prompt',
+      environmentDisclosure: environment,
+      renderGeneration: 7,
+    });
     replay.ix.dispose();
   });
 

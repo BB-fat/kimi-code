@@ -1,6 +1,7 @@
 import type { ContentPart, Message } from '#/kosong/contract/message';
 
 import type { AgentTaskStatus } from '#/agent/task/task';
+import type { AgentsMdStatus } from '#/app/agentProfileCatalog/agentProfileCatalog';
 
 export type SkillSource = 'project' | 'user' | 'extra' | 'builtin';
 
@@ -34,7 +35,22 @@ export interface InjectionOrigin {
   readonly kind: 'injection';
   readonly variant: string;
   readonly ownerPromptId?: string;
+  readonly disclosure?: ContextInjectionDisclosure;
 }
+
+export type ContextInjectionDisclosure =
+  | {
+      readonly kind: 'date';
+      readonly renderGeneration: number;
+      readonly localDate: string;
+      readonly timeZone: string;
+    }
+  | {
+      readonly kind: 'agents_md';
+      readonly renderGeneration: number;
+      readonly fingerprint: string;
+      readonly status: AgentsMdStatus;
+    };
 
 export interface ShellCommandOrigin {
   readonly kind: 'shell_command';

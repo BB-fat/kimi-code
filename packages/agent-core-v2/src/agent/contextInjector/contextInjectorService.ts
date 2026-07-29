@@ -22,7 +22,9 @@ import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IWireService } from '#/wire/wire';
 import {
   IAgentContextInjectorService,
+  type ContextInjectionContent,
   type ContextInjectionProvider,
+  type ContextInjectionResult,
 } from './contextInjector';
 
 interface ContextInjectionEntry {
@@ -115,16 +117,24 @@ export class AgentContextInjectorService extends Disposable implements IAgentCon
       });
       if (!this.entries.has(entry)) continue;
       if (content === undefined) continue;
-      const origin = { kind: 'injection' as const, variant: entry.name };
-      if (typeof content === 'string') {
-        if (content.trim().length === 0) continue;
-        this.reminders.appendSystemReminder(content, origin);
+      const result: ContextInjectionResult =
+        typeof content === 'object' && content !== null && !Array.isArray(content)
+          ? (content as ContextInjectionResult)
+          : { content: content as ContextInjectionContent };
+      const origin = {
+        kind: 'injection' as const,
+        variant: entry.name,
+        disclosure: result.disclosure,
+      };
+      if (typeof result.content === 'string') {
+        if (result.content.trim().length === 0) continue;
+        this.reminders.appendSystemReminder(result.content, origin);
         continue;
       }
-      if (content.length === 0) continue;
+      if (result.content.length === 0) continue;
       this.context.append({
         role: 'user',
-        content: [...content],
+        content: [...result.content],
         toolCalls: [],
         origin,
       });

@@ -13,6 +13,7 @@ import { Disposable } from '#/_base/di/lifecycle';
 import { Emitter, type Event } from '#/_base/event';
 import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { ILogService } from '#/_base/log/log';
+import { renderAgentProfile } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import { discoverAgentFiles } from '#/app/agentFileCatalog/agentFileDiscovery';
 import {
   AGENT_PROFILE_SOURCE_PRIORITY,
@@ -80,7 +81,7 @@ export class ExtraFileAgentSource extends Disposable implements IExtraFileAgentS
         ),
         (message) => this.log.warn(message),
       ),
-      (context) => this.user.getDefaultProfile().systemPrompt(context),
+      (context) => renderAgentProfile(this.user.getDefaultProfile(), context),
     );
   }
 }

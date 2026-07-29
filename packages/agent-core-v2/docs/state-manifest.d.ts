@@ -23,7 +23,7 @@
 // references become '(circular)', and class instances collapse to a '(ClassName)'
 // marker — the wire shape of an entry is the JSON projection of the type here.
 //
-// Index (Session: 28 keys · Agent: 70 keys)
+// Index (Session: 28 keys · Agent: 68 keys)
 //   Session
 //     cron.inFlight                             src/session/cron/sessionCronServiceImpl.ts
 //     cron.lastSeenAt                           src/session/cron/sessionCronServiceImpl.ts
@@ -59,11 +59,9 @@
 //     activityView.lastTurn                           src/agent/activityView/activityViewService.ts
 //     activityView.lifecycle                          src/agent/activityView/activityViewService.ts
 //     activityView.turn                               src/agent/activityView/activityViewService.ts
-//     agentsMdReminder.seededContent                  src/agent/profile/agentsMdReminderService.ts
 //     contextInjector.isNewTurn                       src/agent/contextInjector/contextInjectorService.ts
 //     contextProjector.lastRepairSignature            src/agent/contextProjector/contextProjectorService.ts
 //     contextSize.lastEmittedTokens                   src/agent/contextSize/contextSizeService.ts
-//     dateChange.seededDate                           src/agent/dateChange/dateChangeService.ts
 //     externalHooks.stopHookContinuationUsed          src/agent/externalHooks/externalHooksService.ts
 //     faultInjection.armed                            src/agent/faultInjection/faultInjectionService.ts
 //     faultInjection.fired                            src/agent/faultInjection/faultInjectionService.ts
@@ -204,8 +202,48 @@ export interface SessionStateSnapshot {
           readonly skillActive?: boolean;
           readonly productName?: string;
           readonly replyStyleGuide?: string;
+          readonly agentsMdStatus?: 'missing' | 'empty' | 'present';
           [key: string]: unknown;
         }) => string;
+        readonly renderSystemPrompt?: (context: /* AgentProfileContext — packages/agent-core-v2/src/app/agentProfileCatalog/agentProfileCatalog.ts */ {
+          readonly cwd?: string;
+          readonly cwdListing?: string;
+          readonly agentsMd?: string;
+          readonly additionalDirsInfo?: string;
+          readonly osKind?: string;
+          readonly shellName?: string;
+          readonly shellPath?: string;
+          readonly now?: string;
+          readonly skills?: string;
+          readonly skillActive?: boolean;
+          readonly productName?: string;
+          readonly replyStyleGuide?: string;
+          readonly agentsMdStatus?: 'missing' | 'empty' | 'present';
+          [key: string]: unknown;
+        }) => /* SystemPromptRenderResult — packages/agent-core-v2/src/app/agentProfileCatalog/agentProfileCatalog.ts */ {
+          readonly text: string;
+          readonly environment: /* EnvironmentDisclosureSnapshot — packages/agent-core-v2/src/app/agentProfileCatalog/agentProfileCatalog.ts */ {
+            readonly cwd: string;
+            readonly date: {
+              readonly disclosed: true;
+              readonly value: {
+                readonly localDate: string;
+                readonly timeZone: string;
+              };
+            } | {
+              readonly disclosed: false;
+            };
+            readonly agentsMd: {
+              readonly disclosed: true;
+              readonly value: {
+                readonly fingerprint: string;
+                readonly status: /* AgentsMdStatus — packages/agent-core-v2/src/app/agentProfileCatalog/agentProfileCatalog.ts */ 'missing' | 'empty' | 'present';
+              };
+            } | {
+              readonly disclosed: false;
+            };
+          };
+        };
         readonly promptPrefix?: (ctx: /* AgentProfilePromptPrefixContext — packages/agent-core-v2/src/app/agentProfileCatalog/agentProfileCatalog.ts */ {
           readonly cwd: string;
           readonly runner: /* ISessionProcessRunner — packages/agent-core-v2/src/session/process/processRunner.ts */ {
@@ -270,8 +308,48 @@ export interface SessionStateSnapshot {
       readonly skillActive?: boolean;
       readonly productName?: string;
       readonly replyStyleGuide?: string;
+      readonly agentsMdStatus?: 'missing' | 'empty' | 'present';
       [key: string]: unknown;
     }) => string;
+    readonly renderSystemPrompt?: (context: /* AgentProfileContext — packages/agent-core-v2/src/app/agentProfileCatalog/agentProfileCatalog.ts */ {
+      readonly cwd?: string;
+      readonly cwdListing?: string;
+      readonly agentsMd?: string;
+      readonly additionalDirsInfo?: string;
+      readonly osKind?: string;
+      readonly shellName?: string;
+      readonly shellPath?: string;
+      readonly now?: string;
+      readonly skills?: string;
+      readonly skillActive?: boolean;
+      readonly productName?: string;
+      readonly replyStyleGuide?: string;
+      readonly agentsMdStatus?: 'missing' | 'empty' | 'present';
+      [key: string]: unknown;
+    }) => /* SystemPromptRenderResult — packages/agent-core-v2/src/app/agentProfileCatalog/agentProfileCatalog.ts */ {
+      readonly text: string;
+      readonly environment: /* EnvironmentDisclosureSnapshot — packages/agent-core-v2/src/app/agentProfileCatalog/agentProfileCatalog.ts */ {
+        readonly cwd: string;
+        readonly date: {
+          readonly disclosed: true;
+          readonly value: {
+            readonly localDate: string;
+            readonly timeZone: string;
+          };
+        } | {
+          readonly disclosed: false;
+        };
+        readonly agentsMd: {
+          readonly disclosed: true;
+          readonly value: {
+            readonly fingerprint: string;
+            readonly status: /* AgentsMdStatus — packages/agent-core-v2/src/app/agentProfileCatalog/agentProfileCatalog.ts */ 'missing' | 'empty' | 'present';
+          };
+        } | {
+          readonly disclosed: false;
+        };
+      };
+    };
     readonly promptPrefix?: (ctx: /* AgentProfilePromptPrefixContext — packages/agent-core-v2/src/app/agentProfileCatalog/agentProfileCatalog.ts */ {
       readonly cwd: string;
       readonly runner: /* ISessionProcessRunner — packages/agent-core-v2/src/session/process/processRunner.ts */ {
@@ -664,6 +742,17 @@ export interface SessionStateSnapshot {
       readonly kind: 'injection';
       readonly variant: string;
       readonly ownerPromptId?: string;
+      readonly disclosure?: {
+        readonly kind: 'date';
+        readonly renderGeneration: number;
+        readonly localDate: string;
+        readonly timeZone: string;
+      } | {
+        readonly kind: 'agents_md';
+        readonly renderGeneration: number;
+        readonly fingerprint: string;
+        readonly status: /* AgentsMdStatus — packages/agent-core-v2/src/app/agentProfileCatalog/agentProfileCatalog.ts */ 'missing' | 'empty' | 'present';
+      };
     } | /* ShellCommandOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
       readonly kind: 'shell_command';
       readonly phase: 'input' | 'output';
@@ -740,6 +829,17 @@ export interface AgentStateSnapshot {
         readonly kind: 'injection';
         readonly variant: string;
         readonly ownerPromptId?: string;
+        readonly disclosure?: {
+          readonly kind: 'date';
+          readonly renderGeneration: number;
+          readonly localDate: string;
+          readonly timeZone: string;
+        } | {
+          readonly kind: 'agents_md';
+          readonly renderGeneration: number;
+          readonly fingerprint: string;
+          readonly status: /* AgentsMdStatus — packages/agent-core-v2/src/app/agentProfileCatalog/agentProfileCatalog.ts */ 'missing' | 'empty' | 'present';
+        };
       } | /* ShellCommandOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
         readonly kind: 'shell_command';
         readonly phase: 'input' | 'output';
@@ -864,6 +964,17 @@ export interface AgentStateSnapshot {
       readonly kind: 'injection';
       readonly variant: string;
       readonly ownerPromptId?: string;
+      readonly disclosure?: {
+        readonly kind: 'date';
+        readonly renderGeneration: number;
+        readonly localDate: string;
+        readonly timeZone: string;
+      } | {
+        readonly kind: 'agents_md';
+        readonly renderGeneration: number;
+        readonly fingerprint: string;
+        readonly status: /* AgentsMdStatus — packages/agent-core-v2/src/app/agentProfileCatalog/agentProfileCatalog.ts */ 'missing' | 'empty' | 'present';
+      };
     } | /* ShellCommandOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
       readonly kind: 'shell_command';
       readonly phase: 'input' | 'output';
@@ -920,6 +1031,17 @@ export interface AgentStateSnapshot {
         readonly kind: 'injection';
         readonly variant: string;
         readonly ownerPromptId?: string;
+        readonly disclosure?: {
+          readonly kind: 'date';
+          readonly renderGeneration: number;
+          readonly localDate: string;
+          readonly timeZone: string;
+        } | {
+          readonly kind: 'agents_md';
+          readonly renderGeneration: number;
+          readonly fingerprint: string;
+          readonly status: /* AgentsMdStatus — packages/agent-core-v2/src/app/agentProfileCatalog/agentProfileCatalog.ts */ 'missing' | 'empty' | 'present';
+        };
       } | /* ShellCommandOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
         readonly kind: 'shell_command';
         readonly phase: 'input' | 'output';
@@ -984,8 +1106,6 @@ export interface AgentStateSnapshot {
   'contextProjector.lastRepairSignature': string | null;
   // src/agent/contextSize/contextSizeService.ts
   'contextSize.lastEmittedTokens': number;
-  // src/agent/dateChange/dateChangeService.ts
-  'dateChange.seededDate': string | undefined;
   // src/agent/externalHooks/externalHooksService.ts
   'externalHooks.stopHookContinuationUsed': boolean;
   // src/agent/faultInjection/faultInjectionService.ts
@@ -1018,7 +1138,7 @@ export interface AgentStateSnapshot {
   'llmRequester.lastConfigLogSignature': string | undefined;
   'llmRequester.mediaDegradedTurns': Set<number>;
   'llmRequester.mediaStrippedTurns': Map<number, /* MediaStripSnapshot — packages/agent-core-v2/src/agent/contextProjector/contextProjector.ts */ {
-    readonly "__@mediaStripSnapshotBrand@2720": undefined;
+    readonly "__@mediaStripSnapshotBrand@2724": undefined;
   }>;
   'llmRequester.turnConfigs': Map<number, /* TurnRequestConfig — packages/agent-core-v2/src/agent/llmRequester/llmRequesterService.ts */ {
     readonly resolved: /* ProfileModelContext — packages/agent-core-v2/src/agent/profile/profile.ts */ {
@@ -1094,8 +1214,6 @@ export interface AgentStateSnapshot {
   'permissionMode.lastMode': 'manual' | 'yolo' | 'auto' | undefined;
   // src/agent/plan/injection/planModeInjection.ts
   'plan.wasActive': boolean;
-  // src/agent/profile/agentsMdReminderService.ts
-  'agentsMdReminder.seededContent': string | undefined;
   // src/agent/profile/profileService.ts
   'profile.activeToolNamesOverlay': readonly string[] | undefined;
   'profile.agentsMdWarning': string | undefined;

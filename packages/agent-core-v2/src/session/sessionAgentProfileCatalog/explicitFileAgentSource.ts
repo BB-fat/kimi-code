@@ -9,7 +9,7 @@
 
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';
 import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
-import type { AgentProfile } from '#/app/agentProfileCatalog/agentProfileCatalog';
+import { renderAgentProfile, type AgentProfile } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import { IAgentCatalogRuntimeOptions } from '#/app/agentFileCatalog/agentCatalogRuntimeOptions';
 import { parseAgentFileText } from '#/app/agentFileCatalog/agentFile';
 import { agentProfileFromFile } from '#/app/agentFileCatalog/agentProfileFromFile';
@@ -54,7 +54,7 @@ export class ExplicitFileAgentSource implements IExplicitFileAgentSource {
       const text = await this.fs.readText(filePath);
       profiles.push(
         agentProfileFromFile(parseAgentFileText({ path: filePath, source: 'explicit', text }), (context) =>
-          this.user.getDefaultProfile().systemPrompt(context),
+          renderAgentProfile(this.user.getDefaultProfile(), context),
         ),
       );
     }

@@ -2,8 +2,8 @@
  * Scenario: `date_change` context injection announces calendar-date changes.
  *
  * Exercises the real provider through the harness injector: baselines come
- * from the last reminder in history, then the system prompt's rendered date,
- * then a silent adoption for dateless prompts. Run: `pnpm --filter
+ * from typed reminder metadata, then the persisted rendered-date snapshot.
+ * Run: `pnpm --filter
  * @moonshot-ai/agent-core-v2 exec vitest run
  * test/agent/dateChange/dateChangeInjection.test.ts`.
  */
@@ -14,6 +14,7 @@ import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInj
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentProfileService } from '#/agent/profile/profile';
+import type { EnvironmentDisclosureSnapshot } from '#/app/agentProfileCatalog/agentProfileCatalog';
 
 import { createTestAgent, type TestAgentContext } from '../../harness';
 
@@ -34,6 +35,30 @@ function systemPromptWithDate(iso: string): string {
     '',
     `The current date and time in ISO format is \`${iso}\`. This was captured when the session started and does not update.`,
   ].join('\n');
+}
+
+function updateSystemPromptWithDate(
+  profile: IAgentProfileService,
+  iso: string,
+  renderGeneration?: number,
+): void {
+  const date = new Date(iso);
+  const environment: EnvironmentDisclosureSnapshot = {
+    cwd: profile.data().cwd,
+    date: {
+      disclosed: true,
+      value: {
+        localDate: localDateKey(date),
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+      },
+    },
+    agentsMd: { disclosed: false },
+  };
+  profile.update({
+    systemPrompt: systemPromptWithDate(iso),
+    environmentDisclosure: environment,
+    renderGeneration,
+  });
 }
 
 function dateReminders(context: IAgentContextMemoryService): readonly ContextMessage[] {
@@ -76,7 +101,7 @@ describe('AgentDateChangeService', () => {
   });
 
   it('does not inject when the system prompt date is today', async () => {
-    profile.update({ systemPrompt: systemPromptWithDate(new Date().toISOString()) });
+    updateSystemPromptWithDate(profile, new Date().toISOString());
 
     await injector.inject();
 
@@ -86,7 +111,7 @@ describe('AgentDateChangeService', () => {
   it('injects once when the rendered date is stale, then stays quiet', async () => {
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);
-    profile.update({ systemPrompt: systemPromptWithDate(yesterday.toISOString()) });
+    updateSystemPromptWithDate(profile, yesterday.toISOString());
 
     await injector.inject();
 
@@ -98,13 +123,22 @@ describe('AgentDateChangeService', () => {
     expect(text).toContain(`Today's date is now ${localDateKey(new Date())}`);
     expect(text).toContain('stale');
     expect(text).toContain('DO NOT mention this to the user explicitly');
+    expect(first?.origin).toMatchObject({
+      kind: 'injection',
+      variant: 'date_change',
+      disclosure: {
+        kind: 'date',
+        renderGeneration: 2,
+        localDate: localDateKey(new Date()),
+      },
+    });
 
     await injector.inject();
     expect(dateReminders(context)).toHaveLength(1);
   });
 
   it('announces each date crossed by a long-lived session', async () => {
-    profile.update({ systemPrompt: systemPromptWithDate(new Date().toISOString()) });
+    updateSystemPromptWithDate(profile, new Date().toISOString());
     await injector.inject();
 
     vi.setSystemTime(new Date(2026, 6, 30, 12));
@@ -124,6 +158,73 @@ describe('AgentDateChangeService', () => {
     expect(messageText(reminders[1] as ContextMessage)).toContain(
       "Today's date is now 2026-07-31",
     );
+    expect(reminders[1]?.origin).toMatchObject({
+      disclosure: {
+        kind: 'date',
+        renderGeneration: 2,
+        localDate: '2026-07-31',
+      },
+    });
+  });
+
+  it('uses the newer persisted render snapshot over older reminder metadata', async () => {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    updateSystemPromptWithDate(profile, yesterday.toISOString(), 2);
+    context.append({
+      role: 'user',
+      content: [{ type: 'text', text: 'older date reminder' }],
+      toolCalls: [],
+      origin: {
+        kind: 'injection',
+        variant: 'date_change',
+        disclosure: {
+          kind: 'date',
+          renderGeneration: 1,
+          localDate: localDateKey(new Date()),
+          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+        },
+      },
+    });
+
+    await injector.inject();
+
+    const reminders = dateReminders(context);
+    expect(reminders).toHaveLength(2);
+    expect(reminders.at(-1)?.origin).toMatchObject({
+      disclosure: {
+        kind: 'date',
+        renderGeneration: 2,
+        localDate: localDateKey(new Date()),
+      },
+    });
+  });
+
+  it('re-injects after undo removes the structured reminder metadata', async () => {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    updateSystemPromptWithDate(profile, yesterday.toISOString());
+    context.append({
+      role: 'user',
+      content: [{ type: 'text', text: 'first turn' }],
+      toolCalls: [],
+      origin: { kind: 'user' },
+    });
+    await injector.inject();
+    expect(dateReminders(context)).toHaveLength(1);
+
+    expect(context.undo(1)).toMatchObject({ removedCount: 1 });
+    expect(dateReminders(context)).toHaveLength(0);
+    context.append({
+      role: 'user',
+      content: [{ type: 'text', text: 'replacement turn' }],
+      toolCalls: [],
+      origin: { kind: 'user' },
+    });
+
+    await injector.inject();
+
+    expect(dateReminders(context)).toHaveLength(1);
   });
 
   it('adopts today silently when the system prompt carries no date line', async () => {

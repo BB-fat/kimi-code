@@ -20,6 +20,7 @@ import { dirname, join, normalize } from 'pathe';
 
 import type { IHostFileSystem } from '#/os/interface/hostFileSystem';
 
+import type { AgentsMdStatus } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import type { SystemPromptContext } from './profile';
 
 export const AGENTS_MD_RECOMMENDED_MAX_BYTES = 32 * 1024;
@@ -37,6 +38,7 @@ export interface PreparedSystemPromptContext extends SystemPromptContext {
   readonly agentsMd?: string;
   readonly additionalDirsInfo?: string;
   readonly agentsMdWarning?: string;
+  readonly agentsMdStatus?: AgentsMdStatus;
 }
 
 export interface PrepareSystemPromptContextOptions {
@@ -58,6 +60,7 @@ export async function prepareSystemPromptContext(
   return {
     cwdListing,
     agentsMd: agentsMdResult.content,
+    agentsMdStatus: agentsMdResult.status,
     additionalDirsInfo,
     agentsMdWarning: agentsMdResult.warning,
   };
@@ -68,8 +71,17 @@ export async function loadAgentsMd(
   workDir: string,
   brandHome?: string,
 ): Promise<string> {
-  const result = await loadAgentsMdForRoots(deps, brandHome, [workDir]);
+  const result = await loadAgentsMdSnapshot(deps, workDir, brandHome);
   return result.content;
+}
+
+export async function loadAgentsMdSnapshot(
+  deps: ProfileContextDeps,
+  workDir: string,
+  brandHome?: string,
+): Promise<{ readonly content: string; readonly status: AgentsMdStatus }> {
+  const result = await loadAgentsMdForRoots(deps, brandHome, [workDir]);
+  return { content: result.content, status: result.status };
 }
 
 export async function agentsMdCandidatePaths(
@@ -105,6 +117,7 @@ async function agentsMdCandidateGroups(
 interface LoadedAgentsMd {
   readonly content: string;
   readonly warning: string | undefined;
+  readonly status: AgentsMdStatus;
 }
 
 async function loadAgentsMdForRoots(
@@ -115,12 +128,15 @@ async function loadAgentsMdForRoots(
   const discovered: AgentFile[] = [];
   const seen = new Set<string>();
   const loadWarnings: string[] = [];
+  let emptyFileFound = false;
   const warnLoad = (message: string): void => {
     loadWarnings.push(message);
   };
 
   const collect = async (path: string): Promise<boolean> => {
-    const file = await readAgentFile(deps, path, warnLoad);
+    const file = await readAgentFile(deps, path, warnLoad, () => {
+      emptyFileFound = true;
+    });
     if (file === undefined) return false;
     const key = normalize(file.path);
     if (seen.has(key)) return false;
@@ -146,7 +162,11 @@ async function loadAgentsMdForRoots(
     );
   }
   const warning = loadWarnings.length > 0 ? loadWarnings.join('\n') : undefined;
-  return { content, warning };
+  return {
+    content,
+    warning,
+    status: content.length > 0 ? 'present' : emptyFileFound ? 'empty' : 'missing',
+  };
 }
 
 async function loadAdditionalDirsInfo(
@@ -198,6 +218,7 @@ async function readAgentFile(
   deps: ProfileContextDeps,
   path: string,
   warn: (message: string) => void,
+  markEmpty: () => void,
 ): Promise<AgentFile | undefined> {
   if (!(await isFile(deps, path))) {
     if (await entryExists(deps, path)) {
@@ -212,7 +233,10 @@ async function readAgentFile(
     warn(`Instruction file at ${path} could not be read; skipping.`);
     return undefined;
   }
-  if (content.length === 0) return undefined;
+  if (content.length === 0) {
+    markEmpty();
+    return undefined;
+  }
   return { path, content };
 }
 
