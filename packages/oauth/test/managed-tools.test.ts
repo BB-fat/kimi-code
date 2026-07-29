@@ -1,6 +1,9 @@
 /**
  * Scenario: the managed `/tools` chat_title request contract, including
  * response validation, API failures, timeouts, and transport errors.
+ * Wiring: the real request builder with only the external fetch boundary
+ * stubbed. Run with:
+ * `pnpm exec vitest run packages/oauth/test/managed-tools.test.ts`.
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -55,6 +58,33 @@ describe('fetchChatTitle', () => {
       method: 'chat_title',
       params: { chat_content: 'user: nil pointer 报错' },
     });
+  });
+
+  it('keeps protocol headers authoritative when custom headers collide', async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ title: '标题' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await fetchChatTitle('https://api.example/tools', 'access-token', 'user: hi', {
+      headers: {
+        Authorization: 'Bearer wrong-token',
+        Accept: 'text/plain',
+        'Content-Type': 'text/plain',
+        'X-Proxy-Header': 'present',
+      },
+    });
+
+    const [, init] = (fetchMock.mock.calls as unknown as [string, RequestInit?][])[0]!;
+    const headers = new Headers(init?.headers as Record<string, string>);
+    expect(headers.get('authorization')).toBe('Bearer access-token');
+    expect(headers.get('accept')).toBe('application/json');
+    expect(headers.get('content-type')).toBe('application/json');
+    expect(headers.get('x-proxy-header')).toBe('present');
   });
 
   it('trims surrounding whitespace from the title', async () => {

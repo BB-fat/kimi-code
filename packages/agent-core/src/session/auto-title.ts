@@ -2,7 +2,6 @@ import {
   KIMI_CODE_PROVIDER_NAME,
   fetchChatTitle,
   kimiCodeToolsUrl,
-  parseKimiCodeCustomHeaders,
 } from '@moonshot-ai/kimi-code-oauth';
 
 import type { Logger } from '#/logging/types';
@@ -34,7 +33,7 @@ export async function generateSessionTitle(
     kimiCodeToolsUrl(provider.baseUrl),
     await tokenProvider.getAccessToken(),
     `user: ${chatContent}`,
-    { headers: { ...provider.customHeaders, ...parseKimiCodeCustomHeaders() } },
+    { headers: providerManager.resolveManagedRequestHeaders(KIMI_CODE_PROVIDER_NAME) },
   );
   if (result.kind !== 'ok') {
     log?.debug('chat_title request failed', { message: result.message });

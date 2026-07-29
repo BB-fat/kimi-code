@@ -9,6 +9,11 @@
  *     whether it is a standalone text part or merged into the user's text
  *   - SessionAPIImpl.steer updates title/lastPrompt exactly like prompt —
  *     a steer can launch the session's first turn (e.g. goal mode)
+ *   - auto-title sends env < host < provider request-header layers
+ *
+ * Wiring: real Session / ProviderManager with scripted model output; only the
+ * external fetch boundary is stubbed. Run with:
+ * `pnpm exec vitest run packages/agent-core/test/session/prompt-metadata.test.ts`.
  */
 
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -113,6 +118,7 @@ const MANAGED_PROVIDER = {
   type: 'kimi',
   baseUrl: 'https://api.example.test/coding/v1',
   oauth: { storage: 'file', key: 'kimi-code' },
+  customHeaders: { 'X-Msh-Platform': 'provider-platform' },
 } as const satisfies ConfigProviderConfig;
 
 describe('SessionAPIImpl auto title', () => {
@@ -138,6 +144,30 @@ describe('SessionAPIImpl auto title', () => {
     });
     const titleEvents = events.filter((e) => e['type'] === 'session.meta.updated');
     expect(titleEvents.at(-1)).toMatchObject({ title: '生成的标题' });
+  });
+
+  it('sends managed request headers with the established layer precedence', async () => {
+    vi.stubEnv(
+      'KIMI_CODE_CUSTOM_HEADERS',
+      'User-Agent: env-client\nX-Msh-Platform: env-platform\nX-Environment: present',
+    );
+    const fetchMock = stubChatTitleFetch('生成的标题');
+    const { api, events, agent } = await setupAutoTitleSession({ autoTitle: true });
+
+    await api.prompt({ agentId: 'main', input: [{ type: 'text', text: '帮我看个 Go 报错' }] });
+    if (agent.turn.hasActiveTurn) {
+      await agent.turn.waitForCurrentTurn();
+    }
+    await waitFor(() =>
+      events.some((e) => e['type'] === 'session.meta.updated' && e['title'] === '生成的标题'),
+    );
+
+    const [, init] = chatTitleCalls(fetchMock)[0]!;
+    const headers = new Headers(init?.headers as Record<string, string>);
+    expect(headers.get('user-agent')).toBe('kimi-code-cli/test');
+    expect(headers.get('x-msh-device-id')).toBe('device-test');
+    expect(headers.get('x-msh-platform')).toBe('provider-platform');
+    expect(headers.get('x-environment')).toBe('present');
   });
 
   it('keeps the easy title when the flag is off', async () => {
@@ -227,6 +257,11 @@ async function setupAutoTitleSession(options: { autoTitle: boolean; managedOAuth
             },
           },
         },
+        kimiRequestHeaders: {
+          'User-Agent': 'kimi-code-cli/test',
+          'X-Msh-Platform': 'host-platform',
+          'X-Msh-Device-Id': 'device-test',
+        },
         resolveOAuthTokenProvider: () => ({ getAccessToken: async () => 'test-token' }),
       }),
       experimentalFlags: flags,
@@ -252,6 +287,7 @@ function track(session: Session): Session {
 
 afterEach(async () => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   // Close sessions first so their async metadata/wire writes settle before the
   // temp dirs are removed (otherwise rm races with a write -> ENOTEMPTY).
   await Promise.allSettled(openSessions.splice(0).map((s) => s.close()));

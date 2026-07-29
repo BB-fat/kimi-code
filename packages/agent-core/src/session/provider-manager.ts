@@ -162,6 +162,14 @@ export class ProviderManager implements ModelProvider {
     return this.config.providers[providerName];
   }
 
+  /** Resolve managed-request headers with the same env < host < provider precedence as model calls. */
+  resolveManagedRequestHeaders(providerName: string): Record<string, string> | undefined {
+    const provider = this.getProviderConfig(providerName);
+    return provider === undefined
+      ? undefined
+      : composeManagedRequestHeaders(provider, this.options.kimiRequestHeaders);
+  }
+
   /** Resolve an OAuth bearer-token provider for a configured provider entry. */
   resolveOAuthTokenProvider(
     providerName: string,
@@ -321,7 +329,7 @@ function toKosongProviderConfig(
         // still win on conflict.
         ...defaultHeadersField(
           provider.type === 'kimi' && modelProtocol === 'anthropic'
-            ? { ...envCustomHeaders, ...kimiRequestHeaders, ...provider.customHeaders }
+            ? composeManagedRequestHeaders(provider, kimiRequestHeaders, envCustomHeaders)
             : { ...envCustomHeaders, ...kimiUserAgentHeader(kimiRequestHeaders), ...provider.customHeaders },
         ),
       };
@@ -355,11 +363,9 @@ function toKosongProviderConfig(
         baseUrl: modelBaseUrl ?? providerValue(provider.baseUrl, provider.env, 'KIMI_BASE_URL'),
         apiKey: providerApiKey(provider),
         generationKwargs: { prompt_cache_key: promptCacheKey },
-        ...defaultHeadersField({
-          ...envCustomHeaders,
-          ...kimiRequestHeaders,
-          ...provider.customHeaders,
-        }),
+        ...defaultHeadersField(
+          composeManagedRequestHeaders(provider, kimiRequestHeaders, envCustomHeaders),
+        ),
       };
     case 'google-genai':
       return {
@@ -433,6 +439,14 @@ function defaultHeadersField(
 ): { defaultHeaders?: Record<string, string> } {
   if (headers === undefined || Object.keys(headers).length === 0) return {};
   return { defaultHeaders: { ...headers } };
+}
+
+function composeManagedRequestHeaders(
+  provider: Pick<ProviderConfig, 'customHeaders'>,
+  kimiRequestHeaders: Record<string, string> | undefined,
+  envCustomHeaders = parseKimiCodeCustomHeaders(),
+): Record<string, string> {
+  return { ...envCustomHeaders, ...kimiRequestHeaders, ...provider.customHeaders };
 }
 
 // Extract just the `User-Agent` from the Kimi identity headers so non-Kimi
