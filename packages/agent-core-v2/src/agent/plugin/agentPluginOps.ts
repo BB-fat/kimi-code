@@ -1,20 +1,21 @@
 /**
  * `agentPlugin` domain (L4) — persistent plugin session-start baseline.
  *
- * Defines the Agent wire model used by `agentPlugin` to restore the last
- * model-facing session-start fingerprint across replay and resume.
+ * Defines the checkpointed Agent wire model used by `agentPlugin` to keep the
+ * last model-facing session-start fingerprint aligned with replay, resume, and
+ * conversation undo.
  */
 
 import { z } from 'zod';
 
-import { defineModel } from '#/wire/model';
+import { defineCheckpointedModel } from '#/agent/contextMemory/conversationTime';
 
 export interface AgentPluginModelState {
   readonly sessionStartFingerprint?: string;
   readonly sessionStartActive: boolean;
 }
 
-export const AgentPluginModel = defineModel<AgentPluginModelState>(
+export const AgentPluginModel = defineCheckpointedModel<AgentPluginModelState>(
   'agentPlugin',
   () => ({ sessionStartActive: false }),
 );
@@ -27,12 +28,15 @@ export const setPluginSessionStartBaseline = AgentPluginModel.defineOp(
       active: z.boolean(),
     }),
     apply: (state, payload) =>
-      state.sessionStartFingerprint === payload.fingerprint &&
-      state.sessionStartActive === payload.active
+      state.current.sessionStartFingerprint === payload.fingerprint &&
+      state.current.sessionStartActive === payload.active
         ? state
         : {
-            sessionStartFingerprint: payload.fingerprint,
-            sessionStartActive: payload.active,
+            ...state,
+            current: {
+              sessionStartFingerprint: payload.fingerprint,
+              sessionStartActive: payload.active,
+            },
           },
   },
 );

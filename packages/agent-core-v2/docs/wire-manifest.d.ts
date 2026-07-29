@@ -107,7 +107,7 @@ interface ContextAppendLoopEventPayload {
 }
 
 /**
- * model: contextMemory · persisted · blobs · cross-reducers: plan, goalForkNotice, task.notificationDelivery, todo
+ * model: contextMemory · persisted · blobs · cross-reducers: plan, goalForkNotice, task.notificationDelivery, agentPlugin, todo
  * owner: src/agent/contextMemory/contextOps.ts
  */
 interface ContextAppendMessagePayload {
@@ -142,14 +142,14 @@ interface ContextAppendMessagePayload {
 }
 
 /**
- * model: contextMemory · persisted · blobs · cross-reducers: plan, task.notificationDelivery, todo
+ * model: contextMemory · persisted · blobs · cross-reducers: plan, task.notificationDelivery, agentPlugin, todo
  * owner: src/agent/contextMemory/contextOps.ts
  * shared base: ...contextCompactionBaseShape
  */
 type ContextApplyCompactionPayload = { _name: 'context.apply_compaction'; } & ({ summary: string, compactedCount: number, contextSummary?: string } | { contextSummary: string, compactedCount: number, summary?: string } | { summary: ContextMessage, count: number, compactedCount?: number });
 
 /**
- * model: contextMemory · persisted · blobs · cross-reducers: plan, task.notificationDelivery, todo
+ * model: contextMemory · persisted · blobs · cross-reducers: plan, task.notificationDelivery, agentPlugin, todo
  * owner: src/agent/contextMemory/contextOps.ts
  */
 interface ContextClearPayload {
@@ -157,7 +157,7 @@ interface ContextClearPayload {
 }
 
 /**
- * model: contextMemory · persisted · blobs · cross-reducers: plan, task.notificationDelivery, todo
+ * model: contextMemory · persisted · blobs · cross-reducers: plan, task.notificationDelivery, agentPlugin, todo
  * owner: src/agent/contextMemory/contextOps.ts
  */
 interface ContextUndoPayload {
