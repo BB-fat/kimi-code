@@ -11,7 +11,10 @@
  * must treat unbacked capabilities as not-yet-available until the corresponding
  * routes are wired.
  *
- * **No DI**: pure server-self info; the payload is frozen at registration time.
+ * **No DI for the static fields**: pure server-self info; that part of the
+ * payload is frozen at registration time. `experimental_flags` is the
+ * exception — flag state flips live when the `[experimental]` config section
+ * changes, so it is resolved per request through the injected getter.
  */
 
 import { okEnvelope } from '../envelope';
@@ -39,10 +42,16 @@ export interface MetaRouteOptions {
    * the web UI can skip the token prompt and connect without a credential.
    */
   readonly dangerousBypassAuth: boolean;
+  /**
+   * Resolves the effective experimental-flag map (flag id → enabled) at
+   * request time. Backed by `IFlagService.snapshot()` in production; tests may
+   * stub it.
+   */
+  readonly getExperimentalFlags: () => Record<string, boolean>;
 }
 
 export function registerMetaRoute(app: RouteHost, opts: MetaRouteOptions): void {
-  const data: MetaResponse = Object.freeze({
+  const staticData = Object.freeze({
     server_version: opts.serverVersion,
     capabilities: Object.freeze({
       websocket: true as const,
@@ -68,6 +77,10 @@ export function registerMetaRoute(app: RouteHost, opts: MetaRouteOptions): void 
       tags: ['meta'],
     },
     async (req, reply) => {
+      const data: MetaResponse = {
+        ...staticData,
+        experimental_flags: opts.getExperimentalFlags(),
+      };
       reply.send(okEnvelope(data, req.id));
     },
   );
