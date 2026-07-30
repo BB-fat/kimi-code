@@ -28,10 +28,11 @@ const INSTALL_TRUST_EXIT = 'exit';
 const INSTALL_TRUST_TRUST = 'trust';
 const ELLIPSIS = '…';
 
-// Hardcoded Web Bridge promotion: a built-in entry that always leads the
-// Official tab, even when the marketplace catalog is unavailable. Selecting it
-// opens the install page in the browser rather than installing from a source,
-// because Web Bridge is a browser extension + daemon, not a plugin package.
+// Hardcoded Web Bridge promotion: a built-in fallback shown only while the
+// marketplace catalog is loading, unreachable, or predates the real
+// `kimi-webbridge` entry. Selecting it opens the install page in the browser;
+// once the catalog carries the real entry, that row wins and installs
+// normally.
 const WEB_BRIDGE_URL = 'https://www.kimi.com/features/webbridge#local-agent';
 const WEB_BRIDGE_ENTRY: PluginMarketplaceEntry = {
   id: 'kimi-webbridge',
@@ -424,19 +425,16 @@ export class PluginsPanelComponent extends Container implements Focusable {
   }
 
   private get officialEntries(): readonly PluginMarketplaceEntry[] {
-    // The hardcoded Web Bridge entry always leads the Official tab, even when
-    // the catalog is loading or unreachable. Dedupe by id so a catalog that
-    // also lists it does not render a second row.
-    return [WEB_BRIDGE_ENTRY, ...this.officialCatalogEntries];
+    // The real catalog entry wins when present (it installs the actual
+    // plugin); the hardcoded promo row is only a fallback while the catalog
+    // is loading, unreachable, or predates it — never a duplicate row.
+    return this.officialCatalogEntries.some((entry) => entry.id === WEB_BRIDGE_ENTRY.id)
+      ? this.officialCatalogEntries
+      : [WEB_BRIDGE_ENTRY, ...this.officialCatalogEntries];
   }
 
   private get officialCatalogEntries(): readonly PluginMarketplaceEntry[] {
-    // Dedupe by id (not reference): if the official catalog also lists
-    // kimi-webbridge, the pinned row already represents it, so suppress the
-    // catalog copy to avoid a duplicate row on the Official tab.
-    return this.marketplaceEntries.filter(
-      (entry) => entry.tier === 'official' && entry.id !== WEB_BRIDGE_ENTRY.id,
-    );
+    return this.marketplaceEntries.filter((entry) => entry.tier === 'official');
   }
 
   private get thirdPartyEntries(): readonly PluginMarketplaceEntry[] {
@@ -661,6 +659,10 @@ export class PluginsPanelComponent extends Container implements Focusable {
     width: number,
     entries: readonly PluginMarketplaceEntry[],
     indexOffset = 0,
+    // Counts (installed/available footer) are computed over this list:
+    // the Official tab renders the pinned promo as a row but excludes it
+    // from the catalog counts, matching its pre-catalog semantics.
+    entriesForCount: readonly PluginMarketplaceEntry[] = entries,
   ): void {
     const colors = currentTheme.palette;
     if (this.market.status === 'loading' || this.market.status === 'idle') {
@@ -679,20 +681,27 @@ export class PluginsPanelComponent extends Container implements Focusable {
         lines.push(...this.renderMarketplaceRow(entries[i]!, i + indexOffset, width));
       }
     }
-    const installedCount = entries.filter((e) => this.opts.installedIds.has(e.id)).length;
+    const installedCount = entriesForCount.filter((e) => this.opts.installedIds.has(e.id)).length;
     lines.push('');
     lines.push(
-      mutedHintLine(` ${installedCount} installed · ${entries.length - installedCount} available`, colors),
+      mutedHintLine(
+        ` ${installedCount} installed · ${entriesForCount.length - installedCount} available`,
+        colors,
+      ),
     );
     lines.push(mutedHintLine(` Source: ${this.market.source}`, colors));
   }
 
   private renderOfficial(lines: string[], width: number): void {
-    // Web Bridge is pinned above the catalog and stays visible while the
-    // catalog loads or errors, since it's built into the TUI rather than
-    // fetched. Catalog rows shift down by one index to match.
-    lines.push(...this.renderMarketplaceRow(WEB_BRIDGE_ENTRY, 0, width));
-    this.renderMarketplaceTab(lines, width, this.officialCatalogEntries, 1);
+    // Loading / error: catalog rows can't render yet — show only the pinned
+    // promo as the fallback. Once loaded, `officialEntries` already includes
+    // the promo only when the catalog lacks the real entry.
+    if (this.market.status !== 'loaded') {
+      lines.push(...this.renderMarketplaceRow(WEB_BRIDGE_ENTRY, 0, width));
+      this.renderMarketplaceTab(lines, width, [], 1);
+      return;
+    }
+    this.renderMarketplaceTab(lines, width, this.officialEntries, 0, this.officialCatalogEntries);
   }
 
   private renderThirdParty(lines: string[], width: number): void {

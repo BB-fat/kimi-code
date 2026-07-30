@@ -366,7 +366,7 @@ describe('plugins selector dialogs', () => {
     });
   });
 
-  it('does not duplicate Web Bridge when the catalog also lists it', () => {
+  it('lets the real catalog entry win over the pinned Web Bridge promo', () => {
     const entries = [
       {
         id: 'kimi-webbridge',
@@ -376,12 +376,18 @@ describe('plugins selector dialogs', () => {
       },
       ...officialEntries,
     ];
-    const { panel } = makePanel({ initialTab: 'official' });
+    const { panel, onSelect } = makePanel({ initialTab: 'official' });
     panel.setMarketplace(entries, '/tmp/marketplace.json');
     const out = strip(renderRaw(panel));
-    // The label should appear exactly once — the hardcoded row wins, the
-    // catalog copy is filtered out.
+    // Exactly one row, and it is the installable catalog copy — the hardcoded
+    // open-in-browser promo is suppressed.
     expect(out.split('Kimi WebBridge').length - 1).toBe(1);
+    expect(out).not.toContain('open in browser');
+    panel.handleInput('\r'); // index 0 → the real entry installs
+    expect(onSelect).toHaveBeenCalledWith({
+      kind: 'install',
+      entry: expect.objectContaining({ id: 'kimi-webbridge', source: 'https://x/w.zip' }),
+    });
   });
 
   it('installs a Third-party entry whose id matches the pinned WebBridge', () => {
