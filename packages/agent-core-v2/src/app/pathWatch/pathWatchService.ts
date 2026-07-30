@@ -333,7 +333,11 @@ export class PathWatchService extends Disposable implements IPathWatchService {
   }
 
   private notify(state: SharedPathState, change?: HostFsChange): void {
-    const event: PathWatchEvent = { watchedPath: state.lexicalPath, change };
+    const event: PathWatchEvent = {
+      watchedPath: state.lexicalPath,
+      canonicalPath: state.canonicalTarget,
+      change,
+    };
     for (const subscriber of state.subscribers) subscriber.signal(event);
   }
 

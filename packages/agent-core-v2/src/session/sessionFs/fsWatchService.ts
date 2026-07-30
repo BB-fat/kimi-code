@@ -6,7 +6,9 @@
  * debounces them into fixed windows and re-exposes them as workspace-relative
  * `FsChangeEvent`s. The path watch is started lazily on the first non-empty
  * subscription and stopped when the subscription set becomes empty. The
- * workspace `.gitignore` is read through `hostFs`. The
+ * canonical target carried by `pathWatch` is projected back into the
+ * workspace-relative namespace before filtering. The workspace `.gitignore`
+ * is read through `hostFs`. The
  * plain-data state (`watched`, `pending`, `rawCount`, `truncated`,
  * `gitignoreLoaded`) is registered into `sessionState` (`ISessionStateService`)
  * and read/written through it. Path confinement is lexical
@@ -152,8 +154,8 @@ export class SessionFsWatchService extends Disposable implements ISessionFsWatch
     this.loadGitignore();
     const handle = this.pathWatch.createWatch(
       { target: 'directory', recursive: true, debounceMs: 0 },
-      ({ change }) => {
-        if (change !== undefined) this.onRaw(change);
+      ({ canonicalPath, change }) => {
+        if (change !== undefined) this.onRaw(change, canonicalPath);
       },
     );
     this.handle = handle;
@@ -178,8 +180,8 @@ export class SessionFsWatchService extends Disposable implements ISessionFsWatch
       );
   }
 
-  private onRaw(e: HostFsChange): void {
-    const rel = this.toRel(e.path);
+  private onRaw(e: HostFsChange, canonicalPath?: string): void {
+    const rel = this.toRel(e.path, canonicalPath);
     if (rel === '.') return;
     const probe = e.kind === 'directory' ? `${rel}/` : rel;
     if (this.matcher.ignores(probe)) return;
@@ -262,8 +264,7 @@ export class SessionFsWatchService extends Disposable implements ISessionFsWatch
     return abs;
   }
 
-  private toRel(abs: string): string {
-    const cwd = this.workspace.workDir;
+  private toRel(abs: string, cwd = this.workspace.workDir): string {
     if (abs === cwd) return '.';
     const rel = relative(cwd, abs);
     if (rel === '') return '.';

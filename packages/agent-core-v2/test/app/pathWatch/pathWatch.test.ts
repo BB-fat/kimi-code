@@ -134,6 +134,7 @@ describe('path watch (shared handles and path state)', () => {
     expect(events).toEqual([
       {
         watchedPath: '/workspace/skills',
+        canonicalPath: '/workspace/skills',
         change: {
           path: '/workspace/skills/review/SKILL.md',
           action: 'modified',

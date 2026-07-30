@@ -4,7 +4,9 @@
  * Defines the App-scoped factory for disposable path subscriptions that keep
  * raw filesystem changes available to domain projections. Each subscription
  * can replace its candidate set while the shared owner reuses equivalent host
- * watcher handles across App, Session and Agent consumers.
+ * watcher handles across App, Session and Agent consumers. Events retain both
+ * the requested lexical path and its current canonical target so projections
+ * can choose the path namespace their public contract requires.
  */
 
 import type { IDisposable } from '#/_base/di/lifecycle';
@@ -26,6 +28,7 @@ export interface PathWatchOptions {
 
 export interface PathWatchEvent {
   readonly watchedPath: string;
+  readonly canonicalPath?: string;
   readonly change?: HostFsChange;
 }
 

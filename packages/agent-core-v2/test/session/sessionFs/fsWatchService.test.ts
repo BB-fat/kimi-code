@@ -1,30 +1,41 @@
 /**
  * `sessionFsWatch` domain (L2) — verifies confinement to the declared subtree,
- * workspace-relative path mapping, debounce coalescing, window truncation,
- * `.gitignore` filtering and handle lifecycle, using a fake shared path watch.
+ * workspace-relative path mapping (including symlinked workspace roots),
+ * debounce coalescing, window truncation, `.gitignore` filtering and handle
+ * lifecycle. Unit cases use a fake shared path watch; the symlink case keeps
+ * the real `pathWatch` service and stubs only the raw host watcher boundary.
  */
 
+import { mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { DisposableStore } from '#/_base/di/lifecycle';
 import { LifecycleScope } from '#/_base/di/scope';
-import { createScopedTestHost, stubPair } from '#/_base/di/test';
+import { createScopedTestHost, createServices, stubPair } from '#/_base/di/test';
 import {
   type IPathWatch,
   IPathWatchService,
   type PathWatchEvent,
   type PathWatchOptions,
 } from '#/app/pathWatch/pathWatch';
+import { PathWatchService } from '#/app/pathWatch/pathWatchService';
+import { HostFileSystem } from '#/os/backends/node-local/hostFsService';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
-import type { HostFsChange } from '#/os/interface/hostFsWatch';
+import { type HostFsChange, IHostFsWatchService } from '#/os/interface/hostFsWatch';
+import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionStateService } from '#/session/state/sessionState';
 import { SessionStateService } from '#/session/state/sessionStateService';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
+import { SessionWorkspaceContextService } from '#/session/workspaceContext/workspaceContextService';
 import type { FsChangeEvent } from '#/session/sessionFs/fsWatch';
 
 import { ISessionFsWatchService } from '#/session/sessionFs/fsWatch';
 import { SessionFsWatchService } from '#/session/sessionFs/fsWatchService';
+
+import { stubHostFsWatch } from '../../os/stubs';
 
 const WORK_DIR = '/repo';
 
@@ -112,12 +123,16 @@ interface Harness {
 
 function makeSession(gitignore?: string): Harness {
   const watch = fakePathWatch();
-  const host = createScopedTestHost();
+  const hostFs = fakeHostFs(gitignore);
+  const host = createScopedTestHost([
+    stubPair(IHostFileSystem, hostFs),
+    stubPair(IHostFsWatchService, stubHostFsWatch()),
+  ]);
   const session = host.child(LifecycleScope.Session, 's1', [
     stubPair(ISessionStateService, new SessionStateService()),
     stubPair(ISessionWorkspaceContext, stubWorkspace()),
     stubPair(IPathWatchService, watch.service),
-    stubPair(IHostFileSystem, fakeHostFs(gitignore)),
+    stubPair(IHostFileSystem, hostFs),
   ]);
   const svc = session.accessor.get(ISessionFsWatchService);
   const events: FsChangeEvent[] = [];
@@ -228,4 +243,62 @@ describe('SessionFsWatchService', () => {
     vi.advanceTimersByTime(200);
     expect(events).toHaveLength(0);
   });
+});
+
+describe('SessionFsWatchService (shared path-watch integration)', () => {
+  let disposables: DisposableStore;
+  let root: string | undefined;
+
+  beforeEach(() => {
+    disposables = new DisposableStore();
+  });
+
+  afterEach(async () => {
+    disposables.dispose();
+    if (root !== undefined) await rm(root, { recursive: true, force: true });
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'emits workspace-relative changes when the watched workspace root is a symlink',
+    async () => {
+      root = await mkdtemp(join(tmpdir(), 'session-fs-watch-symlink-'));
+      const canonicalWorkDir = join(root, 'canonical-workspace');
+      const lexicalWorkDir = join(root, 'workspace-link');
+      await mkdir(join(canonicalWorkDir, 'src'), { recursive: true });
+      await symlink(canonicalWorkDir, lexicalWorkDir, 'dir');
+      const resolvedCanonicalWorkDir = await realpath(canonicalWorkDir);
+
+      const rawWatch = stubHostFsWatch();
+      const ix = createServices(disposables, {
+        additionalServices: (reg) => {
+          reg.defineInstance(ISessionStateService, new SessionStateService());
+          reg.definePartialInstance(ISessionContext, { cwd: lexicalWorkDir });
+          reg.define(ISessionWorkspaceContext, SessionWorkspaceContextService);
+          reg.define(IHostFileSystem, HostFileSystem);
+          reg.defineInstance(IHostFsWatchService, rawWatch);
+          reg.define(IPathWatchService, PathWatchService);
+          reg.define(ISessionFsWatchService, SessionFsWatchService);
+        },
+      });
+      const svc = ix.get(ISessionFsWatchService);
+      const events: FsChangeEvent[] = [];
+      disposables.add(svc.onDidChangeFiles((event) => events.push(event)));
+
+      svc.setWatchedPaths(['src']);
+      await vi.waitFor(() => {
+        expect(rawWatch.watchedPaths()).toContain(resolvedCanonicalWorkDir);
+      });
+
+      rawWatch.fire(join(resolvedCanonicalWorkDir, 'src', 'a.ts'), {
+        action: 'created',
+        kind: 'file',
+      });
+
+      await vi.waitFor(() => {
+        expect(events[0]?.changes).toEqual([
+          { path: 'src/a.ts', change: 'created', kind: 'file' },
+        ]);
+      });
+    },
+  );
 });
