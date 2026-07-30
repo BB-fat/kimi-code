@@ -1,8 +1,8 @@
 {
   "$schema": "https://kimi.com/schemas/kimi.plugin.schema.json",
-  "name": "kimi-webbridge-skill",
-  "version": "1.11.3",
-  "description": "Control your real browser (with your login sessions) from Kimi Code via the local Kimi WebBridge daemon — navigate, click, type, read pages, and screenshot any website.",
+  "name": "kimi-webbridge",
+  "version": "4.0.0",
+  "description": "Control your real browser (with your login sessions) from Kimi Code via the local Kimi WebBridge daemon — navigate, click, type, read pages, and screenshot any website. Supersedes the WebBridge guide plugin; bundles the official usage skill v1.11.3.",
   "keywords": [
     "browser",
     "webbridge",

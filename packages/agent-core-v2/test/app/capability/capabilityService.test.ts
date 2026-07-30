@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import { isError2 } from '#/_base/errors/errors';
 import { CapabilityErrors } from '#/app/capability/errors';
 import { CapabilityService } from '#/app/capability/capabilityService';
+import type { IPluginService } from '#/app/plugin/plugin';
 import type {
   CapabilityDetectResult,
   CapabilityEntry,
@@ -18,6 +19,7 @@ import type {
 function fakeEntry(overrides: {
   id: 'kimi-cu' | 'kimi-webbridge';
   supported?: boolean;
+  wiringStepId?: string;
   detect?: CapabilityDetectResult;
   install?: (report: CapabilityInstallReporter) => Promise<void>;
 }): CapabilityEntry {
@@ -26,6 +28,7 @@ function fakeEntry(overrides: {
     displayName: overrides.id,
     description: 'fake',
     supported: overrides.supported ?? true,
+    wiringStepId: overrides.wiringStepId ?? 'plugin',
     detect: () =>
       Promise.resolve(
         overrides.detect ?? { steps: [{ id: 'plugin', state: 'ok' }] },
@@ -34,9 +37,35 @@ function fakeEntry(overrides: {
   };
 }
 
-function fakeService(entries: readonly CapabilityEntry[]): CapabilityService {
-  // The first three deps are unused when entries are injected.
-  return new CapabilityService(undefined as never, undefined as never, undefined as never, entries);
+interface FakePlugins {
+  service: IPluginService;
+  fireReload(): void;
+}
+
+function fakePlugins(): FakePlugins {
+  const listeners: Array<() => void> = [];
+  const service = {
+    onDidReload: (listener: () => void) => {
+      listeners.push(listener);
+      return { dispose: () => undefined };
+    },
+  } as unknown as IPluginService;
+  return {
+    service,
+    fireReload: () => {
+      for (const listener of listeners) listener();
+    },
+  };
+}
+
+function fakeService(entries: readonly CapabilityEntry[], plugins?: FakePlugins): CapabilityService {
+  // bootstrap / hostProcess are unused when entries are injected.
+  return new CapabilityService(
+    undefined as never,
+    (plugins ?? fakePlugins()).service,
+    undefined as never,
+    entries,
+  );
 }
 
 function expectErrorCode(error: unknown, code: string): void {
@@ -200,5 +229,104 @@ describe('CapabilityService', () => {
     const retried = await service.getCapability('kimi-cu');
     expect(retried.install.error).toBeUndefined();
     expect(attempts).toBe(2);
+  });
+});
+
+describe('CapabilityService shelf-install hook', () => {
+  function mutableEntry(opts: {
+    id: 'kimi-cu' | 'kimi-webbridge';
+    wiringStepId?: string;
+    steps: Array<{ id: string; state: 'ok' | 'missing'; optional?: boolean }>;
+    install?: () => Promise<void>;
+  }) {
+    const state = { steps: opts.steps };
+    let installs = 0;
+    const entry = fakeEntry({
+      id: opts.id,
+      wiringStepId: opts.wiringStepId,
+      detect: { steps: state.steps },
+      install: () => {
+        installs += 1;
+        return (opts.install ?? (() => Promise.resolve()))();
+      },
+    });
+    // Re-read the mutable step list on every detect.
+    entry.detect = () => Promise.resolve({ steps: state.steps });
+    return { entry, state, installs: () => installs };
+  }
+
+  async function settle(): Promise<void> {
+    await new Promise((resolve) => {
+      setTimeout(resolve, 20);
+    });
+  }
+
+  it('auto-completes binary layers when the wiring plugin gets installed', async () => {
+    const wiringStepId = 'skill';
+    const cu = mutableEntry({
+      id: 'kimi-cu',
+      wiringStepId,
+      steps: [
+        { id: 'skill', state: 'missing' },
+        { id: 'daemon', state: 'missing' },
+      ],
+    });
+    const plugins = fakePlugins();
+    fakeService([cu.entry], plugins);
+
+    // Shelf install lands the wiring layer.
+    cu.state.steps = [
+      { id: 'skill', state: 'ok' },
+      { id: 'daemon', state: 'missing' },
+    ];
+    plugins.fireReload();
+    await settle();
+    expect(cu.installs()).toBe(1);
+
+    // A later reload with the wiring still ok must NOT retrigger
+    // (manual steps may still be missing — no heavy re-download loop).
+    plugins.fireReload();
+    await settle();
+    expect(cu.installs()).toBe(1);
+  });
+
+  it('does nothing when already ready or when wiring is removed', async () => {
+    const ready = mutableEntry({
+      id: 'kimi-cu',
+      steps: [{ id: 'plugin', state: 'ok' }],
+    });
+    const plugins = fakePlugins();
+    fakeService([ready.entry], plugins);
+
+    plugins.fireReload();
+    await settle();
+    expect(ready.installs()).toBe(0);
+
+    // Wiring removed → no trigger; wiring back → triggers again.
+    ready.state.steps = [{ id: 'plugin', state: 'missing' }];
+    plugins.fireReload();
+    await settle();
+    expect(ready.installs()).toBe(0);
+    ready.state.steps = [
+      { id: 'plugin', state: 'ok' },
+      { id: 'app', state: 'missing' },
+    ];
+    // Transition needs a false edge first: previous event set it to false.
+    plugins.fireReload();
+    await settle();
+    expect(ready.installs()).toBe(1);
+  });
+
+  it('skips unsupported entries and entries already installing', async () => {
+    const unsupported = mutableEntry({
+      id: 'kimi-cu',
+      steps: [{ id: 'plugin', state: 'ok' }, { id: 'app', state: 'missing' }],
+    });
+    const plugins = fakePlugins();
+    const entry = { ...unsupported.entry, supported: false };
+    fakeService([entry], plugins);
+    plugins.fireReload();
+    await settle();
+    expect(unsupported.installs()).toBe(0);
   });
 });

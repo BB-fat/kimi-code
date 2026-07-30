@@ -70,6 +70,14 @@ export interface CapabilityEntry {
   readonly displayName: string;
   readonly description: string;
   readonly supported: boolean;
+  /**
+   * The step representing the agent-wiring layer (`plugin` for kimi-cu,
+   * `skill` for kimi-webbridge). When that step flips to `ok` through ANY
+   * install path (marketplace shelf, TUI, CLI), the capability service
+   * auto-completes the missing binary layers — installing the wiring from
+   * the shelf is meant to be a complete install, never a half-broken one.
+   */
+  readonly wiringStepId: string;
   detect(): Promise<CapabilityDetectResult>;
   install(report: CapabilityInstallReporter): Promise<void>;
 }

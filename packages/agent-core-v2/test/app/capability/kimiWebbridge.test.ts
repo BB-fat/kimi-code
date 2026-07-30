@@ -88,7 +88,7 @@ function fakePlugins(installed: Array<{ id: string; enabled: boolean; state: str
       ),
     installPlugin: (input: { source: string }) => {
       installs.push(input.source);
-      installed.push({ id: 'kimi-webbridge-skill', enabled: true, state: 'ok', version: '1.11.3' });
+      installed.push({ id: 'kimi-webbridge', enabled: true, state: 'ok', version: '4.0.0' });
       return Promise.resolve({} as never);
     },
   } as unknown as IPluginService;
@@ -163,7 +163,7 @@ describe('kimi-webbridge entry', () => {
     const userHome = path.join(root, 'user-home');
     await mkdir(path.join(userHome, '.kimi-webbridge', 'bin'), { recursive: true });
     await writeFile(path.join(userHome, '.kimi-webbridge', 'bin', 'kimi-webbridge'), 'bin');
-    const plugins = fakePlugins([{ id: 'kimi-webbridge-skill', enabled: true, state: 'ok', version: '1.11.3' }]);
+    const plugins = fakePlugins([{ id: 'kimi-webbridge', enabled: true, state: 'ok', version: '4.0.0' }]);
     const { fetchImpl } = fakeFetch({
       statusSequence: [{ running: true, version: '3.1.1', extension_connected: false }],
     });
@@ -174,7 +174,7 @@ describe('kimi-webbridge entry', () => {
     expect(detected.steps).toEqual([
       { id: 'daemon-binary', state: 'ok' },
       { id: 'daemon', state: 'ok', detail: '3.1.1' },
-      { id: 'skill', state: 'ok', detail: '1.11.3' },
+      { id: 'skill', state: 'ok', detail: '4.0.0' },
       { id: 'extension', state: 'missing', optional: true },
     ]);
   });
@@ -221,7 +221,7 @@ describe('kimi-webbridge entry', () => {
     expect(host.calls.map((c) => `${c.command} ${c.args.join(' ')}`)).toEqual([`${binPath} start`]);
     // Plugin wiring installed from the official CDN zip.
     expect(plugins.installs).toEqual([
-      'https://code.kimi.com/kimi-code/plugins/official/kimi-webbridge-skill.zip',
+      'https://code.kimi.com/kimi-code/plugins/official/kimi-webbridge.zip',
     ]);
     // User-source shadow removed.
     await expect(access(path.join(kimiHome, 'skills', 'kimi-webbridge'))).rejects.toThrow();

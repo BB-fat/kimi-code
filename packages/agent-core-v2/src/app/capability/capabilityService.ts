@@ -47,20 +47,54 @@ export class CapabilityService extends Disposable implements ICapabilityService 
     super();
     if (entriesOverride !== undefined) {
       this.entries = new Map(entriesOverride.map((entry) => [entry.id, entry]));
-      return;
+    } else {
+      const ctx = {
+        platform: process.platform,
+        arch: process.arch,
+        kimiHomeDir: bootstrap.homeDir,
+        userHomeDir: homedir(),
+        plugins,
+        hostProcess,
+      };
+      this.entries = new Map<CapabilityId, CapabilityEntry>([
+        ['kimi-cu', createKimiCuEntry(ctx)],
+        ['kimi-webbridge', createKimiWebbridgeEntry(ctx)],
+      ]);
     }
-    const ctx = {
-      platform: process.platform,
-      arch: process.arch,
-      kimiHomeDir: bootstrap.homeDir,
-      userHomeDir: homedir(),
-      plugins,
-      hostProcess,
-    };
-    this.entries = new Map<CapabilityId, CapabilityEntry>([
-      ['kimi-cu', createKimiCuEntry(ctx)],
-      ['kimi-webbridge', createKimiWebbridgeEntry(ctx)],
-    ]);
+    // Shelf-install hook: when a capability's wiring plugin gets installed
+    // through ANY path (marketplace shelf, TUI, CLI), auto-complete the
+    // missing binary layers — a shelf install is a complete install, never
+    // wiring-only. Triggers only on the wiring step's false→true edge so a
+    // completed install with still-missing manual steps (TCC permissions)
+    // does not retrigger heavy downloads on every later plugin reload.
+    this._register(
+      plugins.onDidReload(() => {
+        void this.autoCompleteAfterWiringInstall();
+      }),
+    );
+  }
+
+  private readonly lastWiringOk = new Map<CapabilityId, boolean>();
+
+  private async autoCompleteAfterWiringInstall(): Promise<void> {
+    for (const entry of this.entries.values()) {
+      if (!entry.supported || this.runningInstalls.has(entry.id)) continue;
+      try {
+        const detected = await entry.detect();
+        const wiringOk =
+          detected.steps.find((step) => step.id === entry.wiringStepId)?.state === 'ok';
+        const wasOk = this.lastWiringOk.get(entry.id) ?? false;
+        this.lastWiringOk.set(entry.id, wiringOk);
+        const missingRequired = detected.steps.some(
+          (step) => step.optional !== true && step.state !== 'ok',
+        );
+        if (wiringOk && !wasOk && missingRequired) {
+          await this.installCapability(entry.id);
+        }
+      } catch {
+        // Best-effort hook — failures surface through capability status.
+      }
+    }
   }
 
   listCapabilities(): Promise<readonly CapabilityStatus[]> {

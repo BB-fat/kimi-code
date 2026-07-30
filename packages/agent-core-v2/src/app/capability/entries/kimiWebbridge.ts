@@ -34,9 +34,9 @@ import type {
 
 import type { CapabilityEntryContext } from './context';
 
-const PLUGIN_ID = 'kimi-webbridge-skill';
+const PLUGIN_ID = 'kimi-webbridge';
 const PLUGIN_ZIP_URL =
-  'https://code.kimi.com/kimi-code/plugins/official/kimi-webbridge-skill.zip';
+  'https://code.kimi.com/kimi-code/plugins/official/kimi-webbridge.zip';
 const BINARY_CDN_BASE = 'https://cdn.kimi.com/webbridge/latest/releases';
 const DEFAULT_DAEMON_BASE_URL = 'http://127.0.0.1:10086';
 const STATUS_TIMEOUT_MS = 1_500;
@@ -208,6 +208,7 @@ export function createKimiWebbridgeEntry(ctx: CapabilityEntryContext): Capabilit
     description:
       'Control your real browser (with your login sessions) — navigate, click, type, read pages, and screenshot any website.',
     supported,
+    wiringStepId: 'skill',
     detect,
     install,
   };

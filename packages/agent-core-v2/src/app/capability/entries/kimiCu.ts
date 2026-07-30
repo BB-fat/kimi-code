@@ -251,6 +251,7 @@ export function createKimiCuEntry(ctx: CapabilityEntryContext): CapabilityEntry 
     description:
       'macOS GUI automation in the background — read app UIs and click, type, scroll, and drag without taking over your mouse or foregrounding apps.',
     supported,
+    wiringStepId: 'plugin',
     detect,
     install,
   };
