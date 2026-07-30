@@ -19,7 +19,11 @@ import { AgentTitlePromptSourceService } from '#/session/sessionTitle/agentTitle
 import { IWireService } from '#/wire/wire';
 import type { WireRecord } from '#/wire/record';
 
-function promptRecord(id: string, text: string): WireRecord {
+function promptRecord(
+  id: string,
+  text: string,
+  origin: ContextMessage['origin'] = { kind: 'user' },
+): WireRecord {
   return {
     type: 'context.append_message',
     message: {
@@ -27,7 +31,7 @@ function promptRecord(id: string, text: string): WireRecord {
       role: 'user',
       content: [{ type: 'text', text }],
       toolCalls: [],
-      origin: { kind: 'user' },
+      origin,
     },
   };
 }
@@ -126,5 +130,25 @@ describe('AgentTitlePromptSource', () => {
       '第一条',
       '第二条',
     ]);
+  });
+
+  it('returns no title prompts when history contains only slash activations', async () => {
+    records = [
+      promptRecord('skill', 'expanded skill instructions', {
+        kind: 'skill_activation',
+        activationId: 'skill-1',
+        skillName: 'compact',
+        trigger: 'user-slash',
+      }),
+      promptRecord('plugin', 'expanded plugin instructions', {
+        kind: 'plugin_command',
+        activationId: 'plugin-1',
+        pluginId: 'example-plugin',
+        commandName: 'run',
+        trigger: 'user-slash',
+      }),
+    ];
+
+    await expect(ix.get(IAgentTitlePromptSource).firstUserPrompts(3)).resolves.toEqual([]);
   });
 });

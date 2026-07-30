@@ -42,7 +42,6 @@ import { ISessionTitleService } from './sessionTitle';
 
 const MAX_GENERATED_TITLE_LENGTH = 200;
 
-/** Total budget for the composed prompt texts sent to `chat_title`. */
 const MAX_TITLE_INPUT_LENGTH = 1000;
 
 const MAX_TITLE_PROMPTS = 3;
@@ -73,13 +72,7 @@ export class SessionTitleService implements ISessionTitleService {
       main === undefined
         ? []
         : await main.accessor.get(IAgentTitlePromptSource).firstUserPrompts(MAX_TITLE_PROMPTS);
-    const input = titleInputFromPrompts(
-      prompts.length > 0
-        ? prompts
-        : current.lastPrompt === undefined
-          ? undefined
-          : [current.lastPrompt],
-    );
+    const input = titleInputFromPrompts(prompts);
     if (input === undefined) return undefined;
     return this.generateAndApply(input);
   }
@@ -165,8 +158,8 @@ function hasCustomTitle(metadata: {
   return metadata.isCustomTitle === true || typeof metadata.customTitle === 'string';
 }
 
-function titleInputFromPrompts(prompts: readonly string[] | undefined): string | undefined {
-  if (prompts === undefined) return undefined;
+function titleInputFromPrompts(prompts: readonly string[]): string | undefined {
+  if (prompts.length === 0) return undefined;
   return prompts
     .map((prompt, index) => `user ${index + 1}: ${prompt}`)
     .join('\n')
