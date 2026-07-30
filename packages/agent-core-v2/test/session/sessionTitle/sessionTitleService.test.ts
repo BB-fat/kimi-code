@@ -2,6 +2,9 @@
  * Scenario: on-demand managed chat_title generation through the session-scoped
  * service, including OAuth failures, legacy custom titles, request headers,
  * and races.
+ * Wiring: the real title service with contract fakes; only fetch crosses the
+ * external boundary. Run with `pnpm --filter @moonshot-ai/agent-core-v2 exec
+ * vitest run test/session/sessionTitle/sessionTitleService.test.ts`.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
@@ -103,12 +106,23 @@ class FakeSessionMetadata implements ISessionMetadata {
   }
 }
 
-async function waitFor(condition: () => boolean, timeoutMs = 2000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!condition()) {
-    if (Date.now() > deadline) throw new Error('waitFor: condition not met before timeout');
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
+function createPendingFetch() {
+  let markStarted!: () => void;
+  let resolveResponse!: (response: Response) => void;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  const response = new Promise<Response>((resolve) => {
+    resolveResponse = resolve;
+  });
+  return {
+    fetch: async () => {
+      markStarted();
+      return response;
+    },
+    started,
+    resolve: resolveResponse,
+  };
 }
 
 describe('SessionTitleService', () => {
@@ -257,19 +271,14 @@ describe('SessionTitleService', () => {
   });
 
   it('never overwrites a custom title set while generation is in flight', async () => {
-    let resolveFetch: ((response: Response) => void) | undefined;
-    fetchMock.mockImplementationOnce(
-      async () =>
-        new Promise<Response>((resolve) => {
-          resolveFetch = resolve;
-        }),
-    );
+    const pendingFetch = createPendingFetch();
+    fetchMock.mockImplementationOnce(pendingFetch.fetch);
 
     await metadata.update({ lastPrompt: 'hello' });
     const generation = ix.get(ISessionTitleService).generateTitle();
-    await waitFor(() => fetchMock.mock.calls.length === 1);
+    await pendingFetch.started;
     await metadata.setTitle('user 取的标题');
-    resolveFetch?.(
+    pendingFetch.resolve(
       new Response(JSON.stringify({ title: '生成的标题' }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -368,20 +377,15 @@ describe('SessionTitleService', () => {
   });
 
   it('shares an in-flight generation between concurrent requests', async () => {
-    let resolveFetch: ((response: Response) => void) | undefined;
-    fetchMock.mockImplementationOnce(
-      async () =>
-        new Promise<Response>((resolve) => {
-          resolveFetch = resolve;
-        }),
-    );
+    const pendingFetch = createPendingFetch();
+    fetchMock.mockImplementationOnce(pendingFetch.fetch);
 
     await metadata.update({ lastPrompt: 'hello' });
     const first = ix.get(ISessionTitleService).generateTitle();
     const second = ix.get(ISessionTitleService).generateTitle();
-    await waitFor(() => fetchMock.mock.calls.length === 1);
+    await pendingFetch.started;
 
-    resolveFetch?.(
+    pendingFetch.resolve(
       new Response(JSON.stringify({ title: '生成的标题' }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -392,14 +396,16 @@ describe('SessionTitleService', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('generateTitle() returns undefined when the flag is off or no prompt was seen', async () => {
-    const svc = ix.get(ISessionTitleService);
-
+  it('returns unavailable without calling the backend when the flag is off', async () => {
     flagEnabled = false;
-    expect(await svc.generateTitle()).toBeUndefined();
+    await metadata.update({ lastPrompt: 'hello' });
 
-    flagEnabled = true;
-    expect(await svc.generateTitle()).toBeUndefined();
+    await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('returns unavailable without calling the backend when no prompt was seen', async () => {
+    await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
