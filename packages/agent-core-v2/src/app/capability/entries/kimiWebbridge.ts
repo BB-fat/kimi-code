@@ -141,7 +141,7 @@ export function createKimiWebbridgeEntry(ctx: CapabilityEntryContext): Capabilit
     throw new Error(`WebBridge daemon did not come up on ${baseUrl} — check ~/.kimi-webbridge/logs`);
   }
 
-  async function install(report: CapabilityInstallReporter): Promise<void> {
+  async function install(report: CapabilityInstallReporter): Promise<string | undefined> {
     const asset = binaryAssetName(ctx.platform, ctx.arch);
     if (asset === undefined) {
       throw new Error(`kimi-webbridge is not supported on ${ctx.platform}/${ctx.arch}`);
@@ -188,8 +188,12 @@ export function createKimiWebbridgeEntry(ctx: CapabilityEntryContext): Capabilit
     report('skill');
     await ctx.plugins.installPlugin({ source: PLUGIN_ZIP_URL });
     // Un-shadow the plugin copy: the user-source skill (priority 20) wins
-    // over the plugin source (priority 5) on name collisions.
+    // over the plugin source (priority 5) on name collisions. Surface the
+    // migration so clients can tell the user their manually-installed skill
+    // is now managed as a plugin.
+    const hadUserSourceSkill = await exists(userSourceSkillDir);
     await rm(userSourceSkillDir, { recursive: true, force: true });
+    return hadUserSourceSkill ? 'user-skill-migrated' : undefined;
   }
 
   return {

@@ -40,6 +40,13 @@ export interface CapabilityInstallProgress {
   readonly percent?: number;
   /** Set when the last install attempt failed; cleared on the next attempt. */
   readonly error?: string;
+  /**
+   * Machine-key note from the last completed install (e.g.
+   * 'user-skill-migrated' — a pre-existing user-source skill was replaced by
+   * the plugin-managed copy). Clients localize it; cleared on the next
+   * attempt.
+   */
+  readonly note?: string;
 }
 
 export interface CapabilityDetectResult {
@@ -79,5 +86,9 @@ export interface CapabilityEntry {
    */
   readonly wiringStepId: string;
   detect(): Promise<CapabilityDetectResult>;
-  install(report: CapabilityInstallReporter): Promise<void>;
+  /**
+   * Resolves with an optional machine-key note surfaced through
+   * `CapabilityInstallProgress.note` (e.g. 'user-skill-migrated').
+   */
+  install(report: CapabilityInstallReporter): Promise<string | undefined>;
 }

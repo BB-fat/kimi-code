@@ -183,7 +183,7 @@ export function createKimiCuEntry(ctx: CapabilityEntryContext): CapabilityEntry 
     }
   }
 
-  async function install(report: CapabilityInstallReporter): Promise<void> {
+  async function install(report: CapabilityInstallReporter): Promise<string | undefined> {
     if (!supported) {
       throw new Error(`kimi-cu is only supported on macOS (current: ${ctx.platform})`);
     }
@@ -240,6 +240,7 @@ export function createKimiCuEntry(ctx: CapabilityEntryContext): CapabilityEntry 
       await runCommand(ctx.hostProcess, appBin, ['request-permissions', '--ax', '--screen'], {
         timeout: PERMISSIONS_TIMEOUT_MS,
       });
+      return undefined;
     } finally {
       await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
     }

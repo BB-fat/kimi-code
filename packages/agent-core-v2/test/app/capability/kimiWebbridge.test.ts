@@ -215,7 +215,10 @@ describe('kimi-webbridge entry', () => {
       makeCtx({ plugins: plugins.service, hostProcess: host.service, fetchImpl }),
     );
 
-    await entry.install((step, percent) => reports.push([step, percent]));
+    const note = await entry.install((step, percent) => reports.push([step, percent]));
+
+    // Migration note surfaced (the pre-existing user skill was replaced).
+    expect(note).toBe('user-skill-migrated');
 
     // Binary downloaded into place and made executable.
     const binPath = path.join(root, 'user-home', '.kimi-webbridge', 'bin', 'kimi-webbridge');
@@ -244,8 +247,10 @@ describe('kimi-webbridge entry', () => {
       makeCtx({ plugins: plugins.service, hostProcess: host.service, fetchImpl }),
     );
 
-    await entry.install(() => {});
+    const note = await entry.install(() => {});
     expect(host.calls).toEqual([]);
+    // No pre-existing user skill → no migration note.
+    expect(note).toBeUndefined();
   });
 
   it('rejects install on unsupported platforms before any side effect', async () => {

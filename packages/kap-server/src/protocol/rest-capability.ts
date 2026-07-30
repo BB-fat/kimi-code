@@ -19,6 +19,7 @@ export const capabilityInstallProgressSchema = z.object({
   step: z.string().optional(),
   percent: z.number().min(0).max(100).optional(),
   error: z.string().optional(),
+  note: z.string().optional(),
 });
 export type CapabilityInstallProgressWire = z.infer<typeof capabilityInstallProgressSchema>;
 

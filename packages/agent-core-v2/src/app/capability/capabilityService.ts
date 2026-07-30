@@ -126,13 +126,16 @@ export class CapabilityService extends Disposable implements ICapabilityService 
     // Fire-and-forget: progress and errors are surfaced through polling.
     void (async () => {
       try {
-        await entry.install((step, percent) => {
+        const note = await entry.install((step, percent) => {
           this.installProgress.set(
             entry.id,
             percent === undefined ? { running: true, step } : { running: true, step, percent },
           );
         });
-        this.installProgress.set(entry.id, { running: false });
+        this.installProgress.set(
+          entry.id,
+          note === undefined ? { running: false } : { running: false, note },
+        );
       } catch (error) {
         this.installProgress.set(entry.id, {
           running: false,
