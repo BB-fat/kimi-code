@@ -14,7 +14,6 @@
       "id": "kimi-cu",
       "tier": "official",
       "displayName": "Kimi Computer Use",
-      "version": "0.4.18",
       "description": "macOS GUI automation in the background — click, type, scroll, and drag without taking over your mouse. Installing also sets up the KimiCU.app runtime (macOS only).",
       "keywords": ["computer-use", "macos", "accessibility", "automation", "gui"],
       "source": "https://cdn.kimi.com/kimi-computer-use/latest/kimi-cu-plugin.zip"
