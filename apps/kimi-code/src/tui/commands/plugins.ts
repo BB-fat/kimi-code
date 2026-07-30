@@ -1,7 +1,7 @@
 import { homedir as osHomedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 
-import type { PluginInfo, PluginSummary } from '@moonshot-ai/kimi-code-sdk';
+import type { CapabilityStatus, PluginInfo, PluginSummary } from '@moonshot-ai/kimi-code-sdk';
 
 import {
   PluginInstallTrustConfirmComponent,
@@ -26,7 +26,7 @@ import {
   isOfficialPluginSource,
 } from '../utils/plugin-source-label';
 import { QUOTA_CONSUMING_PLUGIN_IDS } from '#/constant/app';
-import { loadPluginMarketplace } from '#/utils/plugin-marketplace';
+import { loadPluginMarketplace, type PluginMarketplaceEntry } from '#/utils/plugin-marketplace';
 import { openUrl } from '#/utils/open-url';
 import type { SlashCommandHost } from './dispatch';
 
@@ -299,6 +299,101 @@ async function confirmInstallTrust(
   });
 }
 
+const CAPABILITY_POLL_INTERVAL_MS = 700;
+const CAPABILITY_POLL_ATTEMPTS = 260; // ~3 minutes of runtime setup budget
+
+/** Capability entries (kimi-cu, kimi-webbridge) install through the
+ * capability service — full runtime + wiring orchestration with live
+ * progress — instead of a bare plugin-package install. v1 engines have no
+ * capability surface, in which case every entry falls back to the plain
+ * plugin path. */
+async function isCapabilityEntry(host: SlashCommandHost, id: string): Promise<boolean> {
+  try {
+    const capabilities = await host.requireSession().listCapabilities();
+    return capabilities.some((capability) => capability.id === id);
+  } catch {
+    return false;
+  }
+}
+
+/** Poll a background capability install, mirroring progress into the
+ * panel's inline installing line until it settles (or we run out of budget). */
+async function pollCapabilityInstall(
+  host: SlashCommandHost,
+  panel: PluginsPanelComponent,
+  id: string,
+  label: string,
+): Promise<CapabilityStatus | undefined> {
+  const session = host.requireSession();
+  for (let attempt = 0; attempt < CAPABILITY_POLL_ATTEMPTS; attempt += 1) {
+    await new Promise((resolve) => {
+      setTimeout(resolve, CAPABILITY_POLL_INTERVAL_MS);
+    });
+    const status = await session.getCapability(id);
+    if (!status.install.running) return status;
+    const step = status.install.step ?? 'configuring runtime';
+    const percent = status.install.percent;
+    panel.setInstalling(
+      `${truncateForStatus(label)} — ${step}${percent !== undefined ? ` ${percent}%` : ''}`,
+    );
+    host.state.ui.requestRender();
+  }
+  return undefined;
+}
+
+export const __pluginsCommandInternals = {
+  isCapabilityEntry,
+  pollCapabilityInstall,
+  removePlugin,
+};
+
+async function installCapabilityFromPanel(
+  host: SlashCommandHost,
+  panel: PluginsPanelComponent,
+  entry: PluginMarketplaceEntry,
+): Promise<void> {
+  const label = entry.displayName;
+  // Capability entries are official by construction; the trust prompt is
+  // reserved for unreviewed third-party plugins.
+  panel.setInstalling(truncateForStatus(label));
+  host.state.ui.requestRender();
+  try {
+    await host.requireSession().installCapability(entry.id);
+  } catch (error) {
+    panel.clearInstalling();
+    host.state.ui.requestRender();
+    host.showError(`Failed to install ${label}: ${formatErrorMessage(error)}`);
+    host.restoreEditor();
+    return;
+  }
+  let result: CapabilityStatus | undefined;
+  try {
+    result = await pollCapabilityInstall(host, panel, entry.id, label);
+  } catch {
+    result = undefined;
+  }
+  panel.clearInstalling();
+  // Close the panel so the result lines land in the transcript, matching the
+  // plain plugin install flow.
+  host.restoreEditor();
+  if (result === undefined) {
+    host.showStatus(`${label} setup is still running in the background; /plugins shows its state.`);
+    return;
+  }
+  if (result.install.error !== undefined) {
+    host.showError(`${label} setup failed: ${result.install.error}. Install again from /plugins to retry.`);
+    return;
+  }
+  const migrationNote =
+    result.install.note === 'user-skill-migrated'
+      ? ' Your manually installed skill is now managed as a plugin.'
+      : '';
+  host.showStatus(
+    `${label} is ready${result.version !== undefined ? ` (v${result.version})` : ''}.${migrationNote}`,
+  );
+  host.showStatus(PLUGIN_RELOAD_HINT, 'warning');
+}
+
 async function installFromPanel(
   host: SlashCommandHost,
   panel: PluginsPanelComponent,
@@ -400,6 +495,10 @@ async function handlePluginsPanelSelection(
       await showPluginsPicker(host, { initialTab: 'installed' });
       return;
     case 'install':
+      if (await isCapabilityEntry(host, selection.entry.id)) {
+        await installCapabilityFromPanel(host, panel, selection.entry);
+        return;
+      }
       await installFromPanel(
         host,
         panel,
@@ -454,6 +553,12 @@ async function handlePluginMcpSelection(
 async function removePlugin(host: SlashCommandHost, id: string): Promise<void> {
   await host.requireSession().removePlugin(id);
   host.showStatus(`Removed ${id}.`);
+  if (await isCapabilityEntry(host, id)) {
+    // Capability runtimes (KimiCU.app / WebBridge daemon) are deliberately
+    // never uninstalled by plugin removal — say so, since the capability
+    // still works until the user removes those separately.
+    host.showStatus('Note: the runtime binaries were left untouched and the capability still works. Reinstall any time from the Official tab.');
+  }
   host.showStatus(PLUGIN_RELOAD_HINT, 'warning');
 }
 
