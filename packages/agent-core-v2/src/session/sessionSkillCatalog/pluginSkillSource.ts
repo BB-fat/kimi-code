@@ -6,7 +6,9 @@
  * (above builtin, below extra / user / workspace, so project, user and extra skills win name
  * collisions). Watches the resolved roots through `pathWatch` and
  * re-emits both filesystem changes and `plugin.onDidReload` through
- * `onDidChange`. Bound at Session scope.
+ * `onDidChange`; install / enable / remove mutations deliberately do not
+ * refresh the session catalog — those take effect on the next explicit
+ * reload. Bound at Session scope.
  */
 
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';

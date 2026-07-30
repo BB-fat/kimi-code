@@ -180,6 +180,7 @@ import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog
 import { ISessionSwarmService } from '#/session/swarm/sessionSwarm';
 import type { PathAccessOperation } from '#/session/workspaceContext/workspaceContext';
 
+import { stubClientIdentity } from '../app/bootstrap/stubs';
 import { recordAgentEvents, type RecordedEventEntry } from '../snapshot/events';
 import { createFakeHostFs, createFakeProcessRunner } from '../tools/fixtures/fake-exec';
 import { createScriptedGenerate } from './scripted-generate';
@@ -539,6 +540,7 @@ export function homeDirServices(homeDir: string | undefined): TestAgentServiceOv
         homeDir,
         cwd: process.cwd(),
         env: process.env,
+        clientIdentity: stubClientIdentity,
       })) {
         reg.defineInstance(id, value);
       }
@@ -1034,6 +1036,7 @@ export class AgentTestContext {
             cwd: this.cwd,
             osHomeDir: TEST_HOME_DIR,
             env: process.env,
+            clientIdentity: stubClientIdentity,
           })) {
             reg.defineInstance(id, value);
           }
