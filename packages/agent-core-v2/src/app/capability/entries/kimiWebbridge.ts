@@ -34,8 +34,9 @@ import type {
 
 import type { CapabilityEntryContext } from './context';
 
-const PLUGIN_ID = 'kimi-webbridge';
-const PLUGIN_ZIP_URL = 'https://code.kimi.com/kimi-code/plugins/official/kimi-webbridge.zip';
+const PLUGIN_ID = 'kimi-webbridge-skill';
+const PLUGIN_ZIP_URL =
+  'https://code.kimi.com/kimi-code/plugins/official/kimi-webbridge-skill.zip';
 const BINARY_CDN_BASE = 'https://cdn.kimi.com/webbridge/latest/releases';
 const DEFAULT_DAEMON_BASE_URL = 'http://127.0.0.1:10086';
 const STATUS_TIMEOUT_MS = 1_500;
