@@ -12,11 +12,9 @@
  * injection, then the persisted rendered snapshot, then a runtime seed kept
  * in `agentState`: a profile whose snapshot declares no AGENTS.md disclosure
  * is seeded with the first observed fingerprint (quietly), so a later
- * creation, edit, or removal still announces. The live content is read once
- * and then only re-read when the shared `pathWatch` subscription reports a
- * candidate change — never per step, so the step pipeline carries no
- * filesystem IO (fake-timer retry loops included); cwd changes re-arm the
- * watch and force one re-read. Bound at Agent scope.
+ * creation, edit, or removal still announces. The live content is re-read at
+ * every step boundary — the candidate chain is a handful of small instruction
+ * files, so no filesystem watch is kept. Bound at Agent scope.
  */
 
 import { Disposable } from '#/_base/di/lifecycle';
@@ -35,14 +33,10 @@ import { IAgentStateService } from '#/agent/state/agentState';
 import type { AgentsMdStatus } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import { fingerprintDisclosureContent } from '#/app/agentProfileCatalog/profile-shared';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
-import {
-  type IPathWatch,
-  IPathWatchService,
-} from '#/app/pathWatch/pathWatch';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 
-import { agentsMdCandidatePaths, loadAgentsMdSnapshot } from './context';
+import { loadAgentsMdSnapshot } from './context';
 import { IAgentProfileService } from './profile';
 import { IAgentAgentsMdReminderService } from './agentsMdReminder';
 
@@ -59,12 +53,6 @@ export const agentsMdReminderSeedKey = defineState<AgentsMdSeed | undefined>(
 export class AgentAgentsMdReminderService extends Disposable implements IAgentAgentsMdReminderService {
   declare readonly _serviceBrand: undefined;
 
-  private readonly watcher: IPathWatch;
-  private watchCwd: string | undefined;
-  private changeVersion = 0;
-  private loadedVersion = -1;
-  private current: AgentsMdCurrent | undefined;
-
   constructor(
     @IAgentContextInjectorService dynamicInjector: IAgentContextInjectorService,
     @IAgentProfileService private readonly profile: IAgentProfileService,
@@ -72,15 +60,9 @@ export class AgentAgentsMdReminderService extends Disposable implements IAgentAg
     @IHostFileSystem private readonly fs: IHostFileSystem,
     @IHostEnvironment private readonly env: IHostEnvironment,
     @IBootstrapService private readonly bootstrap: IBootstrapService,
-    @IPathWatchService pathWatch: IPathWatchService,
   ) {
     super();
     this.states.register(agentsMdReminderSeedKey);
-    this.watcher = this._register(
-      pathWatch.createWatch({ target: 'file' }, () => {
-        this.changeVersion += 1;
-      }),
-    );
     this._register(
       dynamicInjector.register(AGENTS_MD_INJECTION_VARIANT, (ctx) => this.reminder(ctx)),
     );
@@ -92,7 +74,11 @@ export class AgentAgentsMdReminderService extends Disposable implements IAgentAg
     try {
       let profileData = this.profile.data();
       if (profileData.environmentDisclosure?.cwd !== profileData.cwd) return undefined;
-      const current = await this.currentContent();
+      const current = await loadAgentsMdSnapshot(
+        { fs: this.fs, homeDir: this.env.homeDir },
+        profileData.cwd,
+        this.bootstrap.homeDir,
+      );
       profileData = this.profile.data();
       if (profileData.environmentDisclosure?.cwd !== profileData.cwd) return undefined;
       const renderGeneration = profileData.renderGeneration ?? 0;
@@ -128,40 +114,6 @@ export class AgentAgentsMdReminderService extends Disposable implements IAgentAg
     }
   }
 
-  private async currentContent(): Promise<AgentsMdCurrent> {
-    const cwd = this.profile.data().cwd;
-    if (cwd !== this.watchCwd) {
-      this.watchCwd = cwd;
-      this.changeVersion += 1;
-      await this.armWatch(cwd);
-    }
-    if (this.loadedVersion === this.changeVersion && this.current !== undefined) {
-      return this.current;
-    }
-    const loadingVersion = this.changeVersion;
-    const content = await loadAgentsMdSnapshot(
-      { fs: this.fs, homeDir: this.env.homeDir },
-      cwd,
-      this.bootstrap.homeDir,
-    );
-    this.current = content;
-    this.loadedVersion = loadingVersion;
-    return content;
-  }
-
-  private async armWatch(cwd: string): Promise<void> {
-    try {
-      const paths = await agentsMdCandidatePaths(
-        { fs: this.fs, homeDir: this.env.homeDir },
-        cwd,
-        this.bootstrap.homeDir,
-      );
-      if (cwd !== this.watchCwd) return;
-      await this.watcher.setPaths(paths);
-    } catch {
-    }
-  }
-
   private contentFromProfile(): AgentsMdDisclosure | undefined {
     const profileData = this.profile.data();
     if (profileData.environmentDisclosure?.cwd !== profileData.cwd) return undefined;
@@ -178,11 +130,6 @@ export class AgentAgentsMdReminderService extends Disposable implements IAgentAg
     if (seed === undefined || seed.cwd !== this.profile.data().cwd) return undefined;
     return seed;
   }
-}
-
-interface AgentsMdCurrent {
-  readonly content: string;
-  readonly status: AgentsMdStatus;
 }
 
 interface AgentsMdDisclosure {

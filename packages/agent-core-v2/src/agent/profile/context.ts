@@ -84,14 +84,6 @@ export async function loadAgentsMdSnapshot(
   return { content: result.content, status: result.status };
 }
 
-export async function agentsMdCandidatePaths(
-  deps: ProfileContextDeps,
-  brandHome: string | undefined,
-  workDir: string,
-): Promise<readonly string[]> {
-  return (await agentsMdCandidateGroups(deps, brandHome, [workDir])).flat();
-}
-
 async function agentsMdCandidateGroups(
   deps: ProfileContextDeps,
   brandHome: string | undefined,
