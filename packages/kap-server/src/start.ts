@@ -55,6 +55,9 @@ import { SessionEventBroadcaster } from './transport/ws/v1/sessionEventBroadcast
 import { FsWatchBridge } from './transport/ws/v1/fsWatchBridge';
 import { registerWsV1, WS_PATH as WS_PATH_V1 } from './transport/ws/v1/registerWsV1';
 import { getServerVersion } from './version';
+
+/** Default plugin marketplace catalog (overridable per server option or env). */
+const DEFAULT_PLUGIN_MARKETPLACE_URL = 'https://code.kimi.com/kimi-code/plugins/marketplace.json';
 import { classify } from './security/bindClassify';
 import {
   createHostCheck,
@@ -98,6 +101,12 @@ export interface ServerHostIdentity extends KimiHostIdentity {
 export interface ServerStartOptions {
   readonly host?: string;
   readonly port?: number;
+  /**
+   * Plugin marketplace catalog URL for `GET /api/v1/plugins/marketplace`.
+   * Defaults to the `KIMI_CODE_PLUGIN_MARKETPLACE_URL` env var, then the
+   * production catalog.
+   */
+  readonly pluginMarketplaceUrl?: string;
   readonly homeDir?: string;
   readonly configPath?: string;
   /**
@@ -449,6 +458,10 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
     enableShutdown,
     enableTerminals,
     guiStore,
+    pluginMarketplaceUrl:
+      opts.pluginMarketplaceUrl ??
+      process.env['KIMI_CODE_PLUGIN_MARKETPLACE_URL'] ??
+      DEFAULT_PLUGIN_MARKETPLACE_URL,
     onShutdown: () => {
       void close().catch((err: unknown) => logger.error({ err }, 'server close failed'));
     },

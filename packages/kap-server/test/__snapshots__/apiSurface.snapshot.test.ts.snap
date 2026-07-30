@@ -134,6 +134,14 @@ exports[`API surface snapshot > matches the documented v2 route table and meta e
     ],
     [
       "GET",
+      "/api/v1/plugins",
+    ],
+    [
+      "GET",
+      "/api/v1/plugins/marketplace",
+    ],
+    [
+      "GET",
       "/api/v1/providers",
     ],
     [
@@ -311,6 +319,14 @@ exports[`API surface snapshot > matches the documented v2 route table and meta e
     [
       "POST",
       "/api/v1/oauth/logout",
+    ],
+    [
+      "POST",
+      "/api/v1/plugins",
+    ],
+    [
+      "POST",
+      "/api/v1/plugins/{tail}",
     ],
     [
       "POST",

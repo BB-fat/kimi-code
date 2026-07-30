@@ -74,6 +74,8 @@ export const ErrorCode = {
   CATALOG_ENTRY_NOT_FOUND: 40417,
   /** capability_id 不存在 */
   CAPABILITY_NOT_FOUND: 40418,
+  /** plugin_id 不存在 */
+  PLUGIN_NOT_FOUND: 40419,
 
   /** session 有正在进行的 prompt，拒绝新请求 */
   SESSION_BUSY: 40901,

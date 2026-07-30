@@ -32,6 +32,7 @@ import { registerDebugRoutes } from '../transport/registerDebugRoutes';
 import { registerMetaRoute } from './meta';
 import { registerModelCatalogRoutes } from './modelCatalog';
 import { registerOAuthRoutes } from './oauth';
+import { registerPluginsRoutes } from './plugins';
 import { registerPromptsRoutes } from './prompts';
 import { registerQuestionsRoutes } from './questions';
 import { registerSearchRoutes } from './search';
@@ -78,6 +79,8 @@ export interface RegisterApiV1RoutesOptions {
   readonly broadcaster: SessionEventBroadcaster;
   readonly snapshotReader: ISnapshotReader;
   readonly transcriptService: TranscriptService;
+  /** Catalog URL for the `/plugins/marketplace` route (resolved by start.ts). */
+  readonly pluginMarketplaceUrl: string;
   /**
    * Surface `dangerous_bypass_auth` in the `/meta` payload. Set by `start.ts`
    * from the `disableAuth` server option (the `--dangerous-bypass-auth` CLI
@@ -125,6 +128,9 @@ export async function registerApiV1Routes(
         { hostIdentity: opts.hostIdentity },
       );
       registerSkillsRoutes(apiV1 as unknown as Parameters<typeof registerSkillsRoutes>[0], core);
+      registerPluginsRoutes(apiV1 as unknown as Parameters<typeof registerPluginsRoutes>[0], core, {
+        marketplaceUrl: opts.pluginMarketplaceUrl,
+      });
       registerCapabilitiesRoutes(
         apiV1 as unknown as Parameters<typeof registerCapabilitiesRoutes>[0],
         core,
