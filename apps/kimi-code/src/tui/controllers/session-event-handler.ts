@@ -393,22 +393,28 @@ export class SessionEventHandler {
   }
 
   /**
-   * Best-effort auto title: while the session has no title yet, ask the
-   * engine to generate one from the first prompts after each completed turn.
-   * The engine keeps custom titles untouched and dedupes in-flight requests;
-   * a resolved `undefined` (no managed login / no prompt yet) just retries on
-   * the next turn, while a rejection (v1 engine, dead RPC) disables further
-   * attempts for this session. The generated title lands through the regular
-   * `session.meta.updated` event.
+   * Best-effort auto title: after each completed turn, ask the engine to
+   * generate a title from the first prompts until one lands. The engine
+   * overwrites the prompt-derived easy title but never a custom title
+   * (enforced server-side), and dedupes in-flight requests. A resolved string
+   * means a title was applied — stop asking so later turns don't regenerate
+   * over it; a resolved `undefined` (no managed login / no prompt yet / a
+   * custom title) just retries on the next turn; a rejection (v1 engine,
+   * dead RPC) disables further attempts for this session. The generated
+   * title lands through the regular `session.meta.updated` event.
    */
   private requestSessionTitleGeneration(): void {
     if (this.titleGenerationDisabled) return;
-    const { sessionId, sessionTitle } = this.host.state.appState;
+    const { sessionId } = this.host.state.appState;
     if (sessionId.length === 0) return;
-    if (typeof sessionTitle === 'string' && sessionTitle.trim().length > 0) return;
-    void this.host.harness.generateSessionTitle({ id: sessionId }).catch(() => {
-      this.titleGenerationDisabled = true;
-    });
+    void this.host.harness.generateSessionTitle({ id: sessionId }).then(
+      (title) => {
+        if (title !== undefined) this.titleGenerationDisabled = true;
+      },
+      () => {
+        this.titleGenerationDisabled = true;
+      },
+    );
   }
 
   private handleStepBegin(event: TurnStepStartedEvent): void {

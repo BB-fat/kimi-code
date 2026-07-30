@@ -84,13 +84,24 @@ describe('session auto title generation', () => {
     expect(harness.generateSessionTitle).toHaveBeenCalledWith({ id: 's1' });
   });
 
-  it('does not request a title when the session already has one', () => {
-    const { host, harness } = makeHost({ sessionTitle: 'custom title' });
+  it('requests a title after a turn ends even when an easy title exists', () => {
+    const { host, harness } = makeHost({ sessionTitle: '首条 prompt 的截断标题' });
     const handler = new SessionEventHandler(host);
 
     handler.handleEvent(turnEndedEvent(), vi.fn());
 
-    expect(harness.generateSessionTitle).not.toHaveBeenCalled();
+    expect(harness.generateSessionTitle).toHaveBeenCalledWith({ id: 's1' });
+  });
+
+  it('stops requesting after a title was generated', async () => {
+    const { host, harness } = makeHost({ generateTitle: async () => '生成的标题' });
+    const handler = new SessionEventHandler(host);
+
+    handler.handleEvent(turnEndedEvent(), vi.fn());
+    await flushMicrotasks();
+    handler.handleEvent(turnEndedEvent(), vi.fn());
+
+    expect(harness.generateSessionTitle).toHaveBeenCalledTimes(1);
   });
 
   it('keeps requesting after an unavailable (undefined) result', async () => {
