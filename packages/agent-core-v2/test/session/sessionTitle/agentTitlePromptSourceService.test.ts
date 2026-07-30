@@ -1,8 +1,7 @@
 /**
- * Scenario: the Agent-scoped title prompt projection reads the durable wire
- * journal, follows conversation undo, and includes prompts still waiting in
- * the live prompt queue. Wiring: the real source with contract-level fakes
- * for storage, wire flush, context, and prompt queue.
+ * Scenario: the Agent-scoped title prompt projection reads the live context
+ * window and includes prompts still waiting in the live prompt queue. Wiring:
+ * the real source with contract-level fakes for context and prompt queue.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -12,43 +11,32 @@ import { createServices, type TestInstantiationService } from '#/_base/di/test';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentPromptService } from '#/agent/prompt/prompt';
-import { IAgentScopeContext, makeAgentScopeContext } from '#/agent/scopeContext/scopeContext';
-import { IAppendLogStore } from '#/persistence/interface/appendLogStore';
 import { IAgentTitlePromptSource } from '#/session/sessionTitle/agentTitlePromptSource';
 import { AgentTitlePromptSourceService } from '#/session/sessionTitle/agentTitlePromptSourceService';
-import { IWireService } from '#/wire/wire';
-import type { WireRecord } from '#/wire/record';
 
-function promptRecord(
+const USER_ORIGIN: ContextMessage['origin'] = { kind: 'user' };
+
+function userMessage(
   id: string,
   text: string,
-  origin: ContextMessage['origin'] = { kind: 'user' },
-): WireRecord {
+  origin: ContextMessage['origin'] = USER_ORIGIN,
+): ContextMessage {
   return {
-    type: 'context.append_message',
-    message: {
-      id,
-      role: 'user',
-      content: [{ type: 'text', text }],
-      toolCalls: [],
-      origin,
-    },
+    id,
+    role: 'user',
+    content: [{ type: 'text', text }],
+    toolCalls: [],
+    origin,
   };
-}
-
-function undoRecord(count: number): WireRecord {
-  return { type: 'context.undo', count };
 }
 
 describe('AgentTitlePromptSource', () => {
   let disposables: DisposableStore;
   let ix: TestInstantiationService;
-  let records: WireRecord[];
   let liveMessages: readonly ContextMessage[];
   let queue: ReturnType<IAgentPromptService['list']>;
 
   beforeEach(() => {
-    records = [];
     liveMessages = [];
     queue = { active: undefined, pending: [] };
     disposables = new DisposableStore();
@@ -56,16 +44,6 @@ describe('AgentTitlePromptSource', () => {
       additionalServices: (reg) => {
         reg.definePartialInstance(IAgentContextMemoryService, { get: () => liveMessages });
         reg.definePartialInstance(IAgentPromptService, { list: () => queue });
-        reg.defineInstance(
-          IAgentScopeContext,
-          makeAgentScopeContext({ agentId: 'main', agentScope: 'sessions/sess-1/agents/main' }),
-        );
-        reg.definePartialInstance(IAppendLogStore, {
-          read: <R>() => (async function* () {
-            yield* records as R[];
-          })(),
-        });
-        reg.definePartialInstance(IWireService, { flush: async () => undefined });
         reg.define(IAgentTitlePromptSource, AgentTitlePromptSourceService);
       },
     });
@@ -75,8 +53,8 @@ describe('AgentTitlePromptSource', () => {
     disposables.dispose();
   });
 
-  it('returns the first three prompts from the journal and live queue in order', async () => {
-    records = [promptRecord('one', '第一条')];
+  it('returns the first three prompts from the live context and queue in order', async () => {
+    liveMessages = [userMessage('one', '第一条')];
     queue = {
       active: undefined,
       pending: [
@@ -85,26 +63,14 @@ describe('AgentTitlePromptSource', () => {
           userMessageId: 'two',
           createdAt: '2026-01-01T00:00:00.000Z',
           state: 'pending',
-          message: {
-            id: 'two',
-            role: 'user',
-            content: [{ type: 'text', text: '第二条' }],
-            toolCalls: [],
-            origin: { kind: 'user' },
-          },
+          message: userMessage('two', '第二条'),
         },
         {
           id: 'three',
           userMessageId: 'three',
           createdAt: '2026-01-01T00:00:01.000Z',
           state: 'pending',
-          message: {
-            id: 'three',
-            role: 'user',
-            content: [{ type: 'text', text: '第三条' }],
-            toolCalls: [],
-            origin: { kind: 'user' },
-          },
+          message: userMessage('three', '第三条'),
         },
       ],
     };
@@ -116,31 +82,29 @@ describe('AgentTitlePromptSource', () => {
     ]);
   });
 
-  it('excludes a prompt removed by conversation undo', async () => {
-    records = [promptRecord('one', 'A'), undoRecord(1), promptRecord('two', 'B')];
-
-    await expect(ix.get(IAgentTitlePromptSource).firstUserPrompts(3)).resolves.toEqual(['B']);
-  });
-
-  it('rebuilds the same prompt list from persisted records without a live context', async () => {
-    records = [promptRecord('one', '第一条'), promptRecord('two', '第二条')];
-    liveMessages = [];
+  it('keeps the head user messages of a compacted window, skipping elision and summary', async () => {
+    liveMessages = [
+      userMessage('head', '开场提问'),
+      userMessage('elision', '... omitted ...', { kind: 'injection', variant: 'compaction_elision' }),
+      userMessage('tail', '最近的追问'),
+      userMessage('summary', ' compaction summary ', { kind: 'compaction_summary' }),
+    ];
 
     await expect(ix.get(IAgentTitlePromptSource).firstUserPrompts(3)).resolves.toEqual([
-      '第一条',
-      '第二条',
+      '开场提问',
+      '最近的追问',
     ]);
   });
 
   it('returns no title prompts when history contains only slash activations', async () => {
-    records = [
-      promptRecord('skill', 'expanded skill instructions', {
+    liveMessages = [
+      userMessage('skill', 'expanded skill instructions', {
         kind: 'skill_activation',
         activationId: 'skill-1',
         skillName: 'compact',
         trigger: 'user-slash',
       }),
-      promptRecord('plugin', 'expanded plugin instructions', {
+      userMessage('plugin', 'expanded plugin instructions', {
         kind: 'plugin_command',
         activationId: 'plugin-1',
         pluginId: 'example-plugin',
@@ -150,5 +114,21 @@ describe('AgentTitlePromptSource', () => {
     ];
 
     await expect(ix.get(IAgentTitlePromptSource).firstUserPrompts(3)).resolves.toEqual([]);
+  });
+
+  it('counts a queued prompt already appended to the context only once', async () => {
+    liveMessages = [userMessage('one', '同一条')];
+    queue = {
+      active: {
+        id: 'one',
+        userMessageId: 'one',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        state: 'running',
+        message: userMessage('one', '同一条'),
+      },
+      pending: [],
+    };
+
+    await expect(ix.get(IAgentTitlePromptSource).firstUserPrompts(3)).resolves.toEqual(['同一条']);
   });
 });

@@ -1,9 +1,9 @@
 /**
  * `sessionTitle` domain (L6) — `ISessionTitleService` implementation.
  *
- * Generates the session's title from the first active prompts projected by
- * the main Agent's authoritative conversation journal through the managed
- * platform `/tools` `chat_title` endpoint, persists it through
+ * Generates the session's title from the first active prompts in the main
+ * Agent's live conversation context through the managed platform `/tools`
+ * `chat_title` endpoint, persists it through
  * `sessionMetadata`, and rebroadcasts `session.meta.updated`.
  * Generation is on demand only: `generateTitle()` is the single entry point
  * (the kap-server route), gated by the `auto-title` experimental flag and a
