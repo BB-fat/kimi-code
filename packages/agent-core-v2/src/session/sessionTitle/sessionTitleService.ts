@@ -1,18 +1,18 @@
 /**
  * `sessionTitle` domain (L6) — `ISessionTitleService` implementation.
  *
- * Generates the session's title from its already-sanitized first prompts
- * (`sessionMetadata`'s bounded `prompts` list, secrets redacted by the
- * prompt-metadata flow; `lastPrompt` as the fallback for older documents)
- * through the managed platform `/tools` `chat_title` endpoint, persists
- * it through `sessionMetadata`, and rebroadcasts `session.meta.updated`.
+ * Generates the session's title from the first active prompts projected by
+ * the main Agent's authoritative conversation journal through the managed
+ * platform `/tools` `chat_title` endpoint, persists it through
+ * `sessionMetadata`, and rebroadcasts `session.meta.updated`.
  * Generation is on demand only: `generateTitle()` is the single entry point
  * (the kap-server route), gated by the `auto-title` experimental flag and a
  * managed Kimi Code OAuth login; any failure degrades to keeping the current
  * title, and a custom title set by the user is never overwritten. Provider
  * config comes from `provider`, the bearer token from `auth`, host identity
- * headers from `model`, gating from `flag`, and logs through `log`. Bound at
- * Session scope.
+ * headers from `model`, gating from `flag`, prompt history from
+ * `agentLifecycle`/`sessionTitle`, and logs through `log`. Bound at Session
+ * scope.
  */
 
 import {
@@ -29,15 +29,14 @@ import { ILogService } from '#/_base/log/log';
 import { IOAuthService } from '#/app/auth/auth';
 import { IEventService } from '#/app/event/event';
 import { IFlagService } from '#/app/flag/flag';
+import { IAgentLifecycleService, MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
 import { IHostRequestHeaders } from '#/kosong/model/hostRequestHeaders';
 import { IProviderService } from '#/kosong/provider/provider';
 import { isOAuthCatalogVendor } from '#/kosong/provider/providerDefinition';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
-import {
-  ISessionMetadata,
-  type SessionMeta,
-} from '#/session/sessionMetadata/sessionMetadata';
+import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 
+import { IAgentTitlePromptSource } from './agentTitlePromptSource';
 import { AUTO_TITLE_FLAG_ID } from './flag';
 import { ISessionTitleService } from './sessionTitle';
 
@@ -45,6 +44,8 @@ const MAX_GENERATED_TITLE_LENGTH = 200;
 
 /** Total budget for the composed prompt texts sent to `chat_title`. */
 const MAX_TITLE_INPUT_LENGTH = 1000;
+
+const MAX_TITLE_PROMPTS = 3;
 
 export class SessionTitleService implements ISessionTitleService {
   declare readonly _serviceBrand: undefined;
@@ -54,6 +55,7 @@ export class SessionTitleService implements ISessionTitleService {
   constructor(
     @ISessionContext private readonly ctx: ISessionContext,
     @ISessionMetadata private readonly metadata: ISessionMetadata,
+    @IAgentLifecycleService private readonly agentLifecycle: IAgentLifecycleService,
     @IEventService private readonly eventService: IEventService,
     @IFlagService private readonly flags: IFlagService,
     @IProviderService private readonly providers: IProviderService,
@@ -65,8 +67,20 @@ export class SessionTitleService implements ISessionTitleService {
   async generateTitle(): Promise<string | undefined> {
     if (!this.flags.enabled(AUTO_TITLE_FLAG_ID)) return undefined;
     const current = await this.metadata.read();
-    const input = titleInputFromMeta(current);
-    if (input === undefined || hasCustomTitle(current)) return undefined;
+    if (hasCustomTitle(current)) return undefined;
+    const main = this.agentLifecycle.get(MAIN_AGENT_ID);
+    const prompts =
+      main === undefined
+        ? []
+        : await main.accessor.get(IAgentTitlePromptSource).firstUserPrompts(MAX_TITLE_PROMPTS);
+    const input = titleInputFromPrompts(
+      prompts.length > 0
+        ? prompts
+        : current.lastPrompt === undefined
+          ? undefined
+          : [current.lastPrompt],
+    );
+    if (input === undefined) return undefined;
     return this.generateAndApply(input);
   }
 
@@ -151,18 +165,7 @@ function hasCustomTitle(metadata: {
   return metadata.isCustomTitle === true || typeof metadata.customTitle === 'string';
 }
 
-/**
- * Composes the `chat_title` input from the session's first recorded prompts
- * (order-labeled), falling back to `lastPrompt` for documents written before
- * prompt recording existed. Truncated to the total budget, keeping the head.
- */
-function titleInputFromMeta(meta: SessionMeta): string | undefined {
-  const prompts =
-    meta.prompts !== undefined && meta.prompts.length > 0
-      ? meta.prompts
-      : meta.lastPrompt !== undefined
-        ? [meta.lastPrompt]
-        : undefined;
+function titleInputFromPrompts(prompts: readonly string[] | undefined): string | undefined {
   if (prompts === undefined) return undefined;
   return prompts
     .map((prompt, index) => `user ${index + 1}: ${prompt}`)

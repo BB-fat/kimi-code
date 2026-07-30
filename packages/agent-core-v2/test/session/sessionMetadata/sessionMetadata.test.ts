@@ -138,6 +138,26 @@ describe('SessionMetadata', () => {
     expect(healed.updatedAt).toBe(1700000000000);
   });
 
+  it('removes the retired prompts field from persisted metadata', async () => {
+    const store = ix.get(IAtomicDocumentStore);
+    await store.set(META_SCOPE, 'state.json', {
+      id: 's1',
+      version: 2,
+      createdAt: 1700000000000,
+      updatedAt: 1700000000000,
+      archived: false,
+      agents: {},
+      custom: {},
+      prompts: ['第一条', '第二条'],
+    });
+
+    const meta = ix.get(ISessionMetadata);
+    expect(await meta.read()).not.toHaveProperty('prompts');
+
+    const fresh = createFreshMetadata(ix);
+    expect(await fresh.read()).not.toHaveProperty('prompts');
+  });
+
   it('normalizes the legacy customTitle field before callers read metadata', async () => {
     const store = ix.get(IAtomicDocumentStore);
     await store.set(META_SCOPE, 'state.json', {

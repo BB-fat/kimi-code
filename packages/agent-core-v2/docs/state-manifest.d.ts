@@ -336,7 +336,6 @@ export interface SessionStateSnapshot {
     readonly title?: string;
     readonly isCustomTitle?: boolean;
     readonly lastPrompt?: string;
-    readonly prompts?: readonly string[];
     readonly createdAt: number;
     readonly updatedAt: number;
     readonly archived: boolean;
@@ -1011,7 +1010,7 @@ export interface AgentStateSnapshot {
   'llmRequester.lastConfigLogSignature': string | undefined;
   'llmRequester.mediaDegradedTurns': Set<number>;
   'llmRequester.mediaStrippedTurns': Map<number, /* MediaStripSnapshot — packages/agent-core-v2/src/agent/contextProjector/contextProjector.ts */ {
-    readonly "__@mediaStripSnapshotBrand@2672": undefined;
+    readonly "__@mediaStripSnapshotBrand@2671": undefined;
   }>;
   'llmRequester.turnConfigs': Map<number, /* TurnRequestConfig — packages/agent-core-v2/src/agent/llmRequester/llmRequesterService.ts */ {
     readonly resolved: /* ProfileModelContext — packages/agent-core-v2/src/agent/profile/profile.ts */ {

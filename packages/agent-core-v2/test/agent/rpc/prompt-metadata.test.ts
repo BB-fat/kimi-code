@@ -7,8 +7,8 @@
  *   - an inline image-compression caption (harness metadata placed next to
  *     the image by prompt ingestion) never leaks into titles/lastPrompt,
  *     whether it is a standalone text part or merged into the user's text
- *   - natural-language prompts append to the bounded `prompts` metadata list
- *     (the title-generation input) while skill / plugin activations do not
+ *   - prompt metadata updates retain the latest sanitized prompt and derive
+ *     the easy title
  */
 
 import { describe, expect, it } from 'vitest';
@@ -89,32 +89,22 @@ describe('applyPromptMetadataUpdate', () => {
     return { target, readMeta: () => meta };
   }
 
-  it('records natural-language prompts into the bounded prompts list', async () => {
+  it('updates the latest prompt and derives the easy title', async () => {
     const { target, readMeta } = createTarget();
 
-    await applyPromptMetadataUpdate(target, '第一条', true);
-    await applyPromptMetadataUpdate(target, '第二条', true);
+    await applyPromptMetadataUpdate(target, '第一条');
+    await applyPromptMetadataUpdate(target, '第二条');
 
-    expect(readMeta().prompts).toEqual(['第一条', '第二条']);
     expect(readMeta().lastPrompt).toBe('第二条');
     expect(readMeta().title).toBe('第一条');
   });
 
-  it('does not record skill / plugin activations', async () => {
+  it('updates metadata for slash activations', async () => {
     const { target, readMeta } = createTarget();
 
     await applyPromptMetadataUpdate(target, '/compact');
 
     expect(readMeta().lastPrompt).toBe('/compact');
-    expect(readMeta().prompts).toBeUndefined();
-  });
-
-  it('stops recording once the prompt limit is reached', async () => {
-    const { target, readMeta } = createTarget({ prompts: ['一', '二', '三'] });
-
-    await applyPromptMetadataUpdate(target, '第四条', true);
-
-    expect(readMeta().prompts).toEqual(['一', '二', '三']);
-    expect(readMeta().lastPrompt).toBe('第四条');
+    expect(readMeta().title).toBe('/compact');
   });
 });

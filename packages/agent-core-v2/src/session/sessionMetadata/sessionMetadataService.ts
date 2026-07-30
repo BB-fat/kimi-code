@@ -170,7 +170,11 @@ export class SessionMetadata extends Disposable implements ISessionMetadata {
     const existing = await this.store.get<SessionMeta>(this.scope, META_KEY);
     if (existing !== undefined) {
       this.data = normalizeSessionMeta(existing, this.ctx.sessionId);
-      if (this.data.agents === undefined || this.data.custom === undefined) {
+      if (
+        this.data.agents === undefined ||
+        this.data.custom === undefined ||
+        Object.prototype.hasOwnProperty.call(existing, 'prompts')
+      ) {
         this.data = {
           ...this.data,
           agents: this.data.agents ?? {},
@@ -216,6 +220,9 @@ function recordEquals(a: AgentMeta['labels'], b: AgentMeta['labels']): boolean {
 }
 
 export function normalizeSessionMeta(raw: SessionMeta, sessionId: string): SessionMeta {
+  const normalized = { ...raw } as SessionMeta & { prompts?: unknown };
+  delete normalized.prompts;
+  const clean = normalized as SessionMeta;
   const legacy = raw as unknown as {
     createdAt?: unknown;
     updatedAt?: unknown;
@@ -223,27 +230,27 @@ export function normalizeSessionMeta(raw: SessionMeta, sessionId: string): Sessi
     customTitle?: unknown;
   };
   const cwd =
-    raw.cwd ?? (typeof legacy.workDir === 'string' && legacy.workDir.length > 0
+    clean.cwd ?? (typeof legacy.workDir === 'string' && legacy.workDir.length > 0
       ? legacy.workDir
       : undefined);
   const legacyCustomTitle =
     typeof legacy.customTitle === 'string' ? legacy.customTitle : undefined;
   const hasModernTitleState =
-    typeof raw.title === 'string' && typeof raw.isCustomTitle === 'boolean';
-  const title = hasModernTitleState ? raw.title : (legacyCustomTitle ?? raw.title);
+    typeof clean.title === 'string' && typeof clean.isCustomTitle === 'boolean';
+  const title = hasModernTitleState ? clean.title : (legacyCustomTitle ?? clean.title);
   const isCustomTitle = hasModernTitleState
-    ? raw.isCustomTitle
+    ? clean.isCustomTitle
     : legacyCustomTitle === undefined
-      ? raw.isCustomTitle
+      ? clean.isCustomTitle
       : true;
-  if (raw.version === SESSION_META_VERSION) {
-    if (cwd === raw.cwd && title === raw.title && isCustomTitle === raw.isCustomTitle) {
-      return raw;
+  if (clean.version === SESSION_META_VERSION) {
+    if (cwd === clean.cwd && title === clean.title && isCustomTitle === clean.isCustomTitle) {
+      return clean;
     }
-    return { ...raw, cwd, title, isCustomTitle };
+    return { ...clean, cwd, title, isCustomTitle };
   }
   return {
-    ...raw,
+    ...clean,
     id: sessionId,
     version: SESSION_META_VERSION,
     cwd,

@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vite
 import { OAuthConnectionError, OAuthUnauthorizedError } from '@moonshot-ai/kimi-code-oauth';
 
 import { DisposableStore, type IDisposable } from '#/_base/di/lifecycle';
+import { LifecycleScope, type IAgentScopeHandle } from '#/_base/di/scope';
 import { createServices, type TestInstantiationService } from '#/_base/di/test';
 import { Emitter } from '#/_base/event';
 import { IOAuthService } from '#/app/auth/auth';
@@ -25,13 +26,20 @@ import {
 } from '#/kosong/provider/provider';
 import { ISessionContext, makeSessionContext } from '#/session/sessionContext/sessionContext';
 import {
+  IAgentLifecycleService,
+  MAIN_AGENT_ID,
+} from '#/session/agentLifecycle/agentLifecycle';
+import {
+  IAgentTitlePromptSource,
+} from '#/session/sessionTitle/agentTitlePromptSource';
+import { ISessionTitleService } from '#/session/sessionTitle/sessionTitle';
+import { SessionTitleService } from '#/session/sessionTitle/sessionTitleService';
+import {
   ISessionMetadata,
   type SessionMeta,
   type SessionMetaPatch,
   type SessionMetadataChangedEvent,
 } from '#/session/sessionMetadata/sessionMetadata';
-import { ISessionTitleService } from '#/session/sessionTitle/sessionTitle';
-import { SessionTitleService } from '#/session/sessionTitle/sessionTitleService';
 import '#/kosong/provider/providers/kimi/kimi.contrib';
 
 import { registerLogServices } from '../../_base/log/stubs';
@@ -135,11 +143,13 @@ describe('SessionTitleService', () => {
   let fetchMock: Mock<(url: string, init?: RequestInit) => Promise<Response>>;
   let tokenError: Error | undefined;
   let resolvedOAuthRefs: Array<OAuthRef | undefined>;
+  let titlePrompts: readonly string[];
 
   beforeEach(() => {
     flagEnabled = true;
     tokenError = undefined;
     resolvedOAuthRefs = [];
+    titlePrompts = [];
     providers = { 'managed:kimi-code': MANAGED_PROVIDER };
     metadata = new FakeSessionMetadata();
     events = new FakeEventService();
@@ -167,6 +177,19 @@ describe('SessionTitleService', () => {
           }),
         );
         reg.defineInstance(ISessionMetadata, metadata);
+        const promptSource: IAgentTitlePromptSource = {
+          _serviceBrand: undefined,
+          firstUserPrompts: async (limit) => titlePrompts.slice(0, limit),
+        };
+        const mainAgent: IAgentScopeHandle = {
+          id: MAIN_AGENT_ID,
+          kind: LifecycleScope.Agent,
+          accessor: { get: <T>() => promptSource as T },
+          dispose: () => undefined,
+        };
+        reg.definePartialInstance(IAgentLifecycleService, {
+          get: () => mainAgent,
+        });
         reg.defineInstance(IEventService, events);
         reg.defineInstance(
           IFlagService,
@@ -198,7 +221,7 @@ describe('SessionTitleService', () => {
   });
 
   it('replaces the easy title with the generated one', async () => {
-    await metadata.update({ prompts: ['帮我看一下这个 Go 的 nil pointer 报错'] });
+    titlePrompts = ['帮我看一下这个 Go 的 nil pointer 报错'];
 
     const title = await ix.get(ISessionTitleService).generateTitle();
 
@@ -224,9 +247,7 @@ describe('SessionTitleService', () => {
   });
 
   it('composes the title input from the recorded prompts in order', async () => {
-    await metadata.update({
-      prompts: ['先帮我搭一个 Vite 项目', '加上路由', '现在配一下 ESLint'],
-    });
+    titlePrompts = ['先帮我搭一个 Vite 项目', '加上路由', '现在配一下 ESLint'];
 
     await ix.get(ISessionTitleService).generateTitle();
 
@@ -240,7 +261,7 @@ describe('SessionTitleService', () => {
   });
 
   it('truncates the composed title input to the total budget, keeping the head', async () => {
-    await metadata.update({ prompts: ['很长的输入'.repeat(400), '第二条'] });
+    titlePrompts = ['很长的输入'.repeat(400), '第二条'];
 
     await ix.get(ISessionTitleService).generateTitle();
 

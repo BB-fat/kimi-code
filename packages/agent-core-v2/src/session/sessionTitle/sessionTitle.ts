@@ -1,9 +1,8 @@
 /**
  * `sessionTitle` domain (L6) — session title generation contract.
  *
- * Defines the `ISessionTitleService` that (re)generates the session's title
- * on demand from its first prompts through the managed platform's
- * `chat_title` tool. Bound at Session scope — one instance per session.
+ * Defines the Session-scoped `ISessionTitleService` that (re)generates a
+ * session title from the main Agent's conversation history.
  */
 
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';

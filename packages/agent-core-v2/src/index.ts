@@ -92,6 +92,8 @@ export * from '#/session/sessionMetadata/sessionMetadata';
 export * from '#/session/sessionMetadata/sessionMetadataService';
 export * from '#/session/sessionActivity/sessionActivity';
 export * from '#/session/sessionActivity/sessionActivityService';
+export * from '#/session/sessionTitle/agentTitlePromptSource';
+import '#/session/sessionTitle/agentTitlePromptSourceService';
 export * from '#/session/sessionTitle/sessionTitle';
 export * from '#/session/sessionTitle/sessionTitleService';
 import '#/session/sessionTitle/flag';
