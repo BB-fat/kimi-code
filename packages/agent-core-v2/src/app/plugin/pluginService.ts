@@ -87,6 +87,10 @@ export class PluginService extends Disposable implements IPluginService {
       const record = await this.manager.install(input.source);
       const info = this.manager.info(record.id);
       if (info === undefined) throw new Error(`Plugin "${record.id}" missing right after install`);
+      // Mutations fire the same change event as an explicit reload so
+      // consumers (session skill catalogs, the capability shelf-install
+      // hook) converge on every install path, not just `/plugins reload`.
+      this.onDidReloadEmitter.fire({ added: [record.id], removed: [], errors: [] });
       return info;
     });
   }
@@ -94,6 +98,7 @@ export class PluginService extends Disposable implements IPluginService {
   setPluginEnabled(input: SetPluginEnabledInput): Promise<void> {
     return this.runSerializedOperation(async () => {
       await this.manager.setEnabled(input.id, input.enabled);
+      this.onDidReloadEmitter.fire({ added: [], removed: [], errors: [] });
     });
   }
 
@@ -106,6 +111,7 @@ export class PluginService extends Disposable implements IPluginService {
   removePlugin(input: RemovePluginInput): Promise<void> {
     return this.runSerializedOperation(async () => {
       await this.manager.remove(input.id);
+      this.onDidReloadEmitter.fire({ added: [], removed: [input.id], errors: [] });
     });
   }
 
