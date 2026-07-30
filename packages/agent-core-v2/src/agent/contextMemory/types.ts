@@ -50,6 +50,11 @@ export type ContextInjectionDisclosure =
       readonly renderGeneration: number;
       readonly fingerprint: string;
       readonly status: AgentsMdStatus;
+    }
+  | {
+      readonly kind: 'skills';
+      readonly renderGeneration: number;
+      readonly names: readonly string[];
     };
 
 export interface ShellCommandOrigin {

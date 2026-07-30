@@ -6,25 +6,32 @@
  * so a user editing AGENTS.md mid-session leaves the model following stale
  * rules; this provider injects the fresh content at the next step boundary
  * when it differs. Unlike skills, removals and content edits announce too —
- * a deleted rule fails silently, never on invocation. Baselines come from
- * typed reminder metadata or the persisted prompt disclosure, ordered by
- * render generation. The live content is read once and then only re-read when the
- * shared `pathWatch` subscription reports a candidate change — never
- * per step, so the step pipeline carries no filesystem IO (fake-timer retry
- * loops included); cwd changes re-arm the watch and force one re-read. Typed
- * reminder metadata and the persisted prompt disclosure provide the baseline.
- * Bound at Agent scope.
+ * a deleted rule fails silently, never on invocation. The provider runs only
+ * while the profile's rendered snapshot exists and matches the live cwd. The
+ * baseline prefers the typed disclosure on the newest surviving `agents_md`
+ * injection, then the persisted rendered snapshot, then a runtime seed kept
+ * in `agentState`: a profile whose snapshot declares no AGENTS.md disclosure
+ * is seeded with the first observed fingerprint (quietly), so a later
+ * creation, edit, or removal still announces. The live content is read once
+ * and then only re-read when the shared `pathWatch` subscription reports a
+ * candidate change — never per step, so the step pipeline carries no
+ * filesystem IO (fake-timer retry loops included); cwd changes re-arm the
+ * watch and force one re-read. Bound at Agent scope.
  */
 
 import { Disposable } from '#/_base/di/lifecycle';
 import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
+import { defineState } from '#/_base/state/stateRegistry';
 import {
   IAgentContextInjectorService,
   type ContextInjectionContext,
   type ContextInjectionResult,
 } from '#/agent/contextInjector/contextInjector';
-import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
-import type { ContextMessage } from '#/agent/contextMemory/types';
+import {
+  disclosureOfKind,
+  pickDisclosureBaseline,
+} from '#/agent/contextInjector/disclosureBaseline';
+import { IAgentStateService } from '#/agent/state/agentState';
 import type { AgentsMdStatus } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import { fingerprintDisclosureContent } from '#/app/agentProfileCatalog/profile-shared';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
@@ -44,6 +51,11 @@ const AGENTS_MD_INJECTION_VARIANT = 'agents_md';
 const CURRENT_BLOCK_START = '<current-agents-md>';
 const CURRENT_BLOCK_END = '</current-agents-md>';
 
+export const agentsMdReminderSeedKey = defineState<AgentsMdSeed | undefined>(
+  'agentsMdReminder.seed',
+  () => undefined,
+);
+
 export class AgentAgentsMdReminderService extends Disposable implements IAgentAgentsMdReminderService {
   declare readonly _serviceBrand: undefined;
 
@@ -55,14 +67,15 @@ export class AgentAgentsMdReminderService extends Disposable implements IAgentAg
 
   constructor(
     @IAgentContextInjectorService dynamicInjector: IAgentContextInjectorService,
-    @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
     @IAgentProfileService private readonly profile: IAgentProfileService,
+    @IAgentStateService private readonly states: IAgentStateService,
     @IHostFileSystem private readonly fs: IHostFileSystem,
     @IHostEnvironment private readonly env: IHostEnvironment,
     @IBootstrapService private readonly bootstrap: IBootstrapService,
     @IPathWatchService pathWatch: IPathWatchService,
   ) {
     super();
+    this.states.register(agentsMdReminderSeedKey);
     this.watcher = this._register(
       pathWatch.createWatch({ target: 'file' }, () => {
         this.changeVersion += 1;
@@ -74,7 +87,7 @@ export class AgentAgentsMdReminderService extends Disposable implements IAgentAg
   }
 
   private async reminder({
-    lastInjectedAt,
+    lastDisclosure,
   }: ContextInjectionContext): Promise<ContextInjectionResult | undefined> {
     try {
       let profileData = this.profile.data();
@@ -82,19 +95,31 @@ export class AgentAgentsMdReminderService extends Disposable implements IAgentAg
       const current = await this.currentContent();
       profileData = this.profile.data();
       if (profileData.environmentDisclosure?.cwd !== profileData.cwd) return undefined;
-      const baseline = this.baseline(lastInjectedAt);
-      if (
-        baseline === undefined ||
-        baseline.fingerprint === fingerprintDisclosureContent(current.content)
-      ) {
+      const renderGeneration = profileData.renderGeneration ?? 0;
+      const fingerprint = fingerprintDisclosureContent(current.content);
+      const baseline = pickDisclosureBaseline<AgentsMdDisclosure>(
+        disclosureOfKind(lastDisclosure, 'agents_md'),
+        this.contentFromProfile(),
+        this.seed(),
+      );
+      if (baseline === undefined) {
+        this.states.set(agentsMdReminderSeedKey, {
+          fingerprint,
+          status: current.status,
+          renderGeneration,
+          cwd: profileData.cwd,
+        });
+        return undefined;
+      }
+      if (baseline.fingerprint === fingerprint) {
         return undefined;
       }
       return {
         content: buildAgentsMdReminder(current.content),
         disclosure: {
           kind: 'agents_md',
-          renderGeneration: profileData.renderGeneration ?? 0,
-          fingerprint: fingerprintDisclosureContent(current.content),
+          renderGeneration,
+          fingerprint,
           status: current.status,
         },
       };
@@ -128,41 +153,13 @@ export class AgentAgentsMdReminderService extends Disposable implements IAgentAg
     try {
       const paths = await agentsMdCandidatePaths(
         { fs: this.fs, homeDir: this.env.homeDir },
-        this.bootstrap.homeDir,
         cwd,
+        this.bootstrap.homeDir,
       );
       if (cwd !== this.watchCwd) return;
       await this.watcher.setPaths(paths);
     } catch {
     }
-  }
-
-  private baseline(lastInjectedAt: number | null): AgentsMdDisclosure | undefined {
-    const history = this.contentFromHistory(lastInjectedAt);
-    const persisted = this.contentFromProfile();
-    if (
-      history !== undefined &&
-      (persisted === undefined || history.renderGeneration >= persisted.renderGeneration)
-    ) {
-      return history;
-    }
-    return persisted;
-  }
-
-  private contentFromHistory(lastInjectedAt: number | null): AgentsMdDisclosure | undefined {
-    const history = this.context.get();
-    const start =
-      lastInjectedAt === null ? history.length - 1 : Math.min(lastInjectedAt, history.length - 1);
-    for (let index = start; index >= 0; index--) {
-      const message: ContextMessage | undefined = history[index];
-      const disclosure =
-        message?.origin?.kind === 'injection' &&
-        message.origin.variant === AGENTS_MD_INJECTION_VARIANT
-          ? message.origin.disclosure
-          : undefined;
-      if (disclosure?.kind === 'agents_md') return disclosure;
-    }
-    return undefined;
   }
 
   private contentFromProfile(): AgentsMdDisclosure | undefined {
@@ -175,6 +172,12 @@ export class AgentAgentsMdReminderService extends Disposable implements IAgentAg
       renderGeneration: profileData.renderGeneration ?? 0,
     };
   }
+
+  private seed(): AgentsMdDisclosure | undefined {
+    const seed = this.states.get(agentsMdReminderSeedKey);
+    if (seed === undefined || seed.cwd !== this.profile.data().cwd) return undefined;
+    return seed;
+  }
 }
 
 interface AgentsMdCurrent {
@@ -186,6 +189,10 @@ interface AgentsMdDisclosure {
   readonly fingerprint: string;
   readonly status: AgentsMdStatus;
   readonly renderGeneration: number;
+}
+
+interface AgentsMdSeed extends AgentsMdDisclosure {
+  readonly cwd: string;
 }
 
 function buildAgentsMdReminder(current: string): string {

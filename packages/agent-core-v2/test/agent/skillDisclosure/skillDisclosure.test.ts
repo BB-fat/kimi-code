@@ -3,7 +3,9 @@
  *
  * Exercises the real Agent disclosure and reminder services through the
  * harness against a mutable in-memory catalog. The catalog is the only fake
- * boundary; names are never reconstructed from rendered Markdown. Run:
+ * boundary; baselines come from typed injection disclosures and the persisted
+ * generation-stamped floor, with human-readable listing parsing reserved for
+ * injections and prompts written before typed disclosures existed. Run:
  * `pnpm --filter @moonshot-ai/agent-core-v2 exec vitest run
  * test/agent/skillDisclosure/skillDisclosure.test.ts`.
  */
@@ -19,10 +21,6 @@ import { IAgentSkillDisclosureService } from '#/agent/skillDisclosure/skillDiscl
 
 import { stubSkill } from '../../app/skillCatalog/stubs';
 import { createTestAgent, skillServices, type TestAgentContext } from '../../harness';
-
-type InjectableContextInjector = {
-  inject(): Promise<void>;
-};
 
 function skillListReminders(context: IAgentContextMemoryService): readonly ContextMessage[] {
   return context.get().filter((message) => {
@@ -45,7 +43,7 @@ describe('skill disclosure (structured projection and reminder)', () => {
   let context: IAgentContextMemoryService;
   let ctx: TestAgentContext;
   let disclosure: IAgentSkillDisclosureService;
-  let injector: InjectableContextInjector;
+  let injector: IAgentContextInjectorService;
   let profile: IAgentProfileService;
 
   beforeEach(() => {
@@ -53,7 +51,7 @@ describe('skill disclosure (structured projection and reminder)', () => {
     ctx = createTestAgent(skillServices(catalog));
     context = ctx.get(IAgentContextMemoryService);
     disclosure = ctx.get(IAgentSkillDisclosureService);
-    injector = ctx.get(IAgentContextInjectorService) as unknown as InjectableContextInjector;
+    injector = ctx.get(IAgentContextInjectorService);
     profile = ctx.get(IAgentProfileService);
   });
 
@@ -76,7 +74,7 @@ describe('skill disclosure (structured projection and reminder)', () => {
 
   it('uses the surviving reminder as the baseline for a structured addition', async () => {
     catalog.registerBuiltinSkill(stubSkill('skill-a', { source: 'builtin' }));
-    disclosure.markDisclosed((await disclosure.resolve(true)).names);
+    disclosure.markDisclosed((await disclosure.resolve(true)).names, 1);
     catalog.registerBuiltinSkill(stubSkill('namespace:skill-b', { source: 'builtin' }));
 
     await injector.inject();
@@ -105,7 +103,7 @@ describe('skill disclosure (structured projection and reminder)', () => {
 
   it('reannounces an addition after context clear removes its reminder', async () => {
     catalog.registerBuiltinSkill(stubSkill('skill-a', { source: 'builtin' }));
-    disclosure.markDisclosed((await disclosure.resolve(true)).names);
+    disclosure.markDisclosed((await disclosure.resolve(true)).names, 1);
     catalog.registerBuiltinSkill(stubSkill('skill-b', { source: 'builtin' }));
     await injector.inject();
 
@@ -120,7 +118,7 @@ describe('skill disclosure (structured projection and reminder)', () => {
 
   it('reannounces an addition after undo removes its reminder', async () => {
     catalog.registerBuiltinSkill(stubSkill('skill-a', { source: 'builtin' }));
-    disclosure.markDisclosed((await disclosure.resolve(true)).names);
+    disclosure.markDisclosed((await disclosure.resolve(true)).names, 1);
     context.append({
       role: 'user',
       content: [{ type: 'text', text: 'turn' }],
@@ -150,7 +148,7 @@ describe('skill disclosure (structured projection and reminder)', () => {
 
   it('stays quiet when the active tool policy disables Skill', async () => {
     catalog.registerBuiltinSkill(stubSkill('skill-a', { source: 'builtin' }));
-    disclosure.markDisclosed((await disclosure.resolve(true)).names);
+    disclosure.markDisclosed((await disclosure.resolve(true)).names, 1);
     profile.update({ disallowedTools: ['Skill'] });
     catalog.registerBuiltinSkill(stubSkill('skill-b', { source: 'builtin' }));
 
@@ -161,7 +159,7 @@ describe('skill disclosure (structured projection and reminder)', () => {
   });
 
   it('ignores removals and description-only changes', async () => {
-    disclosure.markDisclosed(['skill-a', 'skill-b']);
+    disclosure.markDisclosed(['skill-a', 'skill-b'], 1);
     catalog.registerBuiltinSkill(
       stubSkill('skill-a', { source: 'builtin', description: 'reworded description' }),
     );
@@ -170,5 +168,82 @@ describe('skill disclosure (structured projection and reminder)', () => {
 
     expect(skillListReminders(context)).toHaveLength(0);
     expect(disclosure.disclosedNames()).toEqual(['skill-a', 'skill-b']);
+  });
+
+  it('records a typed disclosure on the fired reminder', async () => {
+    catalog.registerBuiltinSkill(stubSkill('skill-a', { source: 'builtin' }));
+    disclosure.markDisclosed((await disclosure.resolve(true)).names, 1);
+    catalog.registerBuiltinSkill(stubSkill('skill-b', { source: 'builtin' }));
+
+    await injector.inject();
+
+    const reminders = skillListReminders(context);
+    expect(reminders).toHaveLength(1);
+    expect(reminders[0]?.origin).toMatchObject({
+      kind: 'injection',
+      variant: 'skill_list',
+      disclosure: {
+        kind: 'skills',
+        renderGeneration: 1,
+        names: ['skill-a', 'skill-b'],
+      },
+    });
+  });
+
+  it('lets a newer render floor supersede a stale in-context reminder', async () => {
+    catalog.registerBuiltinSkill(stubSkill('skill-a', { source: 'builtin' }));
+    disclosure.markDisclosed((await disclosure.resolve(true)).names, 1);
+    catalog.registerBuiltinSkill(stubSkill('skill-b', { source: 'builtin' }));
+    await injector.inject();
+    expect(skillListReminders(context)).toHaveLength(1);
+
+    catalog.registerBuiltinSkill(stubSkill('skill-c', { source: 'builtin' }));
+    disclosure.markDisclosed((await disclosure.resolve(true)).names, 2);
+    profile.update({ systemPrompt: systemPromptWithSkills(catalog.getModelSkillListing()) });
+
+    await injector.inject();
+
+    expect(skillListReminders(context)).toHaveLength(1);
+  });
+
+  it('still baselines on a legacy text reminder without typed disclosure', async () => {
+    catalog.registerBuiltinSkill(stubSkill('skill-a', { source: 'builtin' }));
+    catalog.registerBuiltinSkill(stubSkill('skill-b', { source: 'builtin' }));
+    disclosure.markDisclosed(['skill-a'], 0);
+    context.append({
+      role: 'user',
+      content: [{ type: 'text', text: catalog.getModelSkillListing() }],
+      toolCalls: [],
+      origin: { kind: 'injection', variant: 'skill_list' },
+    });
+
+    await injector.inject();
+    expect(skillListReminders(context)).toHaveLength(1);
+
+    catalog.registerBuiltinSkill(stubSkill('skill-c', { source: 'builtin' }));
+    await injector.inject();
+
+    const reminders = skillListReminders(context);
+    expect(reminders).toHaveLength(2);
+    expect(messageText(reminders[1] as ContextMessage)).toContain('- skill-c:');
+  });
+
+  it('lets a render after a legacy text reminder supersede it', async () => {
+    catalog.registerBuiltinSkill(stubSkill('skill-a', { source: 'builtin' }));
+    disclosure.markDisclosed(['skill-a'], 0);
+    context.append({
+      role: 'user',
+      content: [{ type: 'text', text: catalog.getModelSkillListing() }],
+      toolCalls: [],
+      origin: { kind: 'injection', variant: 'skill_list' },
+    });
+
+    catalog.registerBuiltinSkill(stubSkill('skill-b', { source: 'builtin' }));
+    disclosure.markDisclosed((await disclosure.resolve(true)).names, 2);
+    profile.update({ systemPrompt: systemPromptWithSkills(catalog.getModelSkillListing()) });
+
+    await injector.inject();
+
+    expect(skillListReminders(context)).toHaveLength(1);
   });
 });

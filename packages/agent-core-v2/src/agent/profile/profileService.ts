@@ -301,7 +301,10 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       }),
     );
     if (snapshot.disclosedSkillNames !== undefined) {
-      this.skillDisclosure.markDisclosed(snapshot.disclosedSkillNames);
+      this.skillDisclosure.markDisclosed(
+        snapshot.disclosedSkillNames,
+        this.profileState.renderGeneration,
+      );
     }
     this.afterConfigDispatch({
       cwd: snapshot.cwd,
@@ -918,7 +921,10 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
 
   private recordSkillDisclosure(context: SystemPromptContext): void {
     if (context.disclosedSkillNames !== undefined) {
-      this.skillDisclosure.markDisclosed(context.disclosedSkillNames);
+      this.skillDisclosure.markDisclosed(
+        context.disclosedSkillNames,
+        this.profileState.renderGeneration,
+      );
     }
   }
 

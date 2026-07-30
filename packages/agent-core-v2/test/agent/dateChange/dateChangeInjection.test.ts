@@ -2,8 +2,9 @@
  * Scenario: `date_change` context injection announces calendar-date changes.
  *
  * Exercises the real provider through the harness injector: baselines come
- * from typed reminder metadata, then the persisted rendered-date snapshot.
- * Run: `pnpm --filter
+ * from typed reminder metadata, then the persisted rendered-date snapshot,
+ * then a runtime seed recorded on first observation for prompts that never
+ * disclose a date. Run: `pnpm --filter
  * @moonshot-ai/agent-core-v2 exec vitest run
  * test/agent/dateChange/dateChangeInjection.test.ts`.
  */
@@ -18,16 +19,27 @@ import type { EnvironmentDisclosureSnapshot } from '#/app/agentProfileCatalog/ag
 
 import { createTestAgent, type TestAgentContext } from '../../harness';
 
-type InjectableDynamicInjector = {
-  inject(): Promise<void>;
-};
-
 function localDateKey(date: Date): string {
   const year = date.getFullYear();
   const month = `${date.getMonth() + 1}`.padStart(2, '0');
   const day = `${date.getDate()}`.padStart(2, '0');
   return `${year}-${month}-${day}`;
 }
+
+describe('AgentDateChangeService', () => {
+  let ctx: TestAgentContext;
+  let context: IAgentContextMemoryService;
+  let injector: IAgentContextInjectorService;
+  let profile: IAgentProfileService;
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 6, 29, 12));
+    ctx = createTestAgent();
+    context = ctx.get(IAgentContextMemoryService);
+    injector = ctx.get(IAgentContextInjectorService);
+    profile = ctx.get(IAgentProfileService);
+  });
 
 function systemPromptWithDate(iso: string): string {
   return [
@@ -61,6 +73,18 @@ function updateSystemPromptWithDate(
   });
 }
 
+function updateSystemPromptWithoutDate(profile: IAgentProfileService): void {
+  const environment: EnvironmentDisclosureSnapshot = {
+    cwd: profile.data().cwd,
+    date: { disclosed: false },
+    agentsMd: { disclosed: false },
+  };
+  profile.update({
+    systemPrompt: 'You are a deterministic test agent.',
+    environmentDisclosure: environment,
+  });
+}
+
 function dateReminders(context: IAgentContextMemoryService): readonly ContextMessage[] {
   return context.get().filter((message) => {
     return message.origin?.kind === 'injection' && message.origin.variant === 'date_change';
@@ -72,21 +96,6 @@ function messageText(message: ContextMessage): string {
     .map((part) => (part.type === 'text' ? part.text : ''))
     .join('');
 }
-
-describe('AgentDateChangeService', () => {
-  let ctx: TestAgentContext;
-  let context: IAgentContextMemoryService;
-  let injector: InjectableDynamicInjector;
-  let profile: IAgentProfileService;
-
-  beforeEach(() => {
-    vi.useFakeTimers({ toFake: ['Date'] });
-    vi.setSystemTime(new Date(2026, 6, 29, 12));
-    ctx = createTestAgent();
-    context = ctx.get(IAgentContextMemoryService);
-    injector = ctx.get(IAgentContextInjectorService) as unknown as InjectableDynamicInjector;
-    profile = ctx.get(IAgentProfileService);
-  });
 
   afterEach(async () => {
     try {
@@ -228,9 +237,29 @@ describe('AgentDateChangeService', () => {
   });
 
   it('adopts today silently when the system prompt carries no date line', async () => {
+    updateSystemPromptWithoutDate(profile);
+
     await injector.inject();
 
     expect(dateReminders(context)).toHaveLength(0);
     expect(context.get()).toHaveLength(0);
+  });
+
+  it('announces a crossed midnight after the silent seed', async () => {
+    updateSystemPromptWithoutDate(profile);
+    await injector.inject();
+    expect(dateReminders(context)).toHaveLength(0);
+
+    vi.setSystemTime(new Date(2026, 6, 30, 12));
+    await injector.inject();
+
+    const reminders = dateReminders(context);
+    expect(reminders).toHaveLength(1);
+    expect(messageText(reminders[0] as ContextMessage)).toContain(
+      "Today's date is now 2026-07-30",
+    );
+
+    await injector.inject();
+    expect(dateReminders(context)).toHaveLength(1);
   });
 });

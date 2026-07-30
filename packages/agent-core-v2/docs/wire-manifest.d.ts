@@ -508,6 +508,7 @@ interface SkillActivatePayload {
 interface SkillDisclosureSetPayload {
   _name: 'skill.disclosure.set';
   names: string[];
+  renderGeneration?: number;
 }
 
 /**

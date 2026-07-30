@@ -2,8 +2,8 @@
  * `skillDisclosure` domain (L4) — `IAgentSkillDisclosureService` implementation.
  *
  * Reads structured model-facing skills from `sessionSkillCatalog`, normalizes
- * their identities, and persists the disclosed-name baseline through `wire`.
- * Bound at Agent scope.
+ * their identities, and persists the disclosed-name baseline plus its render
+ * generation through `wire`. Bound at Agent scope.
  */
 
 import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
@@ -13,6 +13,7 @@ import { IWireService } from '#/wire/wire';
 
 import {
   IAgentSkillDisclosureService,
+  type SkillDisclosureFloor,
   type SkillDisclosureSnapshot,
 } from './skillDisclosure';
 import { setDisclosedSkills, SkillDisclosureModel } from './skillDisclosureOps';
@@ -43,6 +44,13 @@ export class AgentSkillDisclosureService implements IAgentSkillDisclosureService
     return this.wire.getModel(SkillDisclosureModel).names;
   }
 
+  disclosedFloor(): SkillDisclosureFloor | undefined {
+    const state = this.wire.getModel(SkillDisclosureModel);
+    return state.names === undefined
+      ? undefined
+      : { names: state.names, renderGeneration: state.renderGeneration ?? 0 };
+  }
+
   legacyNames(systemPrompt: string): readonly string[] | undefined {
     if (!systemPrompt.includes('## Available skills')) return undefined;
     return this.listedNames(systemPrompt);
@@ -56,11 +64,11 @@ export class AgentSkillDisclosureService implements IAgentSkillDisclosureService
     return normalizeNames(names);
   }
 
-  markDisclosed(names: readonly string[]): void {
+  markDisclosed(names: readonly string[], renderGeneration: number): void {
     const normalized = normalizeNames(names);
     const current = this.disclosedNames();
     if (current !== undefined && sameNames(current, normalized)) return;
-    this.wire.dispatch(setDisclosedSkills({ names: normalized }));
+    this.wire.dispatch(setDisclosedSkills({ names: normalized, renderGeneration }));
   }
 }
 

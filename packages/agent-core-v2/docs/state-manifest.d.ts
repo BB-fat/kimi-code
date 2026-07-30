@@ -23,7 +23,7 @@
 // references become '(circular)', and class instances collapse to a '(ClassName)'
 // marker — the wire shape of an entry is the JSON projection of the type here.
 //
-// Index (Session: 28 keys · Agent: 68 keys)
+// Index (Session: 28 keys · Agent: 70 keys)
 //   Session
 //     cron.inFlight                             src/session/cron/sessionCronServiceImpl.ts
 //     cron.lastSeenAt                           src/session/cron/sessionCronServiceImpl.ts
@@ -59,9 +59,11 @@
 //     activityView.lastTurn                           src/agent/activityView/activityViewService.ts
 //     activityView.lifecycle                          src/agent/activityView/activityViewService.ts
 //     activityView.turn                               src/agent/activityView/activityViewService.ts
+//     agentsMdReminder.seed                           src/agent/profile/agentsMdReminderService.ts
 //     contextInjector.isNewTurn                       src/agent/contextInjector/contextInjectorService.ts
 //     contextProjector.lastRepairSignature            src/agent/contextProjector/contextProjectorService.ts
 //     contextSize.lastEmittedTokens                   src/agent/contextSize/contextSizeService.ts
+//     dateChange.seed                                 src/agent/dateChange/dateChangeService.ts
 //     externalHooks.stopHookContinuationUsed          src/agent/externalHooks/externalHooksService.ts
 //     faultInjection.armed                            src/agent/faultInjection/faultInjectionService.ts
 //     faultInjection.fired                            src/agent/faultInjection/faultInjectionService.ts
@@ -752,6 +754,10 @@ export interface SessionStateSnapshot {
         readonly renderGeneration: number;
         readonly fingerprint: string;
         readonly status: /* AgentsMdStatus — packages/agent-core-v2/src/app/agentProfileCatalog/agentProfileCatalog.ts */ 'missing' | 'empty' | 'present';
+      } | {
+        readonly kind: 'skills';
+        readonly renderGeneration: number;
+        readonly names: readonly string[];
       };
     } | /* ShellCommandOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
       readonly kind: 'shell_command';
@@ -839,6 +845,10 @@ export interface AgentStateSnapshot {
           readonly renderGeneration: number;
           readonly fingerprint: string;
           readonly status: /* AgentsMdStatus — packages/agent-core-v2/src/app/agentProfileCatalog/agentProfileCatalog.ts */ 'missing' | 'empty' | 'present';
+        } | {
+          readonly kind: 'skills';
+          readonly renderGeneration: number;
+          readonly names: readonly string[];
         };
       } | /* ShellCommandOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
         readonly kind: 'shell_command';
@@ -974,6 +984,10 @@ export interface AgentStateSnapshot {
         readonly renderGeneration: number;
         readonly fingerprint: string;
         readonly status: /* AgentsMdStatus — packages/agent-core-v2/src/app/agentProfileCatalog/agentProfileCatalog.ts */ 'missing' | 'empty' | 'present';
+      } | {
+        readonly kind: 'skills';
+        readonly renderGeneration: number;
+        readonly names: readonly string[];
       };
     } | /* ShellCommandOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
       readonly kind: 'shell_command';
@@ -1041,6 +1055,10 @@ export interface AgentStateSnapshot {
           readonly renderGeneration: number;
           readonly fingerprint: string;
           readonly status: /* AgentsMdStatus — packages/agent-core-v2/src/app/agentProfileCatalog/agentProfileCatalog.ts */ 'missing' | 'empty' | 'present';
+        } | {
+          readonly kind: 'skills';
+          readonly renderGeneration: number;
+          readonly names: readonly string[];
         };
       } | /* ShellCommandOrigin — packages/agent-core-v2/src/agent/contextMemory/types.ts */ {
         readonly kind: 'shell_command';
@@ -1106,6 +1124,12 @@ export interface AgentStateSnapshot {
   'contextProjector.lastRepairSignature': string | null;
   // src/agent/contextSize/contextSizeService.ts
   'contextSize.lastEmittedTokens': number;
+  // src/agent/dateChange/dateChangeService.ts
+  'dateChange.seed': /* DateDisclosure — packages/agent-core-v2/src/agent/dateChange/dateChangeService.ts */ {
+    readonly localDate: string;
+    readonly timeZone: string;
+    readonly renderGeneration: number;
+  } | undefined;
   // src/agent/externalHooks/externalHooksService.ts
   'externalHooks.stopHookContinuationUsed': boolean;
   // src/agent/faultInjection/faultInjectionService.ts
@@ -1138,7 +1162,7 @@ export interface AgentStateSnapshot {
   'llmRequester.lastConfigLogSignature': string | undefined;
   'llmRequester.mediaDegradedTurns': Set<number>;
   'llmRequester.mediaStrippedTurns': Map<number, /* MediaStripSnapshot — packages/agent-core-v2/src/agent/contextProjector/contextProjector.ts */ {
-    readonly "__@mediaStripSnapshotBrand@2724": undefined;
+    readonly "__@mediaStripSnapshotBrand@2783": undefined;
   }>;
   'llmRequester.turnConfigs': Map<number, /* TurnRequestConfig — packages/agent-core-v2/src/agent/llmRequester/llmRequesterService.ts */ {
     readonly resolved: /* ProfileModelContext — packages/agent-core-v2/src/agent/profile/profile.ts */ {
@@ -1214,6 +1238,13 @@ export interface AgentStateSnapshot {
   'permissionMode.lastMode': 'manual' | 'yolo' | 'auto' | undefined;
   // src/agent/plan/injection/planModeInjection.ts
   'plan.wasActive': boolean;
+  // src/agent/profile/agentsMdReminderService.ts
+  'agentsMdReminder.seed': /* AgentsMdSeed — packages/agent-core-v2/src/agent/profile/agentsMdReminderService.ts */ {
+    readonly cwd: string;
+    readonly fingerprint: string;
+    readonly status: /* AgentsMdStatus — packages/agent-core-v2/src/app/agentProfileCatalog/agentProfileCatalog.ts */ 'missing' | 'empty' | 'present';
+    readonly renderGeneration: number;
+  } | undefined;
   // src/agent/profile/profileService.ts
   'profile.activeToolNamesOverlay': readonly string[] | undefined;
   'profile.agentsMdWarning': string | undefined;

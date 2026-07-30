@@ -3,9 +3,12 @@
  *
  * Injects registered context providers through `loop` and `systemReminder`,
  * tracks their positions in `contextMemory` through `eventBus`, and reconciles
- * those positions after `wire` restoration. The plain-data `isNewTurn` flag is
- * registered into `agentState` (`IAgentStateService`) and read/written through
- * it; `entries` stays a plain instance field (its values hold provider
+ * those positions after `wire` restoration. Each provider call receives the
+ * newest surviving injection of its own variant (`lastInjection`) and the
+ * typed disclosure recorded on it (`lastDisclosure`), so providers never read
+ * context layout or position indexes themselves. The plain-data `isNewTurn`
+ * flag is registered into `agentState` (`IAgentStateService`) and read/written
+ * through it; `entries` stays a plain instance field (its values hold provider
  * functions, not plain data). Bound at Agent scope.
  */
 
@@ -105,14 +108,22 @@ export class AgentContextInjectorService extends Disposable implements IAgentCon
     await this.inject();
   }
 
-  private async inject(): Promise<void> {
+  async inject(): Promise<void> {
     const isNewTurn = this.isNewTurn;
     this.isNewTurn = false;
+    const history = this.context.get();
     for (const entry of this.entries) {
       const injectedPositions: readonly number[] = [...entry.positions];
+      const lastInjectedAt = injectedPositions.at(-1) ?? null;
+      const lastInjection = lastInjectedAt === null ? undefined : history[lastInjectedAt];
       const content = await entry.provider({
         injectedPositions,
-        lastInjectedAt: injectedPositions.at(-1) ?? null,
+        lastInjectedAt,
+        lastInjection,
+        lastDisclosure:
+          lastInjection?.origin?.kind === 'injection'
+            ? lastInjection.origin.disclosure
+            : undefined,
         isNewTurn,
       });
       if (!this.entries.has(entry)) continue;

@@ -236,6 +236,7 @@ function buildHost(key: string): {
     _serviceBrand: undefined,
     resolve: async () => ({ names: [], listing: '' }),
     disclosedNames: () => undefined,
+    disclosedFloor: () => undefined,
     legacyNames: () => undefined,
     listedNames: () => [],
     markDisclosed: () => {},

@@ -1,11 +1,13 @@
 import { createDecorator } from "#/_base/di/instantiation";
 import type { IDisposable } from "#/_base/di/lifecycle";
 import type { ContentPart } from "#/kosong/contract/message";
-import type { ContextInjectionDisclosure } from '#/agent/contextMemory/types';
+import type { ContextInjectionDisclosure, ContextMessage } from '#/agent/contextMemory/types';
 
 export interface ContextInjectionContext {
   readonly injectedPositions: readonly number[];
   readonly lastInjectedAt: number | null;
+  readonly lastInjection?: ContextMessage;
+  readonly lastDisclosure?: ContextInjectionDisclosure;
   readonly isNewTurn: boolean;
 }
 
@@ -31,6 +33,8 @@ export interface IAgentContextInjectorService {
     name: string,
     provider: ContextInjectionProvider,
   ): IDisposable;
+
+  inject(): Promise<void>;
 
   injectAfterCompaction(): Promise<void>;
 }

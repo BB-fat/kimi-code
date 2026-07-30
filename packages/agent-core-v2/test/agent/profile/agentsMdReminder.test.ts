@@ -4,8 +4,9 @@
  * Exercises the real provider through the harness injector against a fake
  * host fs whose AGENTS.md files the test edits and deletes, with a stub
  * `IPathWatchService` driving change events: baselines come from typed
- * reminder metadata and the persisted rendered snapshot. Edits, creations,
- * and removals all announce. Run: `pnpm --filter
+ * reminder metadata, the persisted rendered snapshot, and a runtime seed
+ * recorded on first observation for prompts that never disclose AGENTS.md.
+ * Edits, creations, and removals all announce. Run: `pnpm --filter
  * @moonshot-ai/agent-core-v2 exec vitest run
  * test/agent/profile/agentsMdReminder.test.ts`.
  */
@@ -32,10 +33,6 @@ import type { HostFileStat, IHostFileSystem } from '#/os/interface/hostFileSyste
 
 import { createFakeHostFs } from '../../tools/fixtures/fake-exec';
 import { appService, createTestAgent, execEnvServices, type TestAgentContext } from '../../harness';
-
-type InjectableDynamicInjector = {
-  inject(): Promise<void>;
-};
 
 const TEST_HOME_DIR = '/home/test';
 const BRAND_HOME_DIR = '/tmp/kimi-code-agent-app-v2-test';
@@ -113,6 +110,18 @@ function updateSystemPromptWithAgentsMd(
   });
 }
 
+function updateSystemPromptWithoutAgentsMd(profile: IAgentProfileService): void {
+  const environment: EnvironmentDisclosureSnapshot = {
+    cwd: profile.data().cwd,
+    date: { disclosed: false },
+    agentsMd: { disclosed: false },
+  };
+  profile.update({
+    systemPrompt: 'You are a deterministic test agent.',
+    environmentDisclosure: environment,
+  });
+}
+
 function agentsMdReminders(context: IAgentContextMemoryService): readonly ContextMessage[] {
   return context.get().filter((message) => {
     return message.origin?.kind === 'injection' && message.origin.variant === 'agents_md';
@@ -145,7 +154,7 @@ describe('AgentAgentsMdReminderService', () => {
   let watch: StubPathWatchService;
   let ctx: TestAgentContext;
   let context: IAgentContextMemoryService;
-  let injector: InjectableDynamicInjector;
+  let injector: IAgentContextInjectorService;
   let profile: IAgentProfileService;
   let readTextOverride: ((path: string) => Promise<string>) | undefined;
 
@@ -189,7 +198,7 @@ describe('AgentAgentsMdReminderService', () => {
       appService(IPathWatchService, watch),
     );
     context = ctx.get(IAgentContextMemoryService);
-    injector = ctx.get(IAgentContextInjectorService) as unknown as InjectableDynamicInjector;
+    injector = ctx.get(IAgentContextInjectorService);
     profile = ctx.get(IAgentProfileService);
   });
 
@@ -202,10 +211,29 @@ describe('AgentAgentsMdReminderService', () => {
   });
 
   it('stays quiet when no AGENTS.md exists and the prompt has no fenced block', async () => {
+    updateSystemPromptWithoutAgentsMd(profile);
+
     await injector.inject();
 
     expect(agentsMdReminders(context)).toHaveLength(0);
     expect(context.get()).toHaveLength(0);
+  });
+
+  it('announces a file created after the silent seed', async () => {
+    updateSystemPromptWithoutAgentsMd(profile);
+    await injector.inject();
+    expect(agentsMdReminders(context)).toHaveLength(0);
+
+    files.set(agentsMdPath, 'fresh rule');
+    watch.fire(agentsMdPath);
+    await injector.inject();
+
+    const reminders = agentsMdReminders(context);
+    expect(reminders).toHaveLength(1);
+    expect(messageText(reminders[0] as ContextMessage)).toContain('fresh rule');
+
+    await injector.inject();
+    expect(agentsMdReminders(context)).toHaveLength(1);
   });
 
   it('stays quiet when the file content matches the system prompt block', async () => {
