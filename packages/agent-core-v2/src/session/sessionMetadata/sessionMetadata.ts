@@ -29,6 +29,7 @@ export interface SessionMeta {
   readonly id: string;
   readonly version?: number;
   readonly title?: string;
+  readonly titleSource?: 'prompt' | 'generated' | 'custom';
   readonly isCustomTitle?: boolean;
   readonly lastPrompt?: string;
   readonly createdAt: number;

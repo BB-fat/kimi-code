@@ -22,6 +22,7 @@ export const sessionMetaSchema = z.object({
   id: z.string(),
   version: z.number().optional(),
   title: z.string().optional(),
+  titleSource: z.enum(['prompt', 'generated', 'custom']).optional(),
   isCustomTitle: z.boolean().optional(),
   lastPrompt: z.string().optional(),
   createdAt: z.number(),
@@ -37,6 +38,7 @@ export const sessionMetaSchema = z.object({
 export const sessionMetaPatchSchema = z.object({
   version: z.number().optional(),
   title: z.string().optional(),
+  titleSource: z.enum(['prompt', 'generated', 'custom']).optional(),
   isCustomTitle: z.boolean().optional(),
   lastPrompt: z.string().optional(),
   updatedAt: z.number().optional(),
@@ -52,6 +54,7 @@ export const sessionMetaKeySchema = z.enum([
   'id',
   'version',
   'title',
+  'titleSource',
   'isCustomTitle',
   'lastPrompt',
   'createdAt',

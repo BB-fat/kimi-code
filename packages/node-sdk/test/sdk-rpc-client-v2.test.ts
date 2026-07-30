@@ -4,16 +4,28 @@
  * Responsibilities: `getExperimentalFeatures` is migrated end-to-end; every
  * not-yet-migrated method fails loudly with `not_implemented` instead of
  * silently hitting a v1 core.
- * Wiring: real v2 engine bootstrapped on a temp KIMI_CODE_HOME; no provider calls.
+ * Wiring: real v2 engine bootstrapped on a temp KIMI_CODE_HOME; remote provider calls are stubbed.
  * Run: pnpm exec vitest run test/sdk-rpc-client-v2.test.ts
  */
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import {
+  FileTokenStorage,
+  resolveKimiCodeOAuthRef,
+  resolveKimiTokenStorageName,
+} from '@moonshot-ai/kimi-code-oauth';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { createKimiHarnessV2, ErrorCodes, KimiError, KimiHarness, SDKRpcClientV2 } from '#/index';
+import {
+  createKimiHarnessV2,
+  ErrorCodes,
+  KimiError,
+  KimiHarness,
+  SDKRpcClientV2,
+  type Event,
+} from '#/index';
 import { foldAgentWireReplay } from '#/v2/resume-replay';
 import { IHostRequestHeaders } from '@moonshot-ai/agent-core-v2';
 
@@ -67,6 +79,110 @@ describe('SDKRpcClientV2 (agent-core-v2 wiring MVP)', () => {
       }
     } finally {
       await harness.close();
+    }
+  });
+
+  it('emits one complete metadata event when a generated title is applied', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-'));
+    tempDirs.push(homeDir);
+    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-work-'));
+    tempDirs.push(workDir);
+    const titleBaseUrl = 'https://api.example.test/coding/v1';
+    const titleOAuthRef = resolveKimiCodeOAuthRef({ baseUrl: titleBaseUrl });
+    // Storage names strip the `oauth/` prefix (FileTokenStorage rejects
+    // namespaced keys); the engine resolves the same name when reading.
+    await new FileTokenStorage(join(homeDir, 'credentials')).save(
+      resolveKimiTokenStorageName({ oauthKey: titleOAuthRef.key }),
+      {
+        accessToken: 'test-access-token',
+        refreshToken: 'test-refresh-token',
+        expiresAt: Math.floor(Date.now() / 1000) + 3600,
+        scope: '',
+        tokenType: 'Bearer',
+        expiresIn: 3600,
+      },
+    );
+    await writeFile(
+      join(homeDir, 'config.toml'),
+      `
+default_model = "stub"
+
+[providers.stub]
+type = "openai"
+base_url = "https://model.example.test/v1"
+api_key = "stub"
+
+[models.stub]
+provider = "stub"
+model = "stub"
+max_context_size = 1000
+
+[providers."managed:kimi-code"]
+type = "kimi"
+base_url = "${titleBaseUrl}"
+
+[providers."managed:kimi-code".oauth]
+storage = "file"
+key = "${titleOAuthRef.key}"
+`,
+      'utf-8',
+    );
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url === 'https://api.example.test/coding/v1/tools') {
+        return new Response(JSON.stringify({ title: 'Generated title' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    const harness = createKimiHarnessV2({ homeDir, identity: TEST_IDENTITY });
+
+    try {
+      const session = await harness.createSession({ id: 'ses_generated_title_event', workDir });
+      await session.importContext(
+        'Generate a concise title for this session',
+        "session 'source-session'",
+      );
+      await expect(
+        harness.auth.getCachedAccessToken('managed:kimi-code', {
+          storage: titleOAuthRef.storage,
+          key: titleOAuthRef.key,
+        }),
+      ).resolves.toBe('test-access-token');
+      await expect(session.getContext()).resolves.toMatchObject({
+        history: [
+          expect.objectContaining({
+            role: 'user',
+            origin: { kind: 'user' },
+          }),
+        ],
+      });
+      const events: Event[] = [];
+      const unsubscribe = session.onEvent((event) => {
+        if (event.type === 'session.meta.updated' && event.title === 'Generated title') {
+          events.push(event);
+        }
+      });
+
+      await expect(harness.generateSessionTitle({ id: session.id })).resolves.toBe(
+        'Generated title',
+      );
+      unsubscribe();
+
+      expect(events).toEqual([
+        expect.objectContaining({
+          type: 'session.meta.updated',
+          sessionId: session.id,
+          agentId: 'main',
+          title: 'Generated title',
+          patch: { title: 'Generated title', isCustomTitle: false },
+        }),
+      ]);
+    } finally {
+      await harness.close();
+      fetchSpy.mockRestore();
     }
   });
 

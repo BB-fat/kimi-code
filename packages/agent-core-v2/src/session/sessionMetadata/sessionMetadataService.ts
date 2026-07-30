@@ -109,14 +109,14 @@ export class SessionMetadata extends Disposable implements ISessionMetadata {
   }
 
   async setTitle(title: string): Promise<void> {
-    await this.update({ title, isCustomTitle: true });
+    await this.update({ title, titleSource: 'custom', isCustomTitle: true });
   }
 
   async setGeneratedTitleIfUncustomized(title: string): Promise<boolean> {
     return this.enqueueUpdate(async () => {
       await this.ready;
       if (this.data.isCustomTitle === true) return false;
-      await this.applyUpdate({ title, isCustomTitle: false });
+      await this.applyUpdate({ title, titleSource: 'generated', isCustomTitle: false });
       return true;
     });
   }
@@ -174,11 +174,7 @@ export class SessionMetadata extends Disposable implements ISessionMetadata {
     const existing = await this.store.get<SessionMeta>(this.scope, META_KEY);
     if (existing !== undefined) {
       this.data = normalizeSessionMeta(existing, this.ctx.sessionId);
-      if (
-        this.data.agents === undefined ||
-        this.data.custom === undefined ||
-        Object.prototype.hasOwnProperty.call(existing, 'prompts')
-      ) {
+      if (this.data.agents === undefined || this.data.custom === undefined) {
         this.data = {
           ...this.data,
           agents: this.data.agents ?? {},
@@ -224,9 +220,7 @@ function recordEquals(a: AgentMeta['labels'], b: AgentMeta['labels']): boolean {
 }
 
 export function normalizeSessionMeta(raw: SessionMeta, sessionId: string): SessionMeta {
-  const normalized = { ...raw } as SessionMeta & { prompts?: unknown };
-  delete normalized.prompts;
-  const clean = normalized as SessionMeta;
+  const clean = { ...raw };
   const legacy = raw as unknown as {
     createdAt?: unknown;
     updatedAt?: unknown;

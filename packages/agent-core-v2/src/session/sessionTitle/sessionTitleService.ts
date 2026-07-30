@@ -8,10 +8,12 @@
  * Generation is on demand only: `generateTitle()` is the single entry point
  * (the kap-server route), gated by a managed Kimi Code OAuth login; any
  * failure degrades to keeping the current title, and a custom title set by
- * the user is never overwritten. Provider config comes from `provider`, the
- * bearer token from `auth`, host identity headers from `model`, prompt
- * history from `agentLifecycle`/`sessionTitle`, and logs through `log`.
- * Bound at Session scope.
+ * the user is never overwritten. An already-generated title is not
+ * regenerated unless forced, and the write-back is dropped when this scope
+ * is no longer the live session in `sessionLifecycle`. Provider config comes
+ * from `provider`, the bearer token from `auth`, host identity headers from
+ * `model`, prompt history from `agentLifecycle`/`sessionTitle`, and logs
+ * through `log`. Bound at Session scope.
  */
 
 import {
@@ -27,6 +29,7 @@ import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/
 import { ILogService } from '#/_base/log/log';
 import { IOAuthService } from '#/app/auth/auth';
 import { IEventService } from '#/app/event/event';
+import { ISessionLifecycleService } from '#/app/sessionLifecycle/sessionLifecycle';
 import { IAgentLifecycleService, MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
 import { IHostRequestHeaders } from '#/kosong/model/hostRequestHeaders';
 import { IProviderService } from '#/kosong/provider/provider';
@@ -53,15 +56,17 @@ export class SessionTitleService implements ISessionTitleService {
     @ISessionMetadata private readonly metadata: ISessionMetadata,
     @IAgentLifecycleService private readonly agentLifecycle: IAgentLifecycleService,
     @IEventService private readonly eventService: IEventService,
+    @ISessionLifecycleService private readonly sessionLifecycle: ISessionLifecycleService,
     @IProviderService private readonly providers: IProviderService,
     @IOAuthService private readonly oauth: IOAuthService,
     @IHostRequestHeaders private readonly hostHeaders: IHostRequestHeaders,
     @ILogService private readonly log: ILogService,
   ) {}
 
-  async generateTitle(): Promise<string | undefined> {
+  async generateTitle(options?: { readonly force?: boolean }): Promise<string | undefined> {
     const current = await this.metadata.read();
     if (hasCustomTitle(current)) return undefined;
+    if (current.titleSource === 'generated' && options?.force !== true) return undefined;
     const main = this.agentLifecycle.get(MAIN_AGENT_ID);
     const prompts =
       main === undefined
@@ -110,20 +115,34 @@ export class SessionTitleService implements ISessionTitleService {
       this.log.debug(`chat_title request unavailable: ${error.message}`);
       return undefined;
     }
-    const result = await fetchChatTitle(
-      kimiCodeToolsUrl(runtimeAuth.baseUrl),
-      token,
-      chatContent,
-      {
+    const requestTitle = (accessToken: string) =>
+      fetchChatTitle(kimiCodeToolsUrl(runtimeAuth.baseUrl), accessToken, chatContent, {
         headers: {
           ...parseKimiCodeCustomHeaders(),
           ...this.hostHeaders.headers,
           ...provider.customHeaders,
         },
-      },
-    );
+      });
+    let result = await requestTitle(token);
+    if (result.kind === 'error' && result.status === 401) {
+      // The cached token may be revoked server-side: force-refresh and retry once.
+      try {
+        token = await tokenProvider.getAccessToken({ force: true });
+      } catch (error) {
+        if (!(error instanceof OAuthError)) throw error;
+        this.log.debug(`chat_title request unavailable: ${error.message}`);
+        return undefined;
+      }
+      result = await requestTitle(token);
+    }
     if (result.kind !== 'ok') {
       this.log.debug(`chat_title request failed: ${result.message}`);
+      return undefined;
+    }
+    // A stale scope (the session was resumed or closed while the request was
+    // in flight) must not write its title back.
+    const live = this.sessionLifecycle.get(this.ctx.sessionId);
+    if (live === undefined || live.accessor.get(ISessionMetadata) !== this.metadata) {
       return undefined;
     }
     const title = result.title.slice(0, MAX_GENERATED_TITLE_LENGTH);

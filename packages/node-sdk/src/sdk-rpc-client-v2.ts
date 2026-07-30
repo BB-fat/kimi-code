@@ -393,6 +393,15 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    * registered handlers.
    */
   private readonly sessionWirings = new Map<string, SessionEventWiring>();
+  /**
+   * Sessions a public `resumeSession` handed to a caller and has not closed
+   * yet. The temporary resume→act→close paths (`generateSessionTitle`,
+   * `renameSession`) skip their cleanup close for these, even though their
+   * own resume merged into the same live handle — the residual
+   * sub-millisecond window (a public resume landing between the check and
+   * the close) is accepted deliberately.
+   */
+  private readonly externallyHeldSessions = new Set<string>();
   /** App-scope subscriptions (global event forwarding, lifecycle tracking), disposed in {@link close}. */
   private readonly appSubscriptions: IDisposable[] = [];
 
@@ -992,7 +1001,9 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     try {
       await this.klient.session(input.id).setTitle(title);
     } finally {
-      await this.sessionLifecycle.close(input.id);
+      if (!this.externallyHeldSessions.has(input.id)) {
+        await this.sessionLifecycle.close(input.id);
+      }
     }
   }
 
@@ -1007,14 +1018,16 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     input: GenerateSessionTitleInput,
   ): Promise<string | undefined> {
     if (this.sessionLifecycle.get(input.id) !== undefined) {
-      return this.klient.session(input.id).generateTitle();
+      return this.klient.session(input.id).generateTitle({ force: input.force });
     }
     const handle = await this.sessionLifecycle.resume(input.id);
     if (handle === undefined) throw SDKRpcClientV2.sessionNotFound(input.id);
     try {
-      return await this.klient.session(input.id).generateTitle();
+      return await this.klient.session(input.id).generateTitle({ force: input.force });
     } finally {
-      await this.sessionLifecycle.close(input.id);
+      if (!this.externallyHeldSessions.has(input.id)) {
+        await this.sessionLifecycle.close(input.id);
+      }
     }
   }
 
@@ -1047,6 +1060,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   override async closeSession(input: SessionIdRpcInput): Promise<void> {
     // v1's print-steer counters die with the Session object; drop ours too.
     this.printSteerStates.delete(input.sessionId);
+    this.externallyHeldSessions.delete(input.sessionId);
     await this.klient.session(input.sessionId).close();
   }
 
@@ -1063,6 +1077,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     const handle = await this.sessionLifecycle.resume(input.id);
     if (handle === undefined) throw SDKRpcClientV2.sessionNotFound(input.id);
     this.wireSession(handle);
+    this.externallyHeldSessions.add(input.id);
     // v1 re-resolves caller-provided additional dirs on every resume and
     // merges them over the workspace-local set; the engine's own resume only
     // restores the workspace-local ones.

@@ -73,7 +73,7 @@ const sessionMetaUpdatedSchema = z.object({
   patch: z.object({
     title: z.string().optional(),
     isCustomTitle: z.boolean().optional(),
-    lastPrompt: z.string(),
+    lastPrompt: z.string().optional(),
   }),
 });
 

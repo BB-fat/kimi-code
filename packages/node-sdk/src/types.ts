@@ -135,6 +135,7 @@ export interface RenameSessionInput {
 
 export interface GenerateSessionTitleInput {
   readonly id: string;
+  readonly force?: boolean;
 }
 
 export interface ResumeSessionInput {

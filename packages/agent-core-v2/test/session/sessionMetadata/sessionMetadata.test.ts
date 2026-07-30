@@ -93,7 +93,7 @@ describe('SessionMetadata', () => {
     const meta = ix.get(ISessionMetadata);
     await meta.setTitle('t');
     await meta.setArchived(true);
-    expect(await meta.read()).toMatchObject({ title: 't', archived: true });
+    expect(await meta.read()).toMatchObject({ title: 't', titleSource: 'custom', archived: true });
   });
 
   it('sets a generated title while the metadata remains uncustomized', async () => {
@@ -102,6 +102,7 @@ describe('SessionMetadata', () => {
     await expect(meta.setGeneratedTitleIfUncustomized('generated title')).resolves.toBe(true);
     await expect(meta.read()).resolves.toMatchObject({
       title: 'generated title',
+      titleSource: 'generated',
       isCustomTitle: false,
     });
   });
@@ -166,26 +167,6 @@ describe('SessionMetadata', () => {
     expect(healed.agents).toEqual({});
     expect(healed.custom).toEqual({});
     expect(healed.updatedAt).toBe(1700000000000);
-  });
-
-  it('removes the retired prompts field from persisted metadata', async () => {
-    const store = ix.get(IAtomicDocumentStore);
-    await store.set(META_SCOPE, 'state.json', {
-      id: 's1',
-      version: 2,
-      createdAt: 1700000000000,
-      updatedAt: 1700000000000,
-      archived: false,
-      agents: {},
-      custom: {},
-      prompts: ['第一条', '第二条'],
-    });
-
-    const meta = ix.get(ISessionMetadata);
-    expect(await meta.read()).not.toHaveProperty('prompts');
-
-    const fresh = createFreshMetadata(ix);
-    expect(await fresh.read()).not.toHaveProperty('prompts');
   });
 
   it('normalizes the legacy customTitle field before callers read metadata', async () => {

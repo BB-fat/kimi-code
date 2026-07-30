@@ -12,11 +12,17 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vite
 import { OAuthConnectionError, OAuthUnauthorizedError } from '@moonshot-ai/kimi-code-oauth';
 
 import { DisposableStore, type IDisposable } from '#/_base/di/lifecycle';
-import { LifecycleScope, type IAgentScopeHandle } from '#/_base/di/scope';
+import type { ServiceIdentifier } from '#/_base/di/instantiation';
+import {
+  LifecycleScope,
+  type IAgentScopeHandle,
+  type ISessionScopeHandle,
+} from '#/_base/di/scope';
 import { createServices, type TestInstantiationService } from '#/_base/di/test';
 import { Emitter } from '#/_base/event';
 import { IOAuthService } from '#/app/auth/auth';
 import { type DomainEvent, IEventService } from '#/app/event/event';
+import { ISessionLifecycleService } from '#/app/sessionLifecycle/sessionLifecycle';
 import { HostRequestHeaders, IHostRequestHeaders } from '#/kosong/model/hostRequestHeaders';
 import {
   IProviderService,
@@ -94,12 +100,12 @@ class FakeSessionMetadata implements ISessionMetadata {
   }
 
   setTitle(title: string): Promise<void> {
-    return this.update({ title, isCustomTitle: true });
+    return this.update({ title, titleSource: 'custom', isCustomTitle: true });
   }
 
   async setGeneratedTitleIfUncustomized(title: string): Promise<boolean> {
     if (this.meta.isCustomTitle === true) return false;
-    await this.update({ title, isCustomTitle: false });
+    await this.update({ title, titleSource: 'generated', isCustomTitle: false });
     return true;
   }
 
@@ -131,6 +137,20 @@ function createPendingFetch() {
   };
 }
 
+function makeLiveSessionHandle(meta: ISessionMetadata): ISessionScopeHandle {
+  return {
+    id: SESSION_ID,
+    kind: LifecycleScope.Session,
+    accessor: {
+      get: <T>(id: ServiceIdentifier<T>) => {
+        if (id === ISessionMetadata) return meta as T;
+        throw new Error(`unexpected service ${String(id)}`);
+      },
+    },
+    dispose: () => undefined,
+  };
+}
+
 describe('SessionTitleService', () => {
   let disposables: DisposableStore;
   let ix: TestInstantiationService;
@@ -139,15 +159,21 @@ describe('SessionTitleService', () => {
   let providers: Record<string, ProviderConfig>;
   let fetchMock: Mock<(url: string, init?: RequestInit) => Promise<Response>>;
   let tokenError: Error | undefined;
+  let forceTokenError: Error | undefined;
   let resolvedOAuthRefs: Array<OAuthRef | undefined>;
   let titlePrompts: readonly string[];
+  let liveSession: ISessionScopeHandle | undefined;
+  let tokenCalls: boolean[];
 
   beforeEach(() => {
     tokenError = undefined;
+    forceTokenError = undefined;
     resolvedOAuthRefs = [];
     titlePrompts = [];
+    tokenCalls = [];
     providers = { 'managed:kimi-code': MANAGED_PROVIDER };
     metadata = new FakeSessionMetadata();
+    liveSession = makeLiveSessionHandle(metadata);
     events = new FakeEventService();
     fetchMock = vi.fn<(url: string, init?: RequestInit) => Promise<Response>>(
       async () =>
@@ -187,13 +213,20 @@ describe('SessionTitleService', () => {
           get: () => mainAgent,
         });
         reg.defineInstance(IEventService, events);
+        reg.definePartialInstance(ISessionLifecycleService, {
+          get: () => liveSession,
+        });
         reg.defineInstance(IProviderService, stubProviderService(providers));
         reg.definePartialInstance(IOAuthService, {
           resolveTokenProvider: (_provider, oauthRef) => {
             resolvedOAuthRefs.push(oauthRef);
             return {
-              getAccessToken: async () => {
+              getAccessToken: async (options) => {
+                tokenCalls.push(options?.force === true);
                 if (tokenError !== undefined) throw tokenError;
+                if (options?.force === true && forceTokenError !== undefined) {
+                  throw forceTokenError;
+                }
                 return 'test-token';
               },
             };
@@ -220,6 +253,7 @@ describe('SessionTitleService', () => {
     expect(title).toBe('生成的标题');
     expect(metadata.meta.title).toBe('生成的标题');
     expect(metadata.meta.isCustomTitle).toBe(false);
+    expect(metadata.meta.titleSource).toBe('generated');
 
     const [, init] = fetchMock.mock.calls[0]!;
     expect(JSON.parse(init?.body as string)).toEqual({
@@ -298,6 +332,58 @@ describe('SessionTitleService', () => {
     expect(metadata.meta.isCustomTitle).toBe(true);
   });
 
+  it('skips generation when the current title was already generated', async () => {
+    await metadata.setGeneratedTitleIfUncustomized('已生成的标题');
+    titlePrompts = ['hello'];
+
+    await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(metadata.meta.title).toBe('已生成的标题');
+  });
+
+  it('regenerates a generated title when forced', async () => {
+    await metadata.setGeneratedTitleIfUncustomized('已生成的标题');
+    titlePrompts = ['hello'];
+
+    await expect(ix.get(ISessionTitleService).generateTitle({ force: true })).resolves.toBe(
+      '生成的标题',
+    );
+    expect(metadata.meta.title).toBe('生成的标题');
+    expect(metadata.meta.titleSource).toBe('generated');
+  });
+
+  it('never overwrites a custom title even when forced', async () => {
+    await metadata.setTitle('user 取的标题');
+    titlePrompts = ['hello'];
+
+    await expect(
+      ix.get(ISessionTitleService).generateTitle({ force: true }),
+    ).resolves.toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(metadata.meta.title).toBe('user 取的标题');
+  });
+
+  it('drops the write-back when the session scope was superseded mid-flight', async () => {
+    const applySpy = vi.spyOn(metadata, 'setGeneratedTitleIfUncustomized');
+    titlePrompts = ['hello'];
+    liveSession = makeLiveSessionHandle(new FakeSessionMetadata());
+
+    await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(applySpy).not.toHaveBeenCalled();
+    expect(metadata.meta.title).toBeUndefined();
+  });
+
+  it('drops the write-back while the session is still resuming', async () => {
+    const applySpy = vi.spyOn(metadata, 'setGeneratedTitleIfUncustomized');
+    titlePrompts = ['hello'];
+    liveSession = undefined;
+
+    await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
+    expect(applySpy).not.toHaveBeenCalled();
+    expect(metadata.meta.title).toBeUndefined();
+  });
+
   it('keeps the current title when the backend request fails', async () => {
     fetchMock.mockImplementationOnce(async () => new Response('', { status: 500 }));
     titlePrompts = ['hello'];
@@ -305,6 +391,38 @@ describe('SessionTitleService', () => {
 
     await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
     expect(metadata.meta.title).toBe('hello');
+    expect(tokenCalls).toEqual([false]);
+  });
+
+  it('retries once with a force-refreshed token on a 401', async () => {
+    fetchMock.mockImplementationOnce(async () => new Response('', { status: 401 }));
+    titlePrompts = ['hello'];
+
+    await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBe('生成的标题');
+    expect(metadata.meta.title).toBe('生成的标题');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(tokenCalls).toEqual([false, true]);
+  });
+
+  it('gives up when the 401 persists after the force refresh', async () => {
+    fetchMock.mockImplementation(async () => new Response('', { status: 401 }));
+    titlePrompts = ['hello'];
+
+    await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
+    expect(metadata.meta.title).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(tokenCalls).toEqual([false, true]);
+  });
+
+  it('degrades when the force refresh after a 401 fails', async () => {
+    fetchMock.mockImplementationOnce(async () => new Response('', { status: 401 }));
+    forceTokenError = new OAuthUnauthorizedError('refresh rejected');
+    titlePrompts = ['hello'];
+
+    await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
+    expect(metadata.meta.title).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(tokenCalls).toEqual([false, true]);
   });
 
   it('returns unavailable when the OAuth token is missing or revoked', async () => {
