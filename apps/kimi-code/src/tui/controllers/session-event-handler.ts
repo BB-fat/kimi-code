@@ -165,6 +165,7 @@ export class SessionEventHandler {
   private queuedGoalPromotionInFlight = false;
   private queuedGoalPromotionTimer: ReturnType<typeof setTimeout> | undefined;
   private titleGenerationDisabled = false;
+  private titleGenerationEpoch = 0;
 
   resetRuntimeState(): void {
     this.backgroundTasks.clear();
@@ -183,6 +184,7 @@ export class SessionEventHandler {
     this.queuedGoalPromotionPending = false;
     this.queuedGoalPromotionInFlight = false;
     this.clearQueuedGoalPromotionTimer();
+    this.titleGenerationEpoch += 1;
     this.titleGenerationDisabled = false;
     this.stopAllMcpServerStatusSpinners();
   }
@@ -407,11 +409,16 @@ export class SessionEventHandler {
     if (this.titleGenerationDisabled) return;
     const { sessionId } = this.host.state.appState;
     if (sessionId.length === 0) return;
+    const epoch = this.titleGenerationEpoch;
+    const isCurrentGeneration = () =>
+      epoch === this.titleGenerationEpoch && sessionId === this.host.state.appState.sessionId;
     void this.host.harness.generateSessionTitle({ id: sessionId }).then(
       (title) => {
+        if (!isCurrentGeneration()) return;
         if (title !== undefined) this.titleGenerationDisabled = true;
       },
       () => {
+        if (!isCurrentGeneration()) return;
         this.titleGenerationDisabled = true;
       },
     );

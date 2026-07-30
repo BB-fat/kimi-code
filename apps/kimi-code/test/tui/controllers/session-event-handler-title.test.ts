@@ -60,10 +60,10 @@ function makeHost(options: { sessionTitle?: string | null; generateTitle?: () =>
   return { host: host as any, harness };
 }
 
-function turnEndedEvent() {
+function turnEndedEvent(sessionId = 's1') {
   return {
     type: 'turn.ended',
-    sessionId: 's1',
+    sessionId,
     agentId: 'main',
     turnId: 1,
     reason: 'completed',
@@ -130,6 +130,44 @@ describe('session auto title generation', () => {
 
     handler.resetRuntimeState();
     handler.handleEvent(turnEndedEvent(), vi.fn());
+    expect(harness.generateSessionTitle).toHaveBeenCalledTimes(2);
+  });
+
+  it('ignores a generated title from the previous session after runtime reset', async () => {
+    let resolveTitle: ((title: string | undefined) => void) | undefined;
+    const pendingTitle = new Promise<string | undefined>((resolve) => {
+      resolveTitle = resolve;
+    });
+    const { host, harness } = makeHost();
+    harness.generateSessionTitle.mockReturnValueOnce(pendingTitle);
+    const handler = new SessionEventHandler(host);
+
+    handler.handleEvent(turnEndedEvent('s1'), vi.fn());
+    host.state.appState.sessionId = 's2';
+    handler.resetRuntimeState();
+    resolveTitle?.('s1 generated title');
+    await flushMicrotasks();
+    handler.handleEvent(turnEndedEvent('s2'), vi.fn());
+
+    expect(harness.generateSessionTitle).toHaveBeenCalledTimes(2);
+    expect(harness.generateSessionTitle).toHaveBeenLastCalledWith({ id: 's2' });
+  });
+
+  it('ignores a rejection from the previous runtime after same-session reset', async () => {
+    let rejectTitle: ((error: Error) => void) | undefined;
+    const pendingTitle = new Promise<string | undefined>((_resolve, reject) => {
+      rejectTitle = reject;
+    });
+    const { host, harness } = makeHost();
+    harness.generateSessionTitle.mockReturnValueOnce(pendingTitle);
+    const handler = new SessionEventHandler(host);
+
+    handler.handleEvent(turnEndedEvent(), vi.fn());
+    handler.resetRuntimeState();
+    rejectTitle?.(new Error('stale request failed'));
+    await flushMicrotasks();
+    handler.handleEvent(turnEndedEvent(), vi.fn());
+
     expect(harness.generateSessionTitle).toHaveBeenCalledTimes(2);
   });
 });
