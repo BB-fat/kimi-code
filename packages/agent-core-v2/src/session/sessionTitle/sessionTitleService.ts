@@ -6,13 +6,12 @@
  * `chat_title` endpoint, persists it through
  * `sessionMetadata`, and rebroadcasts `session.meta.updated`.
  * Generation is on demand only: `generateTitle()` is the single entry point
- * (the kap-server route), gated by the `auto-title` experimental flag and a
- * managed Kimi Code OAuth login; any failure degrades to keeping the current
- * title, and a custom title set by the user is never overwritten. Provider
- * config comes from `provider`, the bearer token from `auth`, host identity
- * headers from `model`, gating from `flag`, prompt history from
- * `agentLifecycle`/`sessionTitle`, and logs through `log`. Bound at Session
- * scope.
+ * (the kap-server route), gated by a managed Kimi Code OAuth login; any
+ * failure degrades to keeping the current title, and a custom title set by
+ * the user is never overwritten. Provider config comes from `provider`, the
+ * bearer token from `auth`, host identity headers from `model`, prompt
+ * history from `agentLifecycle`/`sessionTitle`, and logs through `log`.
+ * Bound at Session scope.
  */
 
 import {
@@ -28,7 +27,6 @@ import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/
 import { ILogService } from '#/_base/log/log';
 import { IOAuthService } from '#/app/auth/auth';
 import { IEventService } from '#/app/event/event';
-import { IFlagService } from '#/app/flag/flag';
 import { IAgentLifecycleService, MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
 import { IHostRequestHeaders } from '#/kosong/model/hostRequestHeaders';
 import { IProviderService } from '#/kosong/provider/provider';
@@ -37,7 +35,6 @@ import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 
 import { IAgentTitlePromptSource } from './agentTitlePromptSource';
-import { AUTO_TITLE_FLAG_ID } from './flag';
 import { ISessionTitleService } from './sessionTitle';
 
 const MAX_GENERATED_TITLE_LENGTH = 200;
@@ -56,7 +53,6 @@ export class SessionTitleService implements ISessionTitleService {
     @ISessionMetadata private readonly metadata: ISessionMetadata,
     @IAgentLifecycleService private readonly agentLifecycle: IAgentLifecycleService,
     @IEventService private readonly eventService: IEventService,
-    @IFlagService private readonly flags: IFlagService,
     @IProviderService private readonly providers: IProviderService,
     @IOAuthService private readonly oauth: IOAuthService,
     @IHostRequestHeaders private readonly hostHeaders: IHostRequestHeaders,
@@ -64,7 +60,6 @@ export class SessionTitleService implements ISessionTitleService {
   ) {}
 
   async generateTitle(): Promise<string | undefined> {
-    if (!this.flags.enabled(AUTO_TITLE_FLAG_ID)) return undefined;
     const current = await this.metadata.read();
     if (hasCustomTitle(current)) return undefined;
     const main = this.agentLifecycle.get(MAIN_AGENT_ID);

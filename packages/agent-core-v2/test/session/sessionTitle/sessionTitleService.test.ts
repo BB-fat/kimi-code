@@ -17,7 +17,6 @@ import { createServices, type TestInstantiationService } from '#/_base/di/test';
 import { Emitter } from '#/_base/event';
 import { IOAuthService } from '#/app/auth/auth';
 import { type DomainEvent, IEventService } from '#/app/event/event';
-import { IFlagService } from '#/app/flag/flag';
 import { HostRequestHeaders, IHostRequestHeaders } from '#/kosong/model/hostRequestHeaders';
 import {
   IProviderService,
@@ -43,7 +42,6 @@ import {
 import '#/kosong/provider/providers/kimi/kimi.contrib';
 
 import { registerLogServices } from '../../_base/log/stubs';
-import { stubFlag } from '../../app/flag/stubs';
 import { stubProviderService } from '../../app/provider/stubs';
 
 const SESSION_ID = 'sess-1';
@@ -138,7 +136,6 @@ describe('SessionTitleService', () => {
   let ix: TestInstantiationService;
   let events: FakeEventService;
   let metadata: FakeSessionMetadata;
-  let flagEnabled: boolean;
   let providers: Record<string, ProviderConfig>;
   let fetchMock: Mock<(url: string, init?: RequestInit) => Promise<Response>>;
   let tokenError: Error | undefined;
@@ -146,7 +143,6 @@ describe('SessionTitleService', () => {
   let titlePrompts: readonly string[];
 
   beforeEach(() => {
-    flagEnabled = true;
     tokenError = undefined;
     resolvedOAuthRefs = [];
     titlePrompts = [];
@@ -191,10 +187,6 @@ describe('SessionTitleService', () => {
           get: () => mainAgent,
         });
         reg.defineInstance(IEventService, events);
-        reg.defineInstance(
-          IFlagService,
-          stubFlag(() => flagEnabled),
-        );
         reg.defineInstance(IProviderService, stubProviderService(providers));
         reg.definePartialInstance(IOAuthService, {
           resolveTokenProvider: (_provider, oauthRef) => {
@@ -410,13 +402,6 @@ describe('SessionTitleService', () => {
     await expect(first).resolves.toBe('生成的标题');
     await expect(second).resolves.toBe('生成的标题');
     expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-
-  it('returns unavailable without calling the backend when the flag is off', async () => {
-    flagEnabled = false;
-
-    await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
-    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('returns unavailable without calling the backend when no prompt was seen', async () => {

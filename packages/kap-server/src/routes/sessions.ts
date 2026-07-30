@@ -634,7 +634,7 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
           reply.send(
             errEnvelope(
               ErrorCode.SESSION_TITLE_UNAVAILABLE,
-              'session title generation is unavailable (auto-title flag off, no managed OAuth login, no prompt yet, or the backend request failed)',
+              'session title generation is unavailable (no managed OAuth login, no prompt yet, or the backend request failed)',
               req.id,
             ),
           );
