@@ -45,9 +45,10 @@ export interface MetaRouteOptions {
   /**
    * Resolves the effective experimental-flag map (flag id → enabled) at
    * request time. Backed by `IFlagService.snapshot()` in production; tests may
-   * stub it.
+   * stub it. May return a promise — the handler awaits it, so flag state
+   * always reflects the fully loaded config (never pre-load defaults).
    */
-  readonly getExperimentalFlags: () => Record<string, boolean>;
+  readonly getExperimentalFlags: () => Record<string, boolean> | Promise<Record<string, boolean>>;
 }
 
 export function registerMetaRoute(app: RouteHost, opts: MetaRouteOptions): void {
@@ -79,7 +80,7 @@ export function registerMetaRoute(app: RouteHost, opts: MetaRouteOptions): void 
     async (req, reply) => {
       const data: MetaResponse = {
         ...staticData,
-        experimental_flags: opts.getExperimentalFlags(),
+        experimental_flags: await opts.getExperimentalFlags(),
       };
       reply.send(okEnvelope(data, req.id));
     },

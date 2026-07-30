@@ -5,7 +5,7 @@
  * master env, the `[experimental]` config section, defaults).
  */
 
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -48,8 +48,11 @@ describe('/api/v1/meta experimental_flags', () => {
     }
   });
 
-  async function boot(): Promise<string> {
+  async function boot(toml?: string): Promise<string> {
     home = await mkdtemp(join(tmpdir(), 'kimi-server-v2-meta-'));
+    if (toml !== undefined) {
+      await writeFile(join(home, 'config.toml'), toml, 'utf-8');
+    }
     server = await startServer({
       hostIdentity: TEST_HOST_IDENTITY,
       host: '127.0.0.1',
@@ -73,6 +76,16 @@ describe('/api/v1/meta experimental_flags', () => {
     const base = await boot();
     const flags = await getMetaFlags(base);
     expect(flags['secondary-model']).toBe(false);
+  });
+
+  it('reports a config-enabled flag from the very first response', async () => {
+    // Regression for the startup race: FlagService reads the `[experimental]`
+    // section from a config that loads asynchronously, so the handler awaits
+    // IConfigService.ready before snapshotting — a persisted flag must be
+    // visible even to the earliest request.
+    const base = await boot('[experimental]\nsecondary-model = true\n');
+    const flags = await getMetaFlags(base);
+    expect(flags['secondary-model']).toBe(true);
   });
 
   it('reflects a flag enabled via its KIMI_CODE_EXPERIMENTAL_* env var', async () => {
