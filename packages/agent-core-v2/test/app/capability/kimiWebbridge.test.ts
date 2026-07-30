@@ -200,9 +200,13 @@ describe('kimi-webbridge entry', () => {
 
   it('installs end-to-end: download, start-if-down, plugin wiring, un-shadow', async () => {
     const kimiHome = path.join(root, 'kimi-home');
-    // Pre-existing user-source skill from the official installer — must be removed.
+    const userHome = path.join(root, 'user-home');
+    // Pre-existing user-source skills from the official installer / manual
+    // copies — both user dirs must be removed (either would shadow the plugin).
     await mkdir(path.join(kimiHome, 'skills', 'kimi-webbridge'), { recursive: true });
     await writeFile(path.join(kimiHome, 'skills', 'kimi-webbridge', 'SKILL.md'), 'old');
+    await mkdir(path.join(userHome, '.agents', 'skills', 'kimi-webbridge'), { recursive: true });
+    await writeFile(path.join(userHome, '.agents', 'skills', 'kimi-webbridge', 'SKILL.md'), 'old');
 
     const plugins = fakePlugins([]);
     const host = fakeHostProcess();
@@ -229,8 +233,9 @@ describe('kimi-webbridge entry', () => {
     expect(plugins.installs).toEqual([
       'https://code.kimi.com/kimi-code/plugins/official/kimi-webbridge.zip',
     ]);
-    // User-source shadow removed.
+    // User-source shadows removed from BOTH user dirs.
     await expect(access(path.join(kimiHome, 'skills', 'kimi-webbridge'))).rejects.toThrow();
+    await expect(access(path.join(userHome, '.agents', 'skills', 'kimi-webbridge'))).rejects.toThrow();
     // Progress reported download steps.
     expect(reports[0]).toEqual(['download', 0]);
     expect(reports.some(([step]) => step === 'daemon')).toBe(true);

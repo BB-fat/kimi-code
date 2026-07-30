@@ -13,11 +13,13 @@
  * single daemon.
  *
  * Skill-source shadowing: a user who previously ran the official install
- * script has the skill at `~/.kimi-code/skills/kimi-webbridge/` (user
- * source, priority 20) which SHADOWS the plugin copy (priority 5). Install
- * therefore removes that stale user-source copy — it is our own artifact
- * from the official installer, and the plugin copy carries the same
- * content.
+ * script (or copied the skill around) has it in user-scope dirs —
+ * `~/.kimi-code/skills/kimi-webbridge/` and/or `~/.agents/skills/kimi-webbridge/`
+ * — both at priority 20, SHADOWING the plugin copy (priority 5). Install
+ * therefore removes those stale user copies — they are artifacts of the
+ * official installer (or of the same content), and the plugin copy carries
+ * the same skill. Other runtimes' dirs (~/.claude, ~/.codex) are out of
+ * scope and untouched.
  */
 
 import { access, chmod, mkdir, rename, rm } from 'node:fs/promises';
@@ -70,7 +72,10 @@ export function createKimiWebbridgeEntry(ctx: CapabilityEntryContext): Capabilit
   const binDir = path.join(ctx.userHomeDir, '.kimi-webbridge', 'bin');
   const binName = ctx.platform === 'win32' ? 'kimi-webbridge.exe' : 'kimi-webbridge';
   const binPath = path.join(binDir, binName);
-  const userSourceSkillDir = path.join(ctx.kimiHomeDir, 'skills', 'kimi-webbridge');
+  const userSourceSkillDirs = [
+    path.join(ctx.kimiHomeDir, 'skills', 'kimi-webbridge'),
+    path.join(ctx.userHomeDir, '.agents', 'skills', 'kimi-webbridge'),
+  ];
   const supported = binaryAssetName(ctx.platform, ctx.arch) !== undefined;
 
   async function exists(p: string): Promise<boolean> {
@@ -187,13 +192,18 @@ export function createKimiWebbridgeEntry(ctx: CapabilityEntryContext): Capabilit
 
     report('skill');
     await ctx.plugins.installPlugin({ source: PLUGIN_ZIP_URL });
-    // Un-shadow the plugin copy: the user-source skill (priority 20) wins
-    // over the plugin source (priority 5) on name collisions. Surface the
-    // migration so clients can tell the user their manually-installed skill
-    // is now managed as a plugin.
-    const hadUserSourceSkill = await exists(userSourceSkillDir);
-    await rm(userSourceSkillDir, { recursive: true, force: true });
-    return hadUserSourceSkill ? 'user-skill-migrated' : undefined;
+    // Un-shadow the plugin copy: user-source skills (priority 20, in either
+    // user dir) win over the plugin source (priority 5) on name collisions.
+    // Surface the migration so clients can tell the user their
+    // manually-installed skill is now managed as a plugin.
+    let migrated = false;
+    for (const dir of userSourceSkillDirs) {
+      if (await exists(dir)) {
+        migrated = true;
+        await rm(dir, { recursive: true, force: true });
+      }
+    }
+    return migrated ? 'user-skill-migrated' : undefined;
   }
 
   return {
