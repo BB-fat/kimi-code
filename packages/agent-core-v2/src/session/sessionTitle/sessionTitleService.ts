@@ -125,7 +125,6 @@ export class SessionTitleService implements ISessionTitleService {
       });
     let result = await requestTitle(token);
     if (result.kind === 'error' && result.status === 401) {
-      // The cached token may be revoked server-side: force-refresh and retry once.
       try {
         token = await tokenProvider.getAccessToken({ force: true });
       } catch (error) {
@@ -139,8 +138,6 @@ export class SessionTitleService implements ISessionTitleService {
       this.log.debug(`chat_title request failed: ${result.message}`);
       return undefined;
     }
-    // A stale scope (the session was resumed or closed while the request was
-    // in flight) must not write its title back.
     const live = this.sessionLifecycle.get(this.ctx.sessionId);
     if (live === undefined || live.accessor.get(ISessionMetadata) !== this.metadata) {
       return undefined;
