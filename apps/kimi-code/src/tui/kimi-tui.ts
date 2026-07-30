@@ -2,6 +2,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { DeviceAuthorization } from '@moonshot-ai/kimi-code-oauth';
+import { log } from '@moonshot-ai/kimi-code-sdk';
 import type {
   ApprovalRequest,
   ApprovalResponse,
@@ -174,6 +175,8 @@ export type {
 
 export interface KimiTUIStartupInput {
   readonly cliOptions: CLIOptions;
+  /** Profile name resolved from cliOptions --agent/--agent-file (see resolveAgentProfileSelection). */
+  readonly agentProfile?: string;
   readonly additionalDirs?: readonly string[];
   readonly tuiConfig: TuiConfig;
   readonly version: string;
@@ -385,6 +388,8 @@ export class KimiTUI {
         auto: startupInput.cliOptions.auto,
         plan: startupInput.cliOptions.plan,
         model: startupInput.cliOptions.model,
+        agentProfile: startupInput.agentProfile,
+        agentFiles: startupInput.cliOptions.agentFiles,
         startupNotice: startupInput.startupNotice,
       },
     };
@@ -744,6 +749,10 @@ export class KimiTUI {
       model: startup.model,
       permission: startup.auto ? 'auto' : startup.yolo ? 'yolo' : undefined,
       planMode: startup.plan ? true : undefined,
+      // --agent/--agent-file bind the startup session only; sessions created
+      // later in this process fall back to the default profile.
+      agentProfile: startup.agentProfile,
+      agentFiles: startup.agentFiles?.length ? [...startup.agentFiles] : undefined,
     };
     if (this.state.appState.additionalDirs.length > 0) {
       createSessionOptions.additionalDirs = [...this.state.appState.additionalDirs];
@@ -1676,8 +1685,11 @@ export class KimiTUI {
         this.state.appState.sessionId,
         this.hasSessionContent(),
       );
-    } catch {
-      /* silently ignore */
+    } catch (error) {
+      // The picker must keep working (it renders the empty state), but a
+      // swallowed failure surfaces as a misleading "No sessions found." —
+      // keep a log trail so the real error stays discoverable.
+      log.warn('failed to fetch sessions for picker', { error: String(error) });
     } finally {
       this.state.loadingSessions = false;
     }

@@ -115,6 +115,13 @@
  *   injection point — see the session-lifecycle section header), and
  *   `toolCall` keeps the base class's "not supported" answer, which the
  *   interaction bridge already relies on.
+ * - `applyPersistedSecondaryModel` → the reload + loud validations + warning
+ *   refresh of v1's contract, rebuilt over the live `IConfigService` recipe
+ *   and `ISessionSecondaryModelWarningService.recheckSecondaryModelWarning`
+ *   (the v2 spawn binding resolves the secondary model at spawn time, so
+ *   there is no session snapshot to push). `getSessionWarnings` also
+ *   surfaces the v2 secondary-model warning next to the AGENTS.md one,
+ *   matching v1's aggregate.
  */
 import { randomUUID } from 'node:crypto';
 import { readdir } from 'node:fs/promises';
@@ -139,7 +146,9 @@ import {
   type BeginAuthorizationResult,
 } from '@moonshot-ai/agent-core-v2/agent/mcp/oauth/service';
 import { createMcpOAuthStore } from '@moonshot-ai/agent-core-v2/agent/mcp/oauth/store';
+import { SECONDARY_MODEL_SECTION } from '@moonshot-ai/agent-core-v2/app/kosongConfig/configSection';
 import { IAtomicDocumentStore } from '@moonshot-ai/agent-core-v2/persistence/interface/atomicDocumentStore';
+import { wrapSubagentModelError } from '@moonshot-ai/agent-core-v2/session/subagent/configSection';
 import {
   applyPromptMetadataUpdate,
   bootstrap,
@@ -167,6 +176,7 @@ import {
   IEventService,
   IHostEnvironment,
   IHostFileSystem,
+  IModelCatalog,
   IModelService,
   IProjectLocalConfigService,
   IProviderService,
@@ -179,6 +189,7 @@ import {
   ISessionLifecycleService,
   ISessionMcpService,
   ISessionMetadata,
+  ISessionSecondaryModelWarningService,
   ISessionSkillCatalog,
   ISessionWorkspaceCommandService,
   ISessionWorkspaceContext,
@@ -186,6 +197,7 @@ import {
   ISkillDiscovery,
   ITelemetryService,
   IWorkspaceAliases,
+  hostRequestHeadersSeed,
   logSeed,
   MAIN_AGENT_ID,
   prepareSystemPromptContext,
@@ -207,11 +219,12 @@ import {
   type IDisposable,
   type ISessionScopeHandle,
   type Scope,
+  type SecondaryModelConfig,
   type ServicesAccessor,
 } from '@moonshot-ai/agent-core-v2';
 import type { AgentHandle, Klient } from '@moonshot-ai/klient';
 import { createKlient } from '@moonshot-ai/klient/memory';
-import { assertKimiHostIdentity } from '@moonshot-ai/kimi-code-oauth';
+import { assertKimiHostIdentity, createKimiDefaultHeaders } from '@moonshot-ai/kimi-code-oauth';
 
 import { KimiAuthFacade } from '#/auth';
 import { KimiHarness } from '#/kimi-harness';
@@ -400,14 +413,21 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       onRefresh: options.onOAuthRefresh,
     });
 
+    const identity = assertKimiHostIdentity(this.identity);
     const { app } = bootstrap(
       {
         homeDir: this.homeDir,
         configPath: this.configPath,
-        clientVersion: this.identity?.version,
+        clientIdentity: identity,
       },
       [
         ...logSeed(resolveLoggingConfig({ homeDir: this.homeDir, env: process.env })),
+        // Host identity headers for the engine's outbound requests (model,
+        // WebSearch, registry refresh). Without this seed the managed vendors
+        // go out with the SDK's default User-Agent and no X-Msh-* at all.
+        ...hostRequestHeadersSeed(
+          createKimiDefaultHeaders({ homeDir: this.homeDir, ...identity }),
+        ),
         // `--skills-dir` (v1 parity): explicit skill dirs replace default
         // user / project discovery for every session this client hosts.
         ...skillCatalogRuntimeOptionsSeed(options.skillDirs),
@@ -1240,6 +1260,43 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     agent.accessor.get(IAgentProfileService).setThinking(input.effort);
   }
 
+  /**
+   * v1 reloads the core config and pushes the resolved snapshot into the
+   * session: the spawn binding, the tool descriptions, and the cached
+   * startup warning all read that snapshot. The v2 engine resolves the
+   * secondary model live against `IConfigService` at spawn time
+   * (`resolveSubagentBinding`) and rebuilds the tool description on every
+   * read, so the preceding `setConfig` write already took effect
+   * session-wide — what remains of v1's contract is the reload (the recipe
+   * may have been persisted through another channel), the same loud
+   * validations, and the warning-cache refresh. The recipe read is NOT
+   * flag-gated, mirroring v1's `setSecondaryModelConfig` (the experiment
+   * gate lives at the spawn binding on both engines).
+   */
+  override async applyPersistedSecondaryModel(input: SessionIdRpcInput): Promise<void> {
+    const session = this.requireLiveSession(input.sessionId);
+    await this.klient.global.config.reload();
+    await this.configReady;
+    await this.modelReady;
+    const secondary = this.engineAccessor
+      .get(IConfigService)
+      .get<SecondaryModelConfig | undefined>(SECONDARY_MODEL_SECTION);
+    if (secondary?.model === undefined) {
+      throw new KimiError(
+        ErrorCodes.CONFIG_INVALID,
+        'Cannot set the secondary model: persist its recipe before applying it to a session.',
+      );
+    }
+    try {
+      this.engineAccessor.get(IModelCatalog).get(secondary.model);
+    } catch (error) {
+      throw wrapSubagentModelError(error, secondary.model, undefined);
+    }
+    session.accessor
+      .get(ISessionSecondaryModelWarningService)
+      .recheckSecondaryModelWarning();
+  }
+
   override async setPermission(input: SetSessionPermissionRpcInput): Promise<void> {
     const agent = await this.agentFacade(input.sessionId);
     return agent.setPermission(input.mode);
@@ -1531,7 +1588,14 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    * cache is empty — v1 recomputes on demand whenever no warning is cached,
    * so an AGENTS.md that outgrows the budget mid-session surfaces on both
    * engines. The single warning shape (`agents-md-oversized`, severity
-   * `warning`) mirrors v1's assembly.
+   * `warning`) mirrors v1's assembly. The secondary-model half comes from the
+   * session scope's `ISessionSecondaryModelWarningService` (v1's
+   * `computeSecondaryModelWarnings`): v1 computes it from the session's
+   * config snapshot while v2 caches the live-config check at main-agent
+   * creation, so the two agree on recipes applied through
+   * `applyPersistedSecondaryModel` (which refreshes the v2 cache) and on
+   * recipes present at session creation; a recipe persisted but never
+   * applied surfaces only on v2 (live config vs v1's snapshot).
    */
   override async getSessionWarnings(input: SessionIdRpcInput) {
     const agent = await this.agentScope(input.sessionId);
@@ -1549,8 +1613,17 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       );
       warning = prepared.agentsMdWarning;
     }
-    if (warning === undefined) return [];
-    return [{ code: 'agents-md-oversized', message: warning, severity: 'warning' as const }];
+    const warnings: { code: string; message: string; severity: 'warning' }[] =
+      warning === undefined
+        ? []
+        : [{ code: 'agents-md-oversized', message: warning, severity: 'warning' as const }];
+    const secondary = this.requireLiveSession(input.sessionId)
+      .accessor.get(ISessionSecondaryModelWarningService)
+      .getSecondaryModelWarning();
+    if (secondary !== undefined) {
+      warnings.push({ code: secondary.code, message: secondary.message, severity: 'warning' });
+    }
+    return warnings;
   }
 
   /**
