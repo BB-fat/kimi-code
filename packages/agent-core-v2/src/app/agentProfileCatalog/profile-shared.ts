@@ -28,8 +28,6 @@
  * parse the rendered text.
  */
 
-import { createHash } from 'node:crypto';
-
 import { renderPrompt } from '#/_base/utils/render-prompt';
 
 import {
@@ -183,7 +181,6 @@ function environmentForTemplate(
   context: AgentProfileContext,
 ): EnvironmentDisclosureSnapshot {
   const usesNow = template.includes('${now}');
-  const usesAgentsMd = template.includes('${agents_md}');
   return {
     cwd: context.cwd ?? '',
     date: usesNow
@@ -195,15 +192,6 @@ function environmentForTemplate(
           },
         }
       : { disclosed: false },
-    agentsMd: usesAgentsMd
-      ? {
-          disclosed: true,
-          value: {
-            fingerprint: fingerprintDisclosureContent(context.agentsMd ?? ''),
-            status: context.agentsMdStatus ?? agentsMdStatus(context.agentsMd),
-          },
-        }
-      : { disclosed: false },
   };
 }
 
@@ -211,7 +199,6 @@ function undisclosedEnvironment(context: AgentProfileContext): EnvironmentDisclo
   return {
     cwd: context.cwd ?? '',
     date: { disclosed: false },
-    agentsMd: { disclosed: false },
   };
 }
 
@@ -223,16 +210,7 @@ function mergeEnvironmentDisclosure(
   return {
     cwd: direct.cwd || base.cwd,
     date: direct.date.disclosed ? direct.date : base.date,
-    agentsMd: direct.agentsMd.disclosed ? direct.agentsMd : base.agentsMd,
   };
-}
-
-export function fingerprintDisclosureContent(content: string): string {
-  return createHash('sha256').update(content, 'utf8').digest('hex');
-}
-
-export function agentsMdStatus(content: string | undefined): 'missing' | 'empty' | 'present' {
-  return content === undefined ? 'missing' : content.length === 0 ? 'empty' : 'present';
 }
 
 function localDateKey(now: string | undefined): string {

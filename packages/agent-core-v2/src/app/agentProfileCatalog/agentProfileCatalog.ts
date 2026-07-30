@@ -67,19 +67,13 @@ export interface AgentProfileContext {
   readonly skillActive?: boolean;
   readonly productName?: string;
   readonly replyStyleGuide?: string;
-  readonly agentsMdStatus?: AgentsMdStatus;
   readonly [key: string]: unknown;
 }
-
-export type AgentsMdStatus = 'missing' | 'empty' | 'present';
 
 export interface EnvironmentDisclosureSnapshot {
   readonly cwd: string;
   readonly date:
     | { readonly disclosed: true; readonly value: { readonly localDate: string; readonly timeZone: string } }
-    | { readonly disclosed: false };
-  readonly agentsMd:
-    | { readonly disclosed: true; readonly value: { readonly fingerprint: string; readonly status: AgentsMdStatus } }
     | { readonly disclosed: false };
 }
 
@@ -124,7 +118,6 @@ export function renderAgentProfile(
       environment: {
         cwd: context.cwd ?? '',
         date: { disclosed: false },
-        agentsMd: { disclosed: false },
       },
     }
   );

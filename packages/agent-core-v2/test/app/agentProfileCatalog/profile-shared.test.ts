@@ -141,14 +141,13 @@ describe('renderPromptTemplate', () => {
     );
   });
 
-  it('records the environment facts used by now and agents_md placeholders', () => {
+  it('records the environment facts used by the now placeholder', () => {
     const result = renderPromptTemplateResult(
       'date=${now} agents=${agents_md}',
       {
         cwd: '/work',
         now: '2026-07-29T12:00:00',
         agentsMd: 'AGENTS',
-        agentsMdStatus: 'present',
       },
       { skillActive: true },
     );
@@ -158,13 +157,6 @@ describe('renderPromptTemplate', () => {
     expect(result.environment.date).toMatchObject({
       disclosed: true,
       value: { localDate: '2026-07-29' },
-    });
-    expect(result.environment.agentsMd).toEqual({
-      disclosed: true,
-      value: {
-        fingerprint: '370f346f47cb65d94fd904ecb4ceeb17d784965984b0f8e52cce79ff95451a54',
-        status: 'present',
-      },
     });
   });
 
@@ -181,14 +173,6 @@ describe('renderPromptTemplate', () => {
             disclosed: true,
             value: { localDate: '2026-07-28', timeZone: 'UTC' },
           },
-          agentsMd: {
-            disclosed: true,
-            value: {
-              fingerprint:
-                'a3a18567b84af6528d171050e54bcf75e0a1c94c8db8a165d03e9866cfa95bce',
-              status: 'present',
-            },
-          },
         },
       }),
     );
@@ -199,14 +183,6 @@ describe('renderPromptTemplate', () => {
       date: {
         disclosed: true,
         value: { localDate: '2026-07-28', timeZone: 'UTC' },
-      },
-      agentsMd: {
-        disclosed: true,
-        value: {
-          fingerprint:
-            'a3a18567b84af6528d171050e54bcf75e0a1c94c8db8a165d03e9866cfa95bce',
-          status: 'present',
-        },
       },
     });
   });
@@ -289,14 +265,13 @@ describe('renderSystemPrompt', () => {
     expect(overridden).not.toContain('Kimi Code CLI');
   });
 
-  it('returns disclosure metadata for the builtin now and agents_md sections', () => {
+  it('returns disclosure metadata for the builtin now section', () => {
     const result = renderSystemPromptResult(
       '',
       {
         cwd: '/work',
         now: '2026-07-29T12:00:00',
         agentsMd: 'AGENTS',
-        agentsMdStatus: 'present',
       },
       { skillActive: true },
     );
@@ -306,13 +281,6 @@ describe('renderSystemPrompt', () => {
     expect(result.environment.date).toMatchObject({
       disclosed: true,
       value: { localDate: '2026-07-29' },
-    });
-    expect(result.environment.agentsMd).toEqual({
-      disclosed: true,
-      value: {
-        fingerprint: '370f346f47cb65d94fd904ecb4ceeb17d784965984b0f8e52cce79ff95451a54',
-        status: 'present',
-      },
     });
   });
 });

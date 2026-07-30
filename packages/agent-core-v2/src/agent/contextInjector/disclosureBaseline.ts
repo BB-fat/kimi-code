@@ -1,6 +1,6 @@
 /**
  * `contextInjector` domain (L4) — shared disclosure-baseline helpers for the
- * reminder providers (`date_change`, `agents_md`, `skill_list`).
+ * reminder providers (`date_change`, `skill_list`).
  *
  * A provider's baseline answers "what has the model already seen" from up to
  * three sources, compared by render generation with ties won by the earlier

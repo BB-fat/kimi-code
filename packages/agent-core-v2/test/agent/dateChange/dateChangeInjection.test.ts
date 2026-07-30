@@ -64,7 +64,6 @@ function updateSystemPromptWithDate(
         timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
       },
     },
-    agentsMd: { disclosed: false },
   };
   profile.update({
     systemPrompt: systemPromptWithDate(iso),
@@ -77,7 +76,6 @@ function updateSystemPromptWithoutDate(profile: IAgentProfileService): void {
   const environment: EnvironmentDisclosureSnapshot = {
     cwd: profile.data().cwd,
     date: { disclosed: false },
-    agentsMd: { disclosed: false },
   };
   profile.update({
     systemPrompt: 'You are a deterministic test agent.',

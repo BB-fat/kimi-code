@@ -357,14 +357,6 @@ describe('AgentProfileService (wire-backed config.update)', () => {
         disclosed: true,
         value: { localDate: '2026-07-29', timeZone: 'Asia/Shanghai' },
       },
-      agentsMd: {
-        disclosed: true,
-        value: {
-          fingerprint:
-            'a3a18567b84af6528d171050e54bcf75e0a1c94c8db8a165d03e9866cfa95bce',
-          status: 'present',
-        },
-      },
     };
     svc.applyBindingSnapshot({
       cwd: '/work',

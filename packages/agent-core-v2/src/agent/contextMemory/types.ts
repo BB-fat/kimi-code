@@ -1,7 +1,6 @@
 import type { ContentPart, Message } from '#/kosong/contract/message';
 
 import type { AgentTaskStatus } from '#/agent/task/task';
-import type { AgentsMdStatus } from '#/app/agentProfileCatalog/agentProfileCatalog';
 
 export type SkillSource = 'project' | 'user' | 'extra' | 'builtin';
 
@@ -44,12 +43,6 @@ export type ContextInjectionDisclosure =
       readonly renderGeneration: number;
       readonly localDate: string;
       readonly timeZone: string;
-    }
-  | {
-      readonly kind: 'agents_md';
-      readonly renderGeneration: number;
-      readonly fingerprint: string;
-      readonly status: AgentsMdStatus;
     }
   | {
       readonly kind: 'skills';
