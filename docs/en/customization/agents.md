@@ -158,6 +158,8 @@ Like the body of a regular agent file, SYSTEM.md is rendered as a template each 
 
 Unknown variables stay verbatim, a bare `$` is never special, and a variable with no context value renders as an empty string. Three pre-composed blocks — `${windows_notes}`, `${additional_dirs_section}`, and `${skills_section}` — render the matching built-in prompt section, or an empty string when it does not apply. The variables are enough to rebuild the skeleton of the built-in prompt, for example:
 
+These variables are evaluated when the system prompt is rendered. An existing session does not watch `AGENTS.md` or inject a change reminder automatically; edits take effect the next time the system prompt is rendered, such as after a working-directory change, context compaction, or a new session.
+
 ```markdown
 You are Kimi, running at ${cwd} on ${os}.
 
