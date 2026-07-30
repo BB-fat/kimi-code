@@ -1,6 +1,6 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'pathe';
+import { join, normalize } from 'pathe';
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -11,6 +11,7 @@ import { DEFAULT_AGENT_PROFILE_NAME, IAgentProfileCatalogService } from '#/app/a
 import { registerAgentProfile } from '#/app/agentProfileCatalog/contribution';
 import type { ToolCall } from '#/kosong/contract/message';
 import { IAgentProfileService, type ResolvedAgentProfile } from '#/agent/profile/profile';
+import { IAgentAgentsMdReminderService } from '#/agent/agentsMdReminder/agentsMdReminder';
 import { IAgentToolPolicyService } from '#/agent/toolPolicy/toolPolicy';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
@@ -24,6 +25,7 @@ import type { ExecutableTool, ToolExecution, ToolResult, ToolSource } from '#/to
 
 import {
   InMemoryWireRecordPersistence,
+  agentService,
   appService,
   createTestAgent,
   hostEnvironmentServices,
@@ -997,3 +999,66 @@ class PolicyProbeTool implements ExecutableTool<Record<string, never>> {
     };
   }
 }
+
+describe('agentsMdReminder seeding', () => {
+  let ctx: TestAgentContext;
+  let homeDir: string;
+  let workDir: string;
+
+  beforeAll(() => {
+    registerAgentProfile({
+      name: 'throws-on-prompt',
+      systemPrompt: () => {
+        throw new Error('prompt build boom');
+      },
+    });
+  });
+
+  beforeEach(async () => {
+    homeDir = await mkdtemp(join(tmpdir(), 'kimi-seed-home-'));
+    workDir = await mkdtemp(join(tmpdir(), 'kimi-seed-work-'));
+  });
+
+  afterEach(async () => {
+    await ctx?.dispose();
+    await rm(homeDir, { recursive: true, force: true });
+    await rm(workDir, { recursive: true, force: true });
+  });
+
+  function buildSeededContext(
+    seedInjected: IAgentAgentsMdReminderService['seedInjected'],
+  ): IAgentProfileService {
+    ctx = createTestAgent(
+      { cwd: workDir },
+      hostEnvironmentServices(homeDir),
+      agentService(IAgentAgentsMdReminderService, {
+        _serviceBrand: undefined,
+        seedInjected,
+      }),
+    );
+    return ctx.get(IAgentProfileService);
+  }
+
+  it('seeds the known-set with the injected paths after a successful bind', async () => {
+    const seedInjected = vi.fn<(paths: readonly string[], cwd: string) => void>();
+    const profile = buildSeededContext(seedInjected);
+    await writeFile(join(workDir, 'AGENTS.md'), 'project instructions', 'utf-8');
+
+    seedInjected.mockClear();
+    await profile.bind({ profile: DEFAULT_AGENT_PROFILE_NAME, model: MOCK_MODEL });
+
+    expect(seedInjected).toHaveBeenCalledWith([normalize(join(workDir, 'AGENTS.md'))], workDir);
+  });
+
+  it('does not seed when the prompt build fails before the bind commits', async () => {
+    const seedInjected = vi.fn<(paths: readonly string[], cwd: string) => void>();
+    const profile = buildSeededContext(seedInjected);
+
+    seedInjected.mockClear();
+    await expect(profile.bind({ profile: 'throws-on-prompt', model: MOCK_MODEL })).rejects.toThrow(
+      'prompt build boom',
+    );
+
+    expect(seedInjected).not.toHaveBeenCalled();
+  });
+});

@@ -181,6 +181,10 @@ const DOMAIN_LAYER = new Map([
   ['usage', 4],
   ['runtime', 4],
   ['toolDedupe', 4],
+  // `agentsMdReminder` appends AGENTS.md-discovery reminders to tool results
+  // through the `toolExecutor` (L3) did-execute hook; probing reuses the
+  // `profile` (L4) candidate rules and the `bashParser` (L1) syntax tree.
+  ['agentsMdReminder', 4],
   ['toolSelect', 4],
   ['toolPolicy', 4],
   // `toolActivation` turns the `toolRegistry` (L3) contribution table into

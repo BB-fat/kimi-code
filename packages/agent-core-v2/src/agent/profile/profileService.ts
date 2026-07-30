@@ -52,7 +52,10 @@
  * (`IAgentStateService`) and read/written through it; `optionsValue` (holds
  * the `cwd` / `chdir` / `emitStatusUpdated` callbacks) and `activeProfile`
  * (a `ResolvedAgentProfile` carrying the `systemPrompt` function) stay plain
- * fields because the container only holds pure data structures. Bound at
+ * fields because the container only holds pure data structures. After every
+ * successful bind / apply / refresh (never before the new prompt commits,
+ * so a failed build cannot poison the set), the injected AGENTS.md paths are
+ * seeded into `agentsMdReminder`'s known-set with the effective cwd. Bound at
  * Agent scope.
  */
 
@@ -93,6 +96,7 @@ import { ISessionToolPolicy } from '#/session/sessionToolPolicy/sessionToolPolic
 import { IPluginService } from '#/app/plugin/plugin';
 import type { ResolvedAgentProfile, SystemPromptContext } from '#/agent/profile/profile';
 import { IAgentStateService } from '#/agent/state/agentState';
+import { IAgentAgentsMdReminderService } from '#/agent/agentsMdReminder/agentsMdReminder';
 
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { IAgentTelemetryContextService } from '#/app/telemetry/agentTelemetryContext';
@@ -212,6 +216,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     @IAgentStateService private readonly states: IAgentStateService,
     @IHostIdentity private readonly hostIdentity: IHostIdentity,
     @IPluginService private readonly plugins: IPluginService,
+    @IAgentAgentsMdReminderService private readonly agentsMdReminder: IAgentAgentsMdReminderService,
   ) {
     super();
     this.states.register(profileActiveToolNamesOverlayKey);
@@ -380,6 +385,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       systemPrompt,
       disallowedTools: profile.disallowedTools ?? [],
     });
+    this.seedAgentsMdReminder(context);
 
     this.publishAgentsMdWarning();
     this.publishToolPatternWarnings(profile);
@@ -447,6 +453,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
   async applyProfile(profile: ResolvedAgentProfile, options?: ApplyProfileOptions): Promise<void> {
     const context = await this.buildSystemPromptContext(profile, undefined, options);
     this.useProfile(profile, context);
+    this.seedAgentsMdReminder(context);
     this.cacheAgentsMdWarning(context);
     this.publishAgentsMdWarning();
     this.publishToolPatternWarnings(profile);
@@ -472,8 +479,16 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       profileName: profile.name,
       systemPrompt: profile.systemPrompt(context),
     });
+    this.seedAgentsMdReminder(context);
     this.cacheAgentsMdWarning(context);
     this.publishAgentsMdWarning();
+  }
+
+  private seedAgentsMdReminder(context: SystemPromptContext): void {
+    this.agentsMdReminder.seedInjected(
+      context.agentsMdPaths ?? [],
+      context.cwd ?? this.sessionContext.cwd,
+    );
   }
 
   getAgentsMdWarning(): string | undefined {
