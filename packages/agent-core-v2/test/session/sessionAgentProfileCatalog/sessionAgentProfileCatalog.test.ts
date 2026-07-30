@@ -24,6 +24,7 @@ import { ILogService } from '#/_base/log/log';
 import {
   DEFAULT_AGENT_PROFILE_NAME,
   IAgentProfileCatalogService,
+  renderAgentProfile,
 } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import { AgentProfileCatalogService } from '#/app/agentProfileCatalog/agentProfileCatalogService';
 import { IAgentCatalogRuntimeOptions } from '#/app/agentFileCatalog/agentCatalogRuntimeOptions';
@@ -370,6 +371,44 @@ describe('SessionAgentProfileCatalogService', () => {
 
       expect(catalog.get('shared')?.description).toBe('from user');
       expect(catalog.get('plugin-only')?.description).toBe('from plugin');
+      host.dispose();
+    });
+  });
+
+  it('preserves base-prompt date disclosure when rendering a plugin agent', async () => {
+    await withFixture(async (fixture) => {
+      const pluginAgentsDir = join(fixture.extraDir, 'plugin-agents');
+      await writeAgent(
+        pluginAgentsDir,
+        'plugin-date.md',
+        [
+          '---',
+          'name: plugin-date',
+          'description: Plugin agent that wraps the default prompt',
+          '---',
+          '',
+          '${base_prompt}',
+          '',
+        ].join('\n'),
+      );
+      const { host, session } = makeSession(fixture, {
+        pluginAgentRoots: [{ path: pluginAgentsDir, source: 'plugin' }],
+      });
+      const catalog = session.accessor.get(ISessionAgentProfileCatalog);
+      await catalog.load();
+
+      const profile = catalog.get('plugin-date');
+      expect(profile).toBeDefined();
+      const rendered = renderAgentProfile(profile!, {
+        cwd: fixture.workDir,
+        now: '2026-07-29T12:00:00.000Z',
+      });
+
+      expect(rendered.text).toContain('2026-07-29T12:00:00.000Z');
+      expect(rendered.environment.date).toMatchObject({
+        disclosed: true,
+        value: { localDate: '2026-07-29' },
+      });
       host.dispose();
     });
   });

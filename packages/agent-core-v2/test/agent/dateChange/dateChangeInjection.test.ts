@@ -17,7 +17,11 @@ import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import type { EnvironmentDisclosureSnapshot } from '#/app/agentProfileCatalog/agentProfileCatalog';
 
-import { createTestAgent, type TestAgentContext } from '../../harness';
+import {
+  createTestAgent,
+  InMemoryWireRecordPersistence,
+  type TestAgentContext,
+} from '../../harness';
 
 function localDateKey(date: Date): string {
   const year = date.getFullYear();
@@ -172,6 +176,30 @@ function messageText(message: ContextMessage): string {
         localDate: '2026-07-31',
       },
     });
+  });
+
+  it('injects on the first step when a persisted prompt crosses midnight before resume', async () => {
+    const persistence = new InMemoryWireRecordPersistence();
+    await ctx.dispose();
+    ctx = createTestAgent({ persistence });
+    profile = ctx.get(IAgentProfileService);
+    updateSystemPromptWithDate(profile, new Date().toISOString());
+    await ctx.wire.flush();
+    await ctx.dispose();
+
+    vi.setSystemTime(new Date(2026, 6, 30, 12));
+    ctx = createTestAgent({ autoConfigure: false, persistence });
+    context = ctx.get(IAgentContextMemoryService);
+    injector = ctx.get(IAgentContextInjectorService);
+    await ctx.restorePersisted();
+
+    await injector.inject();
+
+    const reminders = dateReminders(context);
+    expect(reminders).toHaveLength(1);
+    expect(messageText(reminders[0] as ContextMessage)).toContain(
+      "Today's date is now 2026-07-30",
+    );
   });
 
   it('uses the newer persisted render snapshot over older reminder metadata', async () => {

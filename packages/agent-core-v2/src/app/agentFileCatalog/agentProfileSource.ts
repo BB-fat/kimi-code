@@ -57,7 +57,7 @@ export interface IAgentProfileSource {
 
 export function profilesFromDiscovery(
   result: AgentFileDiscoveryResult,
-  basePrompt: (context: AgentProfileContext) => string | SystemPromptRenderResult,
+  basePrompt: (context: AgentProfileContext) => SystemPromptRenderResult,
 ): AgentProfileContribution {
   return {
     profiles: result.agents.map((definition) => agentProfileFromFile(definition, basePrompt)),

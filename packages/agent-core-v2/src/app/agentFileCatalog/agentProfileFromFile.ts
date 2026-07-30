@@ -27,7 +27,7 @@ import type { AgentFileDefinition } from './types';
 
 export function agentProfileFromFile(
   definition: AgentFileDefinition,
-  basePrompt: (context: AgentProfileContext) => string | SystemPromptRenderResult,
+  basePrompt: (context: AgentProfileContext) => SystemPromptRenderResult,
 ): AgentProfile {
   const skillActive =
     (definition.tools === undefined || definition.tools.includes('Skill')) &&

@@ -13,6 +13,7 @@ import { describe, expect, it } from 'vitest';
 import { AgentFileParseError, parseAgentFileText } from '#/app/agentFileCatalog/agentFile';
 import { agentProfileFromFile } from '#/app/agentFileCatalog/agentProfileFromFile';
 import type { AgentFileDefinition } from '#/app/agentFileCatalog/types';
+import type { SystemPromptRenderResult } from '#/app/agentProfileCatalog/agentProfileCatalog';
 
 const FULL_FILE = `---
 name: code-reviewer
@@ -207,7 +208,13 @@ describe('agentProfileFromFile', () => {
     path: '/tmp/agents/reviewer.md',
     source: 'user',
   };
-  const basePrompt = () => 'BASE_PROMPT';
+  const basePrompt = (): SystemPromptRenderResult => ({
+    text: 'BASE_PROMPT',
+    environment: {
+      cwd: '',
+      date: { disclosed: false },
+    },
+  });
 
   it('returns a plain body verbatim and injects no unreferenced context', () => {
     const profile = agentProfileFromFile(base, basePrompt);
