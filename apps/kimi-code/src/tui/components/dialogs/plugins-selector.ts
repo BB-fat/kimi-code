@@ -285,10 +285,12 @@ function pluginStatus(plugin: PluginSummary): string | undefined {
 }
 
 function marketplaceStatusStyle(status: string, colors: ColorPalette): (text: string) => string {
-  // "update …" is a warning (actionable); "installed …" is success;
-  // "install …" is the available action.
+  // States recede, actions pop: "installed …" is a quiet fact (dim), while
+  // "install …" (the available action) stays primary and "update …" stays a
+  // warning — the two used to share near-identical green-ish treatments in
+  // the same column and read as interchangeable.
   if (status.startsWith('update')) return chalk.hex(colors.warning);
-  if (status.startsWith('installed')) return chalk.hex(colors.success);
+  if (status.startsWith('installed')) return chalk.hex(colors.textDim);
   return chalk.hex(colors.primary);
 }
 
