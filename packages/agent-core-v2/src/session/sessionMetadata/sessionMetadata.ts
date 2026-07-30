@@ -25,12 +25,19 @@ export interface AgentMeta {
 
 export const SESSION_META_VERSION = 2;
 
+/** How many of the session's first natural-language prompts are kept. */
+export const SESSION_META_PROMPT_LIMIT = 3;
+
 export interface SessionMeta {
   readonly id: string;
   readonly version?: number;
   readonly title?: string;
   readonly isCustomTitle?: boolean;
   readonly lastPrompt?: string;
+  /** The session's first sanitized prompt texts (bounded by
+   * `SESSION_META_PROMPT_LIMIT`), recorded for title generation. Absent on
+   * documents written before the recording existed. */
+  readonly prompts?: readonly string[];
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly archived: boolean;

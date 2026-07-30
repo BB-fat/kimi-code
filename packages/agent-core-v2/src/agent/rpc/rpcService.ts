@@ -95,7 +95,7 @@ export class AgentRPCService implements IAgentRPCService {
         throw error;
       }
     }
-    await this.updatePromptMetadata(promptMetadataTextFromPayload(payload));
+    await this.updatePromptMetadata(promptMetadataTextFromPayload(payload), true);
     const handle = await this.promptService.enqueue({ message: {
       role: 'user',
       content: [...payload.input],
@@ -204,7 +204,10 @@ export class AgentRPCService implements IAgentRPCService {
     await this.updatePromptMetadata(promptMetadataTextFromPluginCommand(payload));
   }
 
-  private async updatePromptMetadata(text: string | undefined): Promise<void> {
+  private async updatePromptMetadata(
+    text: string | undefined,
+    recordPrompt = false,
+  ): Promise<void> {
     await applyPromptMetadataUpdate(
       {
         metadata: this.metadata,
@@ -212,6 +215,7 @@ export class AgentRPCService implements IAgentRPCService {
         sessionId: this.sessionContext.sessionId,
       },
       text,
+      recordPrompt,
     );
   }
 

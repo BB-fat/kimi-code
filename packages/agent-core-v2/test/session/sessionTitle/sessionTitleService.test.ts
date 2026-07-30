@@ -184,7 +184,7 @@ describe('SessionTitleService', () => {
   });
 
   it('replaces the easy title with the generated one', async () => {
-    await metadata.update({ lastPrompt: '帮我看一下这个 Go 的 nil pointer 报错' });
+    await metadata.update({ prompts: ['帮我看一下这个 Go 的 nil pointer 报错'] });
 
     const title = await ix.get(ISessionTitleService).generateTitle();
 
@@ -195,7 +195,7 @@ describe('SessionTitleService', () => {
     const [, init] = fetchMock.mock.calls[0]!;
     expect(JSON.parse(init?.body as string)).toEqual({
       method: 'chat_title',
-      params: { chat_content: 'user: 帮我看一下这个 Go 的 nil pointer 报错' },
+      params: { chat_content: 'user 1: 帮我看一下这个 Go 的 nil pointer 报错' },
     });
     expect(new Headers(init?.headers as Record<string, string>).get('authorization')).toBe(
       'Bearer test-token',
@@ -207,6 +207,45 @@ describe('SessionTitleService', () => {
         (event.payload as { patch?: { title?: string } }).patch?.title === '生成的标题',
     );
     expect(rebroadcast).toBeDefined();
+  });
+
+  it('composes the title input from the recorded prompts in order', async () => {
+    await metadata.update({
+      prompts: ['先帮我搭一个 Vite 项目', '加上路由', '现在配一下 ESLint'],
+    });
+
+    await ix.get(ISessionTitleService).generateTitle();
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(JSON.parse(init?.body as string)).toEqual({
+      method: 'chat_title',
+      params: {
+        chat_content: 'user 1: 先帮我搭一个 Vite 项目\nuser 2: 加上路由\nuser 3: 现在配一下 ESLint',
+      },
+    });
+  });
+
+  it('truncates the composed title input to the total budget, keeping the head', async () => {
+    await metadata.update({ prompts: ['很长的输入'.repeat(400), '第二条'] });
+
+    await ix.get(ISessionTitleService).generateTitle();
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    const body = JSON.parse(init?.body as string) as { params: { chat_content: string } };
+    expect(body.params.chat_content.startsWith('user 1: 很长的输入')).toBe(true);
+    expect(body.params.chat_content).toHaveLength(1000);
+  });
+
+  it('falls back to lastPrompt for sessions without recorded prompts', async () => {
+    await metadata.update({ lastPrompt: '帮我看一下这个 Go 的 nil pointer 报错' });
+
+    await ix.get(ISessionTitleService).generateTitle();
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(JSON.parse(init?.body as string)).toEqual({
+      method: 'chat_title',
+      params: { chat_content: 'user 1: 帮我看一下这个 Go 的 nil pointer 报错' },
+    });
   });
 
   it('does nothing without a managed OAuth provider', async () => {

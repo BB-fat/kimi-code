@@ -1,9 +1,10 @@
 /**
  * `sessionTitle` domain (L6) — `ISessionTitleService` implementation.
  *
- * Generates the session's title from its already-sanitized first prompt
- * (`sessionMetadata`'s `lastPrompt`, secrets redacted by the prompt-metadata
- * flow) through the managed platform `/tools` `chat_title` endpoint, persists
+ * Generates the session's title from its already-sanitized first prompts
+ * (`sessionMetadata`'s bounded `prompts` list, secrets redacted by the
+ * prompt-metadata flow; `lastPrompt` as the fallback for older documents)
+ * through the managed platform `/tools` `chat_title` endpoint, persists
  * it through `sessionMetadata`, and rebroadcasts `session.meta.updated`.
  * Generation is on demand only: `generateTitle()` is the single entry point
  * (the kap-server route), gated by the `auto-title` experimental flag and a
@@ -32,12 +33,18 @@ import { IHostRequestHeaders } from '#/kosong/model/hostRequestHeaders';
 import { IProviderService } from '#/kosong/provider/provider';
 import { isOAuthCatalogVendor } from '#/kosong/provider/providerDefinition';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
-import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
+import {
+  ISessionMetadata,
+  type SessionMeta,
+} from '#/session/sessionMetadata/sessionMetadata';
 
 import { AUTO_TITLE_FLAG_ID } from './flag';
 import { ISessionTitleService } from './sessionTitle';
 
 const MAX_GENERATED_TITLE_LENGTH = 200;
+
+/** Total budget for the composed prompt texts sent to `chat_title`. */
+const MAX_TITLE_INPUT_LENGTH = 1000;
 
 export class SessionTitleService implements ISessionTitleService {
   declare readonly _serviceBrand: undefined;
@@ -58,8 +65,9 @@ export class SessionTitleService implements ISessionTitleService {
   async generateTitle(): Promise<string | undefined> {
     if (!this.flags.enabled(AUTO_TITLE_FLAG_ID)) return undefined;
     const current = await this.metadata.read();
-    if (current.lastPrompt === undefined || hasCustomTitle(current)) return undefined;
-    return this.generateAndApply(current.lastPrompt);
+    const input = titleInputFromMeta(current);
+    if (input === undefined || hasCustomTitle(current)) return undefined;
+    return this.generateAndApply(input);
   }
 
   private async generateAndApply(chatContent: string): Promise<string | undefined> {
@@ -103,7 +111,7 @@ export class SessionTitleService implements ISessionTitleService {
     const result = await fetchChatTitle(
       kimiCodeToolsUrl(runtimeAuth.baseUrl),
       token,
-      `user: ${chatContent}`,
+      chatContent,
       {
         headers: {
           ...parseKimiCodeCustomHeaders(),
@@ -141,6 +149,25 @@ function hasCustomTitle(metadata: {
     return metadata.isCustomTitle;
   }
   return metadata.isCustomTitle === true || typeof metadata.customTitle === 'string';
+}
+
+/**
+ * Composes the `chat_title` input from the session's first recorded prompts
+ * (order-labeled), falling back to `lastPrompt` for documents written before
+ * prompt recording existed. Truncated to the total budget, keeping the head.
+ */
+function titleInputFromMeta(meta: SessionMeta): string | undefined {
+  const prompts =
+    meta.prompts !== undefined && meta.prompts.length > 0
+      ? meta.prompts
+      : meta.lastPrompt !== undefined
+        ? [meta.lastPrompt]
+        : undefined;
+  if (prompts === undefined) return undefined;
+  return prompts
+    .map((prompt, index) => `user ${index + 1}: ${prompt}`)
+    .join('\n')
+    .slice(0, MAX_TITLE_INPUT_LENGTH);
 }
 
 registerScopedService(

@@ -19,7 +19,7 @@ export const autoTitleFlag: FlagDefinitionInput = {
   id: AUTO_TITLE_FLAG_ID,
   title: 'Auto session title',
   description:
-    'Generate the session title on demand from the first prompt through the managed chat_title tool. Requires a managed Kimi Code OAuth login.',
+    'Generate the session title on demand from the first prompts through the managed chat_title tool. Requires a managed Kimi Code OAuth login.',
   env: AUTO_TITLE_FLAG_ENV,
   default: false,
   surface: 'both',

@@ -3,12 +3,18 @@
  *
  * Derives title and last-prompt text from native and legacy prompt payloads,
  * persists metadata through `sessionMetadata`, and publishes live updates
- * through `event`. Shared by the native `rpc` prompt path and the v1 legacy
- * prompt adapter so both surfaces keep the same easy-title behavior.
+ * through `event`. Natural-language prompts also append to the metadata's
+ * bounded `prompts` list (the title-generation input); skill / plugin
+ * activations only refresh `lastPrompt`. Shared by the native `rpc` prompt
+ * path and the v1 legacy prompt adapter so both surfaces keep the same
+ * easy-title behavior.
  */
 
 import type { IEventService } from '#/app/event/event';
-import type { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
+import {
+  type ISessionMetadata,
+  SESSION_META_PROMPT_LIMIT,
+} from '#/session/sessionMetadata/sessionMetadata';
 
 import {
   promptMetadataTextFromContentParts,
@@ -58,15 +64,27 @@ export interface PromptMetadataUpdateTarget {
 export async function applyPromptMetadataUpdate(
   target: PromptMetadataUpdateTarget,
   text: string | undefined,
+  recordPrompt = false,
 ): Promise<void> {
   if (text === undefined) return;
   const current = await target.metadata.read();
-  const patch: { lastPrompt: string; title?: string; isCustomTitle?: boolean } = {
+  const patch: {
+    lastPrompt: string;
+    title?: string;
+    isCustomTitle?: boolean;
+    prompts?: readonly string[];
+  } = {
     lastPrompt: text,
   };
   if (!current.isCustomTitle && isUntitled(current.title)) {
     patch.title = titleFromPromptMetadataText(text);
     patch.isCustomTitle = false;
+  }
+  // Keep the session's first few natural-language prompts for title
+  // generation. Skill / plugin activations pass recordPrompt=false so command
+  // text never becomes title input.
+  if (recordPrompt && (current.prompts?.length ?? 0) < SESSION_META_PROMPT_LIMIT) {
+    patch.prompts = [...(current.prompts ?? []), text];
   }
   await target.metadata.update(patch);
   target.eventService.publish({
