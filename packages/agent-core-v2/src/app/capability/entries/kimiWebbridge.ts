@@ -20,7 +20,7 @@
  * content.
  */
 
-import { access, chmod, mkdir, readFile, rename, rm } from 'node:fs/promises';
+import { access, chmod, mkdir, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -70,7 +70,6 @@ export function createKimiWebbridgeEntry(ctx: CapabilityEntryContext): Capabilit
   const binDir = path.join(ctx.userHomeDir, '.kimi-webbridge', 'bin');
   const binName = ctx.platform === 'win32' ? 'kimi-webbridge.exe' : 'kimi-webbridge';
   const binPath = path.join(binDir, binName);
-  const versionFile = path.join(binDir, 'kimi-webbridge.version');
   const userSourceSkillDir = path.join(ctx.kimiHomeDir, 'skills', 'kimi-webbridge');
   const supported = binaryAssetName(ctx.platform, ctx.arch) !== undefined;
 
@@ -89,17 +88,6 @@ export function createKimiWebbridgeEntry(ctx: CapabilityEntryContext): Capabilit
       });
       if (!resp.ok) return undefined;
       return (await resp.json()) as DaemonStatus;
-    } catch {
-      return undefined;
-    }
-  }
-
-  async function readVersionFile(): Promise<string | undefined> {
-    try {
-      // Format: `<version>|<sizeBytes>|<epochMs>` (written by the official installer).
-      const raw = await readFile(versionFile, 'utf-8');
-      const version = raw.split('|')[0]?.trim();
-      return version === undefined || version.length === 0 ? undefined : version;
     } catch {
       return undefined;
     }
@@ -136,8 +124,10 @@ export function createKimiWebbridgeEntry(ctx: CapabilityEntryContext): Capabilit
       optional: true,
     });
 
-    const version = daemon?.version ?? (await readVersionFile());
-    return { steps, ...(version !== undefined ? { version } : {}) };
+    // Version only from the live daemon: the on-disk `.version` file tracks
+    // the installer script's lineage (e.g. 3.1.x), not the product version
+    // (e.g. v1.11.3) — reporting it would be misleading.
+    return { steps, ...(daemon?.version !== undefined ? { version: daemon.version } : {}) };
   }
 
   async function waitForDaemon(): Promise<void> {

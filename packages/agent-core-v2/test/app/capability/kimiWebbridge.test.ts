@@ -179,20 +179,23 @@ describe('kimi-webbridge entry', () => {
     ]);
   });
 
-  it('falls back to the version file when the daemon is down', async () => {
+  it('reports no version when the daemon is down (the .version file is installer lineage)', async () => {
     const userHome = path.join(root, 'user-home');
     await mkdir(path.join(userHome, '.kimi-webbridge', 'bin'), { recursive: true });
     await writeFile(path.join(userHome, '.kimi-webbridge', 'bin', 'kimi-webbridge'), 'bin');
+    // The on-disk version file carries the installer script's lineage (3.1.x),
+    // which must NOT be reported as the product version.
     await writeFile(
       path.join(userHome, '.kimi-webbridge', 'bin', 'kimi-webbridge.version'),
-      '3.1.1|9556880|1784209976000',
+      '3.1.6|9556880|1784209976000',
     );
     const { fetchImpl } = fakeFetch({ statusSequence: ['error'] });
     const entry = createKimiWebbridgeEntry(makeCtx({ fetchImpl }));
 
     const detected = await entry.detect();
-    expect(detected.version).toBe('3.1.1');
+    expect(detected.version).toBeUndefined();
     expect(detected.steps.find((s) => s.id === 'daemon')?.state).toBe('missing');
+    expect(detected.steps.find((s) => s.id === 'daemon-binary')?.state).toBe('ok');
   });
 
   it('installs end-to-end: download, start-if-down, plugin wiring, un-shadow', async () => {
