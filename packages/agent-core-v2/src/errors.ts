@@ -13,6 +13,7 @@ import { AuthErrors } from '#/app/auth/errors';
 import { TaskErrors } from '#/agent/task/errors';
 import { ProtocolErrors } from '#/kosong/protocol/errors';
 import { ConfigErrors } from '#/app/config/errors';
+import { CapabilityErrors } from '#/app/capability/errors';
 import { FileErrors } from '#/app/file/fileService';
 import { FsErrors } from '#/session/sessionFs/errors';
 import { FullCompactionErrors } from '#/agent/fullCompaction/errors';
@@ -46,6 +47,7 @@ export { AuthErrors } from '#/app/auth/errors';
 export { TaskErrors } from '#/agent/task/errors';
 export { ProtocolErrors } from '#/kosong/protocol/errors';
 export { ConfigErrors } from '#/app/config/errors';
+export { CapabilityErrors } from '#/app/capability/errors';
 export { FileErrors } from '#/app/file/fileService';
 export { FsErrors } from '#/session/sessionFs/errors';
 export { FullCompactionErrors } from '#/agent/fullCompaction/errors';
@@ -76,6 +78,7 @@ export const ErrorCodes = {
   ...TaskErrors.codes,
   ...ProtocolErrors.codes,
   ...ConfigErrors.codes,
+  ...CapabilityErrors.codes,
   ...FileErrors.codes,
   ...FsErrors.codes,
   ...FullCompactionErrors.codes,

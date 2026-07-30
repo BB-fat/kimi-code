@@ -72,6 +72,8 @@ export const ErrorCode = {
   TOOL_CALL_NOT_FOUND: 40416,
   /** 目录（models.dev catalog）中不存在该条目 */
   CATALOG_ENTRY_NOT_FOUND: 40417,
+  /** capability_id 不存在 */
+  CAPABILITY_NOT_FOUND: 40418,
 
   /** session 有正在进行的 prompt，拒绝新请求 */
   SESSION_BUSY: 40901,
@@ -116,6 +118,10 @@ export const ErrorCode = {
   GOAL_UNSUPPORTED_AGENT: 40920,
   /** 创建时 provider_id 已存在 */
   PROVIDER_ALREADY_EXISTS: 40921,
+  /** capability 正在安装中，拒绝并发安装 */
+  CAPABILITY_INSTALL_IN_PROGRESS: 40922,
+  /** 当前平台/架构不支持该 capability */
+  CAPABILITY_UNSUPPORTED: 40923,
 
   /** approval 60s 超时 */
   APPROVAL_EXPIRED: 41001,

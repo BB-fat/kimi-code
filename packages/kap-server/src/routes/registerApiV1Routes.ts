@@ -19,6 +19,7 @@ import { type SessionEventBroadcaster } from '../transport/ws/v1/sessionEventBro
 import type { TranscriptService } from '../services/transcript/transcriptService';
 import { registerApprovalsRoutes } from './approvals';
 import { registerAuthRoute } from './auth';
+import { registerCapabilitiesRoutes } from './capabilities';
 import { registerConfigRoutes } from './config';
 import { registerConnectionsRoutes } from './connections';
 import { registerFilesRoutes } from './files';
@@ -124,6 +125,10 @@ export async function registerApiV1Routes(
         { hostIdentity: opts.hostIdentity },
       );
       registerSkillsRoutes(apiV1 as unknown as Parameters<typeof registerSkillsRoutes>[0], core);
+      registerCapabilitiesRoutes(
+        apiV1 as unknown as Parameters<typeof registerCapabilitiesRoutes>[0],
+        core,
+      );
       registerMessagesRoutes(
         apiV1 as unknown as Parameters<typeof registerMessagesRoutes>[0],
         core,

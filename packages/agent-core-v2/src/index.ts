@@ -185,6 +185,10 @@ export * from '#/app/plugin/archive';
 export * from '#/app/plugin/manager';
 export * from '#/app/plugin/plugin';
 export * from '#/app/plugin/pluginService';
+export * from '#/app/capability/capability';
+export * from '#/app/capability/capabilityService';
+export * from '#/app/capability/errors';
+export * from '#/app/capability/types';
 
 export type { SkillSource } from '#/app/skillCatalog/types';
 export * from '#/agent/tools/skill/skill';

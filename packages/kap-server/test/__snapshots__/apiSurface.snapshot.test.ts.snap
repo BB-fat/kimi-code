@@ -42,6 +42,14 @@ exports[`API surface snapshot > matches the documented v2 route table and meta e
     ],
     [
       "GET",
+      "/api/v1/capabilities",
+    ],
+    [
+      "GET",
+      "/api/v1/capabilities/{capability_id}",
+    ],
+    [
+      "GET",
       "/api/v1/catalog/providers",
     ],
     [
@@ -247,6 +255,10 @@ exports[`API surface snapshot > matches the documented v2 route table and meta e
     [
       "PATCH",
       "/api/v1/workspaces/{workspace_id}",
+    ],
+    [
+      "POST",
+      "/api/v1/capabilities/{tail}",
     ],
     [
       "POST",

@@ -160,6 +160,7 @@ const DOMAIN_LAYER = new Map([
   ['permissionPolicy', 3],
   ['permissionRules', 3],
   ['plugin', 3],
+  ['capability', 3],
   ['record', 3],
   ['modelCatalog', 3],
   ['agentProfileCatalog', 3],

@@ -1,0 +1,208 @@
+/**
+ * `kimi-cu` capability entry — permission-status parsing, app bundle
+ * version reading, layered detect (plugin / app / service / permissions),
+ * and platform gating. Host effects are faked (temp app bundle, scripted
+ * host processes, fake plugins).
+ */
+
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { Readable, Writable } from 'node:stream';
+
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+
+import type { IPluginService } from '#/app/plugin/plugin';
+import type { IHostProcess, IHostProcessService } from '#/os/interface/hostProcess';
+import type { CapabilityEntryContext } from '#/app/capability/entries/context';
+import {
+  createKimiCuEntry,
+  parsePermissionStatus,
+  readAppBundleVersion,
+} from '#/app/capability/entries/kimiCu';
+
+function fakeProc(code: number, stdout = '', stderr = ''): IHostProcess {
+  return {
+    _serviceBrand: undefined,
+    pid: 1234,
+    exitCode: code,
+    stdin: new Writable({
+      write: (_c, _e, cb) => {
+        cb();
+      },
+    }),
+    stdout: Readable.from([stdout]),
+    stderr: Readable.from([stderr]),
+    wait: () => Promise.resolve(code),
+    kill: () => Promise.resolve(),
+    dispose: () => undefined,
+  } as IHostProcess;
+}
+
+function fakeHostProcess(
+  script: Array<{ match: string; code: number; stdout?: string; stderr?: string }>,
+): { service: IHostProcessService; calls: string[] } {
+  const calls: string[] = [];
+  const service: IHostProcessService = {
+    _serviceBrand: undefined,
+    spawn: (command: string, args: readonly string[] = []) => {
+      const key = `${command} ${args.join(' ')}`;
+      calls.push(key);
+      const hit = script.find((s) => key.includes(s.match));
+      return Promise.resolve(fakeProc(hit?.code ?? 0, hit?.stdout ?? '', hit?.stderr ?? ''));
+    },
+  } as IHostProcessService;
+  return { service, calls };
+}
+
+function fakePlugins(
+  installed: Array<{ id: string; enabled: boolean; state: string; version?: string }>,
+): { service: IPluginService; installs: string[] } {
+  const installs: string[] = [];
+  const service = {
+    listPlugins: () =>
+      Promise.resolve(
+        installed.map((p) => ({
+          id: p.id,
+          displayName: p.id,
+          version: p.version,
+          enabled: p.enabled,
+          state: p.state,
+          skillCount: 1,
+          mcpServerCount: 1,
+          enabledMcpServerCount: 1,
+          hookCount: 0,
+          commandCount: 0,
+          hasErrors: false,
+          source: 'zip-url',
+        })),
+      ),
+    installPlugin: (input: { source: string }) => {
+      installs.push(input.source);
+      return Promise.resolve({} as never);
+    },
+  } as unknown as IPluginService;
+  return { service, installs };
+}
+
+describe('parsePermissionStatus', () => {
+  it('parses the machine-readable request-permissions output', () => {
+    expect(parsePermissionStatus('permissions: accessibility=true screenRecording=true')).toEqual({
+      accessibility: true,
+      screenRecording: true,
+    });
+    expect(parsePermissionStatus('permissions: accessibility=true screenRecording=false')).toEqual({
+      accessibility: true,
+      screenRecording: false,
+    });
+    expect(parsePermissionStatus('unknown command')).toBeUndefined();
+    expect(parsePermissionStatus('')).toBeUndefined();
+  });
+});
+
+describe('readAppBundleVersion', () => {
+  let root: string;
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), 'kimi-cu-version-'));
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('reads CFBundleShortVersionString from Info.plist', async () => {
+    const plist = path.join(root, 'Info.plist');
+    await writeFile(
+      plist,
+      `<?xml version="1.0"?><plist><dict>
+<key>CFBundleShortVersionString</key>
+<string>0.4.18</string>
+</dict></plist>`,
+    );
+    expect(await readAppBundleVersion(plist)).toBe('0.4.18');
+  });
+
+  it('returns undefined for a missing file', async () => {
+    expect(await readAppBundleVersion(path.join(root, 'nope.plist'))).toBeUndefined();
+  });
+});
+
+describe('kimi-cu entry', () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), 'kimi-cu-entry-'));
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  async function fakeAppBundle(): Promise<string> {
+    const applicationsDir = path.join(root, 'Applications');
+    const macosDir = path.join(applicationsDir, 'KimiCU.app', 'Contents', 'MacOS');
+    await mkdir(macosDir, { recursive: true });
+    await writeFile(path.join(macosDir, 'kimi-cu'), '#!/bin/sh\n');
+    await writeFile(
+      path.join(applicationsDir, 'KimiCU.app', 'Contents', 'Info.plist'),
+      '<key>CFBundleShortVersionString</key>\n<string>0.4.18</string>',
+    );
+    return applicationsDir;
+  }
+
+  function makeCtx(overrides: Partial<CapabilityEntryContext> = {}): CapabilityEntryContext {
+    return {
+      platform: 'darwin',
+      arch: 'arm64',
+      kimiHomeDir: path.join(root, 'kimi-home'),
+      userHomeDir: path.join(root, 'user-home'),
+      plugins: fakePlugins([]).service,
+      hostProcess: fakeHostProcess([]).service,
+      ...overrides,
+    };
+  }
+
+  it('is supported only on macOS', () => {
+    expect(createKimiCuEntry(makeCtx()).supported).toBe(true);
+    expect(createKimiCuEntry(makeCtx({ platform: 'linux' })).supported).toBe(false);
+    expect(createKimiCuEntry(makeCtx({ platform: 'win32' })).supported).toBe(false);
+  });
+
+  it('detects all four layers with details', async () => {
+    const applicationsDir = await fakeAppBundle();
+    const plugins = fakePlugins([{ id: 'kimi-cu', enabled: true, state: 'ok', version: '0.4.18' }]);
+    const host = fakeHostProcess([
+      { match: 'service-status', code: 0, stdout: 'SMAppService status=1 (1=enabled); fallback plist exists=false' },
+      { match: 'request-permissions', code: 0, stdout: 'permissions: accessibility=true screenRecording=false' },
+    ]);
+    const entry = createKimiCuEntry(
+      makeCtx({ applicationsDir, plugins: plugins.service, hostProcess: host.service }),
+    );
+
+    const detected = await entry.detect();
+    expect(detected.version).toBe('0.4.18');
+    expect(detected.steps).toEqual([
+      { id: 'plugin', state: 'ok', detail: '0.4.18' },
+      { id: 'app', state: 'ok', detail: '0.4.18' },
+      { id: 'service', state: 'ok' },
+      { id: 'permissions', state: 'missing', detail: 'screenRecording' },
+    ]);
+  });
+
+  it('reports missing layers on a bare machine', async () => {
+    const entry = createKimiCuEntry(makeCtx({ applicationsDir: path.join(root, 'Applications') }));
+    const detected = await entry.detect();
+    expect(detected.version).toBeUndefined();
+    expect(detected.steps.map((s) => [s.id, s.state])).toEqual([
+      ['plugin', 'missing'],
+      ['app', 'missing'],
+      ['service', 'missing'],
+      ['permissions', 'missing'],
+    ]);
+  });
+
+  it('rejects install on non-macOS before any side effect', async () => {
+    const plugins = fakePlugins([]);
+    const entry = createKimiCuEntry(makeCtx({ platform: 'linux', plugins: plugins.service }));
+    await expect(entry.install(() => {})).rejects.toThrow(/only supported on macOS/);
+    expect(plugins.installs).toEqual([]);
+  });
+});
