@@ -133,6 +133,10 @@ export interface RenameSessionInput {
   readonly title: string;
 }
 
+export interface GenerateSessionTitleInput {
+  readonly id: string;
+}
+
 export interface ResumeSessionInput {
   readonly id: string;
   readonly kaos?: Kaos | undefined;

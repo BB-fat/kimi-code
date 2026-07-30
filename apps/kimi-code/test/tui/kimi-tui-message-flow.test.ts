@@ -282,6 +282,7 @@ function makeHarness(session = makeSession(), overrides: Record<string, unknown>
       return interactiveAgentScope.run(agentId, fn);
     }),
     getExperimentalFeatures: vi.fn(async () => []),
+    generateSessionTitle: vi.fn(async () => undefined),
     auth: {
       status: vi.fn(),
       login: vi.fn(),

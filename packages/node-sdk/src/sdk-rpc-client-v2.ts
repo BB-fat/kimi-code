@@ -256,6 +256,7 @@ import type {
   ExportSessionInput,
   ExportSessionResult,
   ForkSessionInput,
+  GenerateSessionTitleInput,
   GetConfigOptions,
   GetCronTasksResult,
   GoalSnapshot,
@@ -990,6 +991,28 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     if (handle === undefined) throw SDKRpcClientV2.sessionNotFound(input.id);
     try {
       await this.klient.session(input.id).setTitle(title);
+    } finally {
+      await this.sessionLifecycle.close(input.id);
+    }
+  }
+
+  /**
+   * v2-only (`ISessionTitleService`, session scope). Like `renameSession`, a
+   * closed session is resumed, titled, and closed again so generation does
+   * not leak a live session. `undefined` means generation was unavailable
+   * (no managed OAuth login, no prompt yet, or a custom title is set) — the
+   * current title is kept.
+   */
+  override async generateSessionTitle(
+    input: GenerateSessionTitleInput,
+  ): Promise<string | undefined> {
+    if (this.sessionLifecycle.get(input.id) !== undefined) {
+      return this.klient.session(input.id).generateTitle();
+    }
+    const handle = await this.sessionLifecycle.resume(input.id);
+    if (handle === undefined) throw SDKRpcClientV2.sessionNotFound(input.id);
+    try {
+      return await this.klient.session(input.id).generateTitle();
     } finally {
       await this.sessionLifecycle.close(input.id);
     }

@@ -14,6 +14,7 @@ import type {
   GoalChange,
   GoalUpdatedEvent,
   HookResultEvent,
+  KimiHarness,
   Session,
   SessionMetaUpdatedEvent,
   SkillActivatedEvent,
@@ -94,6 +95,7 @@ export interface SessionEventHost {
   aborted: boolean;
   sessionEventUnsubscribe: (() => void) | undefined;
   readonly streamingUI: StreamingUIController;
+  readonly harness: KimiHarness;
 
   requireSession(): Session;
   setAppState(patch: Partial<AppState>): void;
@@ -162,6 +164,7 @@ export class SessionEventHandler {
   private queuedGoalPromotionPending = false;
   private queuedGoalPromotionInFlight = false;
   private queuedGoalPromotionTimer: ReturnType<typeof setTimeout> | undefined;
+  private titleGenerationDisabled = false;
 
   resetRuntimeState(): void {
     this.backgroundTasks.clear();
@@ -180,6 +183,7 @@ export class SessionEventHandler {
     this.queuedGoalPromotionPending = false;
     this.queuedGoalPromotionInFlight = false;
     this.clearQueuedGoalPromotionTimer();
+    this.titleGenerationDisabled = false;
     this.stopAllMcpServerStatusSpinners();
   }
 
@@ -384,7 +388,27 @@ export class SessionEventHandler {
       }
     }
     this.pluginMcpToolsUsedInTurn.clear();
+    this.requestSessionTitleGeneration();
     this.scheduleQueuedGoalPromotion();
+  }
+
+  /**
+   * Best-effort auto title: while the session has no title yet, ask the
+   * engine to generate one from the first prompts after each completed turn.
+   * The engine keeps custom titles untouched and dedupes in-flight requests;
+   * a resolved `undefined` (no managed login / no prompt yet) just retries on
+   * the next turn, while a rejection (v1 engine, dead RPC) disables further
+   * attempts for this session. The generated title lands through the regular
+   * `session.meta.updated` event.
+   */
+  private requestSessionTitleGeneration(): void {
+    if (this.titleGenerationDisabled) return;
+    const { sessionId, sessionTitle } = this.host.state.appState;
+    if (sessionId.length === 0) return;
+    if (typeof sessionTitle === 'string' && sessionTitle.trim().length > 0) return;
+    void this.host.harness.generateSessionTitle({ id: sessionId }).catch(() => {
+      this.titleGenerationDisabled = true;
+    });
   }
 
   private handleStepBegin(event: TurnStepStartedEvent): void {

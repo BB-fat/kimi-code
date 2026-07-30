@@ -17,6 +17,7 @@ import type {
   ExportSessionInput,
   ExportSessionResult,
   ForkSessionInput,
+  GenerateSessionTitleInput,
   GetConfigOptions,
   KimiConfig,
   KimiConfigPatch,
@@ -235,6 +236,19 @@ export class KimiHarness {
   async renameSession(input: RenameSessionInput): Promise<void> {
     await this.rpc.renameSession(input);
     this.activeSessions.get(input.id)?.emitMetaUpdated({ title: input.title });
+  }
+
+  /**
+   * Generate and apply a session title from the main agent's first prompts
+   * (v2 engine only). Resolves to `undefined` when generation is unavailable
+   * and the current title is kept.
+   */
+  async generateSessionTitle(input: GenerateSessionTitleInput): Promise<string | undefined> {
+    const title = await this.rpc.generateSessionTitle(input);
+    if (title !== undefined) {
+      this.activeSessions.get(input.id)?.emitMetaUpdated({ title });
+    }
+    return title;
   }
 
   async exportSession(input: ExportSessionInput): Promise<ExportSessionResult> {
