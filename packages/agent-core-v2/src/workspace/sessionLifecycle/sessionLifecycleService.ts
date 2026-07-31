@@ -5,20 +5,7 @@
  * them through the DI scope tree (children of the handler's Workspace
  * scope) and seeding each with its identity, storage addressing derived
  * from the handler's persistence scope, and a per-session lifecycle-hooks
- * slots instance it runs around create/close. A close/archive
- * is tracked in a closing registry from that first synchronous step until
- * the scope is disposed: `get`/`list` hide the session while it is
- * closing, `resume` waits the close out and re-materializes instead of
- * returning the doomed handle (retrying the same way when the close
- * itself failed), and the teardown always completes even when a close
- * hook or the agent drain fails. An archive requested during a plain
- * close is folded into it: the live metadata applies the archived flag
- * before the teardown when reached in time, otherwise the flag lands
- * directly on the persisted document (a cold archive takes that direct
- * path as well), and the archived event is published either way. Create
- * and fork reserve their target id synchronously with the existence
- * check, so a loser of that race is rejected before it materializes and
- * its rollback can only ever tear down its own scope,
+ * slots instance it runs around create/close,
  * tearing sessions down on close/archive — archiving flags the session's
  * metadata, removes its agents, restoring clears
  * the archived flag, and broadcasts the transition; session start and
@@ -156,11 +143,6 @@ type MaterializeSessionOptions = Omit<CreateSessionOptions, 'sessionId'> & {
   readonly sessionId: string;
 };
 
-type ClosingEntry = {
-  readonly kind: 'close' | 'archive';
-  readonly run: Promise<void>;
-};
-
 export class SessionLifecycleService extends Disposable implements ISessionLifecycleService {
   declare readonly _serviceBrand: undefined;
   private readonly sessions = new Map<string, ISessionScopeHandle>();
@@ -173,9 +155,6 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
   private readonly _onDidForkSession = this._register(new Emitter<SessionForkedEvent>());
   readonly onDidForkSession: Event<SessionForkedEvent> = this._onDidForkSession.event;
   private readonly resuming = new Map<string, Promise<ISessionScopeHandle | undefined>>();
-  private readonly closing = new Map<string, ClosingEntry>();
-  private readonly reservedTargets = new Set<string>();
-  private readonly pendingArchive = new Set<string>();
 
   constructor(
     @IInstantiationService private readonly instantiation: IInstantiationService,
@@ -220,24 +199,6 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
 
   async create(opts: CreateSessionOptions): Promise<ISessionScopeHandle> {
     const sessionId = opts.sessionId ?? createSessionId();
-    if (this.sessions.has(sessionId) || this.reservedTargets.has(sessionId)) {
-      throw new Error2(
-        ErrorCodes.SESSION_ALREADY_EXISTS,
-        `Session "${sessionId}" already exists`,
-      );
-    }
-    this.reservedTargets.add(sessionId);
-    try {
-      return await this.createReserved(opts, sessionId);
-    } finally {
-      this.reservedTargets.delete(sessionId);
-    }
-  }
-
-  private async createReserved(
-    opts: CreateSessionOptions,
-    sessionId: string,
-  ): Promise<ISessionScopeHandle> {
     const handle = await this.materializeSession({ ...opts, sessionId });
     try {
       const main =
@@ -254,9 +215,7 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
       await this.appendSessionIndexEntry(sessionId, opts.workDir);
     } catch (error) {
       const sessionDir = handle.accessor.get(ISessionContext).sessionDir;
-      if (this.sessions.get(sessionId) === handle) {
-        this.sessions.delete(sessionId);
-      }
+      this.sessions.delete(sessionId);
       await this.drainAgents(handle).catch(() => {});
       handle.dispose();
       await this.hostFs.remove(sessionDir).catch(() => {});
@@ -352,20 +311,13 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
   }
 
   get(sessionId: string): ISessionScopeHandle | undefined {
-    if (this.resuming.has(sessionId) || this.closing.has(sessionId)) return undefined;
+    if (this.resuming.has(sessionId)) return undefined;
     return this.sessions.get(sessionId);
   }
 
   resume(sessionId: string, opts?: ResumeSessionOptions): Promise<ISessionScopeHandle | undefined> {
     const inflight = this.resuming.get(sessionId);
     if (inflight !== undefined) return inflight;
-    const closing = this.closing.get(sessionId);
-    if (closing !== undefined) {
-      return closing.run.then(
-        () => this.resume(sessionId, opts),
-        () => this.resume(sessionId, opts),
-      );
-    }
     const live = this.sessions.get(sessionId);
     if (live !== undefined) return Promise.resolve(live);
     const promise = this.doResume(sessionId, opts)
@@ -409,110 +361,35 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
   list(): readonly ISessionScopeHandle[] {
     const ready: ISessionScopeHandle[] = [];
     for (const [id, handle] of this.sessions) {
-      if (!this.resuming.has(id) && !this.closing.has(id)) ready.push(handle);
+      if (!this.resuming.has(id)) ready.push(handle);
     }
     return ready;
   }
 
   async close(sessionId: string): Promise<void> {
-    const inflight = this.closing.get(sessionId);
-    if (inflight !== undefined) return inflight.run;
     const handle = this.sessions.get(sessionId);
     if (handle === undefined) return;
-    return this.trackClosing(sessionId, 'close', this.doClose(sessionId, handle));
-  }
-
-  private async doClose(sessionId: string, handle: ISessionScopeHandle): Promise<void> {
-    try {
-      await this.announceWillClose({ sessionId, handle, reason: 'exit' });
-    } finally {
-      if (this.pendingArchive.has(sessionId)) {
-        const archived = await handle.accessor
-          .get(ISessionMetadata)
-          .setArchived(true)
-          .then(
-            () => true,
-            () => false,
-          );
-        if (archived) {
-          this.pendingArchive.delete(sessionId);
-          this.event.publish({
-            type: 'event.session.archived',
-            payload: { sessionId },
-          });
-        }
-      }
-      this.sessions.delete(sessionId);
-      await this.drainAgents(handle).catch(() => {});
-      handle.dispose();
-      this._onDidCloseSession.fire({ sessionId });
-    }
+    await this.announceWillClose({ sessionId, handle, reason: 'exit' });
+    this.sessions.delete(sessionId);
+    await this.drainAgents(handle);
+    handle.dispose();
+    this._onDidCloseSession.fire({ sessionId });
   }
 
   async archive(sessionId: string): Promise<void> {
-    const inflight = this.closing.get(sessionId);
-    if (inflight !== undefined) {
-      if (inflight.kind === 'archive') return inflight.run;
-      this.pendingArchive.add(sessionId);
-      return inflight.run.then(
-        () => this.consumePendingArchive(sessionId),
-        () => this.consumePendingArchive(sessionId),
-      );
-    }
     const handle = this.sessions.get(sessionId);
-    if (handle === undefined) {
-      await this.markArchivedOnDisk(sessionId);
-      return;
-    }
-    return this.trackClosing(sessionId, 'archive', this.doArchive(sessionId, handle));
-  }
-
-  private async consumePendingArchive(sessionId: string): Promise<void> {
-    if (this.pendingArchive.delete(sessionId)) {
-      await this.markArchivedOnDisk(sessionId);
-    }
-  }
-
-  private async doArchive(sessionId: string, handle: ISessionScopeHandle): Promise<void> {
+    if (handle === undefined) return;
     const meta = handle.accessor.get(ISessionMetadata);
     await meta.setArchived(true);
+    await this.drainAgents(handle);
     this.event.publish({
       type: 'event.session.archived',
       payload: { sessionId },
     });
-    try {
-      await this.announceWillClose({ sessionId, handle, reason: 'exit' });
-    } finally {
-      this.sessions.delete(sessionId);
-      await this.drainAgents(handle).catch(() => {});
-      handle.dispose();
-      this._onDidArchiveSession.fire({ sessionId });
-    }
-  }
-
-  private async markArchivedOnDisk(sessionId: string): Promise<void> {
-    const scope = sessionScopeOf(this.handlerScope, sessionId);
-    const meta = await this.docs.get<SessionMeta>(scope, 'state.json');
-    if (meta === undefined) return;
-    await this.docs.set(scope, 'state.json', { ...meta, archived: true, updatedAt: Date.now() });
-    this.event.publish({
-      type: 'event.session.archived',
-      payload: { sessionId },
-    });
+    await this.announceWillClose({ sessionId, handle, reason: 'exit' });
+    this.sessions.delete(sessionId);
+    handle.dispose();
     this._onDidArchiveSession.fire({ sessionId });
-  }
-
-  private async trackClosing(
-    sessionId: string,
-    kind: ClosingEntry['kind'],
-    run: Promise<void>,
-  ): Promise<void> {
-    this.closing.set(sessionId, { kind, run });
-    try {
-      await run;
-    } finally {
-      if (this.closing.get(sessionId)?.run === run) this.closing.delete(sessionId);
-    }
   }
 
   async restore(sessionId: string): Promise<ISessionScopeHandle | undefined> {
@@ -538,7 +415,6 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
   async fork(opts: ForkSessionOptions): Promise<ISessionScopeHandle> {
     const sourceId = opts.sourceSessionId;
 
-    await this.closing.get(sourceId)?.run;
     const sourceHandle = this.sessions.get(sourceId);
     const indexSummary = await this.index.get(sourceId);
     if (
@@ -551,7 +427,6 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
     let targetId: string | undefined;
     let target: ISessionScopeHandle | undefined;
     let targetSessionDir: string | undefined;
-    let targetReserved = false;
     try {
       const sourceMeta =
         sourceHandle !== undefined
@@ -559,15 +434,7 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
           : await this.readMetaFromDisk(sourceId);
 
       targetId = opts.newSessionId ?? createSessionId();
-      if (this.sessions.has(targetId) || this.reservedTargets.has(targetId)) {
-        throw new Error2(
-          ErrorCodes.SESSION_ALREADY_EXISTS,
-          `Session "${targetId}" already exists`,
-        );
-      }
-      this.reservedTargets.add(targetId);
-      targetReserved = true;
-      if ((await this.index.get(targetId)) !== undefined) {
+      if (this.sessions.has(targetId) || (await this.index.get(targetId)) !== undefined) {
         throw new Error2(
           ErrorCodes.SESSION_ALREADY_EXISTS,
           `Session "${targetId}" already exists`,
@@ -628,11 +495,7 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
       await this.announceCreated({ sessionId: targetId, handle: target, source: 'fork' });
       return target;
     } catch (error) {
-      if (
-        targetId !== undefined &&
-        target !== undefined &&
-        this.sessions.get(targetId) === target
-      ) {
+      if (targetId !== undefined) {
         this.sessions.delete(targetId);
       }
       if (target !== undefined) {
@@ -645,10 +508,6 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
         await this.hostFs.remove(targetSessionDir).catch(() => {});
       }
       throw error;
-    } finally {
-      if (targetReserved && targetId !== undefined) {
-        this.reservedTargets.delete(targetId);
-      }
     }
   }
 
