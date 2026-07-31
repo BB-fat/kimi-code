@@ -23,8 +23,10 @@ import {
   ErrorCodes,
   KimiError,
   KimiHarness,
-  SDKRpcClientV2,
   type Event,
+  removeProviderFromConfig,
+  SDKRpcClientV2,
+  type KimiConfig,
 } from '#/index';
 import { foldAgentWireReplay } from '#/v2/resume-replay';
 import {
@@ -511,6 +513,60 @@ key = "${titleOAuthRef.key}"
     }
   });
 
+  it('persists removeProvider as one atomic cascade (providers, models, defaults)', async () => {
+    const { harness } = await makeHarness();
+    try {
+      await harness.setConfig({
+        providers: {
+          a: { type: 'openai', baseUrl: 'https://a.example.test/v1', apiKey: 'sk-a' },
+          b: { type: 'openai', baseUrl: 'https://b.example.test/v1', apiKey: 'sk-b' },
+        },
+        models: {
+          'a/m1': { provider: 'a', model: 'm1', maxContextSize: 100 },
+          'b/m1': { provider: 'b', model: 'm1', maxContextSize: 100 },
+        },
+        defaultModel: 'b/m1',
+        defaultProvider: 'b',
+      });
+      const next = await harness.removeProvider('b');
+      expect(next.providers['b']).toBeUndefined();
+      expect(next.providers['a']).toBeDefined();
+      expect(next.models?.['b/m1']).toBeUndefined();
+      expect(next.models?.['a/m1']).toBeDefined();
+      expect(next.defaultModel).toBeUndefined();
+      expect(next.defaultProvider).toBeUndefined();
+      // A fresh read from disk sees the same state — the cascade landed as a
+      // single atomic write, never a halfway-removed intermediate.
+      const reread = await harness.getConfig({ reload: true });
+      expect(reread.providers['b']).toBeUndefined();
+      expect(reread.models?.['b/m1']).toBeUndefined();
+      expect(reread.defaultModel).toBeUndefined();
+      expect(reread.defaultProvider).toBeUndefined();
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('replaces config sections atomically and clears undefined sections', async () => {
+    const { harness } = await makeHarness();
+    try {
+      expect(harness.supportsAtomicSectionReplace()).toBe(true);
+      await harness.setConfig({
+        providers: { a: { type: 'openai', baseUrl: 'https://a.example.test/v1', apiKey: 'sk-a' } },
+        models: { 'a/m1': { provider: 'a', model: 'm1', maxContextSize: 100 } },
+        defaultModel: 'a/m1',
+      });
+      await harness.replaceConfigSections({ defaultModel: undefined });
+      const next = await harness.getConfig({ reload: true });
+      expect(next.defaultModel).toBeUndefined();
+      // Sections absent from the write stay untouched.
+      expect(next.providers['a']).toBeDefined();
+      expect(next.models?.['a/m1']).toBeDefined();
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('fails loudly with not_implemented for methods not yet migrated', async () => {
     const { harness } = await makeHarness();
     try {
@@ -699,8 +755,58 @@ describe('SDKRpcClientV2 engine telemetry', () => {
   });
 });
 
-async function writeSkill(dir: string, name: string): Promise<void> {
-  await mkdir(dir, { recursive: true });
+describe('removeProviderFromConfig', () => {
+  it('drops the provider, its models and dangling default pointers without mutating the input', () => {
+    const config = {
+      providers: {
+        a: { type: 'openai', baseUrl: 'https://a.example.test/v1' },
+        b: { type: 'openai', baseUrl: 'https://b.example.test/v1' },
+      },
+      models: {
+        'a/m1': { provider: 'a', model: 'm1', maxContextSize: 100 },
+        'b/m1': { provider: 'b', model: 'm1', maxContextSize: 100 },
+        'my-b': { provider: 'b', model: 'm1', maxContextSize: 100 },
+      },
+      defaultModel: 'my-b',
+      defaultProvider: 'b',
+    } as unknown as KimiConfig;
+
+    const next = removeProviderFromConfig(config, 'b');
+
+    expect(Object.keys(next.providers)).toEqual(['a']);
+    expect(Object.keys(next.models ?? {})).toEqual(['a/m1']);
+    expect(next.defaultModel).toBeUndefined();
+    expect(next.defaultProvider).toBeUndefined();
+    // The input config is left untouched (the staging host threads the copy).
+    expect(config.providers['b']).toBeDefined();
+    expect(config.models?.['b/m1']).toBeDefined();
+    expect(config.defaultModel).toBe('my-b');
+  });
+
+  it('keeps the default pointers when they do not dangle', () => {
+    const config = {
+      providers: {
+        a: { type: 'openai' },
+        b: { type: 'openai' },
+      },
+      models: {
+        'a/m1': { provider: 'a', model: 'm1', maxContextSize: 100 },
+        'b/m1': { provider: 'b', model: 'm1', maxContextSize: 100 },
+      },
+      defaultModel: 'a/m1',
+      defaultProvider: 'a',
+    } as unknown as KimiConfig;
+
+    const next = removeProviderFromConfig(config, 'b');
+
+    expect(Object.keys(next.providers)).toEqual(['a']);
+    expect(Object.keys(next.models ?? {})).toEqual(['a/m1']);
+    expect(next.defaultModel).toBe('a/m1');
+    expect(next.defaultProvider).toBe('a');
+  });
+});
+
+async function writeSkill(dir: string, name: string): Promise<void> {  await mkdir(dir, { recursive: true });
   await writeFile(
     join(dir, 'SKILL.md'),
     `---\nname: ${name}\ndescription: Skill ${name} for the escape-hatch test\n---\n\nBody of ${name}.\n`,

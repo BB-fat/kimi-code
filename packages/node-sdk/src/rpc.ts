@@ -294,6 +294,29 @@ export abstract class SDKRpcClientBase {
     return rpc.removeKimiProvider({ providerId });
   }
 
+  /**
+   * Whether this client can persist several config sections as ONE atomic
+   * write (see {@link replaceConfigSections}). v1 cannot — its config writes
+   * are whole-document merges — so the default is false.
+   */
+  supportsAtomicSectionReplace(): boolean {
+    return false;
+  }
+
+  /**
+   * Replace several top-level config sections in ONE atomic write: a section
+   * mapped to `undefined` is cleared, sections absent from the record are
+   * left untouched. Unlike {@link setConfig} (a deep-merge that cannot
+   * delete keys), this has replace semantics, so a staged removal can be
+   * expressed by the written record itself.
+   */
+  replaceConfigSections(_sections: Record<string, unknown>): Promise<void> {
+    throw new KimiError(
+      ErrorCodes.NOT_IMPLEMENTED,
+      'This SDK client does not support atomic config section replacement.',
+    );
+  }
+
   async listGlobalMcpServers(): Promise<readonly McpServerConfig[]> {
     const rpc = await this.getRpc();
     return rpc.listGlobalMcpServers({});
