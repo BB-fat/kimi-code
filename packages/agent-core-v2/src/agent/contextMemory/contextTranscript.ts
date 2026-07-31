@@ -32,23 +32,6 @@ export interface ContextTranscriptReducer {
   result(): ContextTranscript;
 }
 
-export function mergeContextTranscriptWithLive(
-  transcript: ContextTranscript,
-  contextMessages: readonly ContextMessage[],
-): {
-  readonly messages: readonly ContextMessage[];
-  readonly times: readonly (number | undefined)[];
-} {
-  if (contextMessages.length <= transcript.foldedLength) {
-    return { messages: transcript.entries, times: transcript.times };
-  }
-  const tail = contextMessages.slice(transcript.foldedLength);
-  return {
-    messages: [...transcript.entries, ...tail],
-    times: [...transcript.times, ...tail.map(() => undefined)],
-  };
-}
-
 interface MutableMessage {
   id?: string;
   role: ContextMessage['role'];

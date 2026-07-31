@@ -32,7 +32,6 @@ import { IAgentBlobService } from '#/agent/blob/agentBlobService';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import {
   createContextTranscriptReducer,
-  mergeContextTranscriptWithLive,
   type ContextTranscript,
 } from '#/agent/contextMemory/contextTranscript';
 import { toProtocolMessage } from '#/agent/contextMemory/messageProjection';
@@ -130,7 +129,7 @@ export class MessageLegacyService implements IMessageLegacyService {
 
     const transcript = await this.readTranscript(agent);
     const contextMessages = agent.accessor.get(IAgentContextMemoryService).get();
-    const merged = mergeContextTranscriptWithLive(transcript, contextMessages);
+    const merged = mergeLiveTail(transcript, contextMessages);
     const entries = await this.rehydrate(agent, merged.messages);
 
     let previousMs = Number.NEGATIVE_INFINITY;
@@ -175,6 +174,23 @@ export class MessageLegacyService implements IMessageLegacyService {
     }
     return reducer.result();
   }
+}
+
+function mergeLiveTail(
+  transcript: ContextTranscript,
+  contextMessages: readonly ContextMessage[],
+): {
+  readonly messages: readonly ContextMessage[];
+  readonly times: readonly (number | undefined)[];
+} {
+  if (contextMessages.length <= transcript.foldedLength) {
+    return { messages: transcript.entries, times: transcript.times };
+  }
+  const tail = contextMessages.slice(transcript.foldedLength);
+  return {
+    messages: [...transcript.entries, ...tail],
+    times: [...transcript.times, ...tail.map(() => undefined)],
+  };
 }
 
 registerScopedService(
