@@ -5,9 +5,9 @@
  * source contributes those directories as the user source, resolving relative
  * paths against the workspace root. When no explicit dirs are configured,
  * it yields nothing so default user / project discovery remains active. Watches
- * the explicit directories (existing or not) through `pathWatch` and re-fires
- * `onDidChange` on debounced fs changes. Bound at Workspace scope so every
- * session of the handler shares one scan.
+ * the explicit directories (existing or not) through a `SkillRootWatcher` and
+ * re-fires `onDidChange` on debounced fs changes. Bound at Workspace scope so
+ * every session of the handler shares one scan.
  */
 
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';
@@ -15,17 +15,18 @@ import { Disposable } from '#/_base/di/lifecycle';
 import { Emitter, type Event } from '#/_base/event';
 import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
-import { type IPathWatch, IPathWatchService } from '#/app/pathWatch/pathWatch';
 import { resolveConfiguredSkillRoots } from '#/app/skillCatalog/skillRoots';
 import { ISkillCatalogRuntimeOptions } from '#/app/skillCatalog/skillCatalogRuntimeOptions';
 import { ISkillDiscovery } from '#/app/skillCatalog/skillDiscovery';
+import { SkillRootWatcher } from '#/app/skillCatalog/skillRootWatch';
 import {
   isSkillLoadAborted,
   SKILL_SOURCE_PRIORITY,
   type ISkillSource,
   type SkillContribution,
 } from '#/app/skillCatalog/skillSource';
-import { SKILL_ROOT_WATCH_OPTIONS } from '#/app/skillCatalog/skillTraversal';
+import { IHostFileSystem } from '#/os/interface/hostFileSystem';
+import { IHostFsWatchService } from '#/os/interface/hostFsWatch';
 import { IWorkspaceContext } from '#/workspace/workspaceContext/workspaceContext';
 
 export interface IExplicitFileSkillSource extends ISkillSource {
@@ -42,18 +43,19 @@ export class ExplicitFileSkillSource extends Disposable implements IExplicitFile
   readonly priority = SKILL_SOURCE_PRIORITY.user;
   private readonly onDidChangeEmitter = this._register(new Emitter<void>());
   readonly onDidChange: Event<void> = this.onDidChangeEmitter.event;
-  private readonly watcher: IPathWatch;
+  private readonly watcher: SkillRootWatcher;
 
   constructor(
     @ISkillDiscovery private readonly discovery: ISkillDiscovery,
     @ISkillCatalogRuntimeOptions private readonly runtimeOptions: ISkillCatalogRuntimeOptions,
     @IWorkspaceContext private readonly workspace: IWorkspaceContext,
     @IBootstrapService private readonly bootstrap: IBootstrapService,
-    @IPathWatchService pathWatch: IPathWatchService,
+    @IHostFsWatchService hostFsWatch: IHostFsWatchService,
+    @IHostFileSystem hostFs: IHostFileSystem,
   ) {
     super();
     this.watcher = this._register(
-      pathWatch.createWatch(SKILL_ROOT_WATCH_OPTIONS, () => {
+      new SkillRootWatcher(hostFsWatch, hostFs, () => {
         this.onDidChangeEmitter.fire();
       }),
     );

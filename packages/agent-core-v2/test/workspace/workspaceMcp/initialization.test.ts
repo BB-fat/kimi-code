@@ -91,7 +91,6 @@ describe('Workspace MCP initialization', () => {
         });
         reg.definePartialInstance(IHostFsWatchService, {
           watch: (): IHostFsWatchHandle => ({
-            ready: Promise.resolve(),
             onDidChange: Event.None as Event<HostFsChange>,
             dispose: () => {},
           }),

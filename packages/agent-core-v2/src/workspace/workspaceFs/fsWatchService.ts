@@ -1,34 +1,35 @@
 /**
  * `workspaceFs` domain (L3) — `IWorkspaceFsWatchService` implementation.
  *
- * Subscribes to the shared `pathWatch` service on the handler root, confines
- * its raw events to each `IWorkspaceFsWatchSubscription`'s declared subtree
- * and to non-`.gitignore`d paths, and debounces them into per-subscription
- * fixed windows re-exposed as workspace-relative `FsChangeEvent`s: the shared
- * leg (one pooled os handle per handler through `pathWatch`, plus the
- * `.gitignore` matcher) runs once per handler, the per-subscriber leg
- * (subtree confinement, debounce window, overflow truncation) runs once per
- * subscription, so two sessions of the same workspace never hang a second os
- * watcher. The canonical target carried by `pathWatch` is projected back
- * into the workspace-relative namespace before filtering, so a symlinked
- * handler root still maps events correctly. The path watch starts lazily
- * when the first subscription declares a non-empty path set and stops when
- * no subscription watches anything. Path confinement is lexical (the
- * handler root plus the `workspaceDirs` additional-dir set), matching the
- * rest of `workspaceFs`. Bound at Workspace scope.
+ * Keeps ONE os `IHostFsWatchService` subscription on the handler root and
+ * fans its raw events out to every `IWorkspaceFsWatchSubscription`: the
+ * shared leg (the os handle plus the `.gitignore` matcher) runs once per
+ * handler, the per-subscriber leg (subtree confinement, debounce window,
+ * overflow truncation) runs once per subscription, so two sessions of the
+ * same workspace never hang a second os watcher. The os handle starts
+ * lazily when the first subscription declares a non-empty path set and
+ * stops when no subscription watches anything. Event paths are mapped back
+ * through both the lexical handler root and its realpath, so a symlinked
+ * handler root (macOS `/tmp`, `/var`) still yields workspace-relative
+ * paths. Path confinement is lexical (the handler root plus the
+ * `workspaceDirs` additional-dir set), matching the rest of `workspaceFs`.
+ * Bound at Workspace scope.
  */
 
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import ignore, { type Ignore } from 'ignore';
 
-import { Disposable } from '#/_base/di/lifecycle';
+import { Disposable, type IDisposable } from '#/_base/di/lifecycle';
 import { Emitter, type Event } from '#/_base/event';
 import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
-import { type IPathWatch, IPathWatchService } from '#/app/pathWatch/pathWatch';
 import { ErrorCodes, Error2 } from '#/errors';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
-import type { HostFsChange } from '#/os/interface/hostFsWatch';
+import {
+  type HostFsChange,
+  type IHostFsWatchHandle,
+  IHostFsWatchService,
+} from '#/os/interface/hostFsWatch';
 import { IWorkspaceContext } from '#/workspace/workspaceContext/workspaceContext';
 import { IWorkspaceDirs } from '#/workspace/workspaceDirs/workspaceDirs';
 
@@ -53,19 +54,30 @@ export class WorkspaceFsWatchService extends Disposable implements IWorkspaceFsW
   declare readonly _serviceBrand: undefined;
 
   private readonly subscriptions = new Set<WorkspaceFsWatchSubscription>();
-  private handle: IPathWatch | undefined;
+  private handle: IHostFsWatchHandle | undefined;
+  private handleSub: IDisposable | undefined;
   private gitignoreLoaded = false;
   private readonly matcher: Ignore = ignore().add('.git/');
   private readonly workDir: string;
+  private eventRoot: string | undefined;
 
   constructor(
     @IWorkspaceContext workspace: IWorkspaceContext,
     @IWorkspaceDirs private readonly workspaceDirs: IWorkspaceDirs,
-    @IPathWatchService private readonly pathWatch: IPathWatchService,
+    @IHostFsWatchService private readonly hostFsWatch: IHostFsWatchService,
     @IHostFileSystem private readonly hostFs: IHostFileSystem,
   ) {
     super();
     this.workDir = resolve(workspace.cwd);
+    // The os watcher may report events against the canonical target of a
+    // symlinked handler root; remember the realpath so `toRel` can map both
+    // namespaces. Best-effort: until it settles, events map lexically.
+    void this.hostFs.realpath(this.workDir).then(
+      (canonical) => {
+        this.eventRoot = resolve(canonical);
+      },
+      () => undefined,
+    );
   }
 
   subscribe(): IWorkspaceFsWatchSubscription {
@@ -103,17 +115,14 @@ export class WorkspaceFsWatchService extends Disposable implements IWorkspaceFsW
   private ensureHandle(): void {
     if (this.handle !== undefined) return;
     this.loadGitignore();
-    const handle = this.pathWatch.createWatch(
-      { target: 'directory', recursive: true, debounceMs: 0 },
-      ({ canonicalPath, change }) => {
-        if (change !== undefined) this.onRaw(change, canonicalPath);
-      },
-    );
+    const handle = this.hostFsWatch.watch(this.workDir, { recursive: true });
     this.handle = handle;
-    void handle.setPaths([this.workDir]);
+    this.handleSub = handle.onDidChange((e) => this.onRaw(e));
   }
 
   private teardownHandle(): void {
+    this.handleSub?.dispose();
+    this.handleSub = undefined;
     this.handle?.dispose();
     this.handle = undefined;
   }
@@ -129,8 +138,8 @@ export class WorkspaceFsWatchService extends Disposable implements IWorkspaceFsW
     );
   }
 
-  private onRaw(e: HostFsChange, canonicalPath?: string): void {
-    const rel = this.toRel(e.path, canonicalPath);
+  private onRaw(e: HostFsChange): void {
+    const rel = this.toRel(e.path);
     if (rel === '.') return;
     const probe = e.kind === 'directory' ? `${rel}/` : rel;
     if (this.matcher.ignores(probe)) return;
@@ -189,11 +198,18 @@ export class WorkspaceFsWatchService extends Disposable implements IWorkspaceFsW
     });
   }
 
-  private toRel(abs: string, cwd = this.workDir): string {
-    if (abs === cwd) return '.';
-    const rel = relative(cwd, abs);
-    if (rel === '') return '.';
-    return rel.split(sep).join('/');
+  private toRel(abs: string): string {
+    for (const root of [this.workDir, this.eventRoot]) {
+      if (root === undefined) continue;
+      if (abs === root) return '.';
+      const rel = relative(root, abs);
+      if (rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)) {
+        return rel.split(sep).join('/');
+      }
+    }
+    // Outside every known root: keep the lexical rendering (dropped later by
+    // the subscription's subtree check unless it watches everything).
+    return relative(this.workDir, abs).split(sep).join('/');
   }
 }
 
@@ -245,9 +261,7 @@ class WorkspaceFsWatchSubscription implements IWorkspaceFsWatchSubscription {
       this.pending = [];
     }
     if (this.debounceTimer === undefined) {
-      const timer = setTimeout(() => {
-        this.flush();
-      }, this.debounceMs);
+      const timer = setTimeout(() => this.flush(), this.debounceMs);
       timer.unref?.();
       this.debounceTimer = timer;
     }

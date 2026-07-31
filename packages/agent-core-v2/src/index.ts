@@ -41,8 +41,6 @@ export * from '#/os/interface/terminalErrors';
 export * from '#/os/backends/node-local/hostEnvironmentService';
 export * from '#/os/backends/node-local/hostFsService';
 export * from '#/os/backends/node-local/hostFsWatchService';
-export * from '#/app/pathWatch/pathWatch';
-import '#/app/pathWatch/pathWatchService';
 export * from '#/os/backends/node-local/hostProcessService';
 export * from '#/os/backends/node-local/hostTerminalService';
 export * from '#/agent/tools/os/bash/bash';

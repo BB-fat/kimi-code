@@ -51,8 +51,6 @@ import { ISkillCatalogRuntimeOptions } from '#/app/skillCatalog/skillCatalogRunt
 import { ISkillDiscovery } from '#/app/skillCatalog/skillDiscovery';
 import { BuiltinSkillSource, IBuiltinSkillSource } from '#/app/skillCatalog/builtinSkillSource';
 import { IUserFileSkillSource, UserFileSkillSource } from '#/app/skillCatalog/userFileSkillSource';
-import { IPathWatchService } from '#/app/pathWatch/pathWatch';
-import { PathWatchService } from '#/app/pathWatch/pathWatchService';
 import { IWorkspaceLifecycleService } from '#/app/workspaceLifecycle/workspaceLifecycle';
 import { WorkspaceLifecycleService } from '#/app/workspaceLifecycle/workspaceLifecycleService';
 import { IWorkspaceService, type Workspace } from '#/app/workspace/workspace';
@@ -252,7 +250,6 @@ describe('workspace resource sharing (handler chain)', () => {
     registerScopedService(LifecycleScope.Session, ISessionStateService, SessionStateService, ScopeActivation.OnScopeCreated, 'state');
     registerScopedService(LifecycleScope.App, IBuiltinSkillSource, BuiltinSkillSource, ScopeActivation.OnDemand, 'skillCatalog');
     registerScopedService(LifecycleScope.App, IUserFileSkillSource, UserFileSkillSource, ScopeActivation.OnDemand, 'skillCatalog');
-    registerScopedService(LifecycleScope.App, IPathWatchService, PathWatchService, ScopeActivation.OnScopeCreated, 'pathWatch');
     registerScopedService(LifecycleScope.App, IAgentProfileRegistry, AgentProfileRegistryService, ScopeActivation.OnDemand, 'agentProfileCatalog');
     registerScopedService(LifecycleScope.App, IBuiltinAgentProfileLoader, BuiltinAgentProfileLoaderService, ScopeActivation.OnDemand, 'agentProfileCatalog');
   });

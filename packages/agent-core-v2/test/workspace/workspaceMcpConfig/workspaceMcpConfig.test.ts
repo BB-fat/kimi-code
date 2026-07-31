@@ -91,7 +91,7 @@ describe('WorkspaceMcpConfigService', () => {
           emitter = new Emitter<HostFsChange>();
           watchFires.set(path, emitter);
         }
-        return { ready: Promise.resolve(), onDidChange: emitter.event, dispose: () => {} };
+        return { onDidChange: emitter.event, dispose: () => {} };
       },
     };
   }

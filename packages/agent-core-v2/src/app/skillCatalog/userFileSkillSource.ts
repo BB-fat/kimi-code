@@ -4,7 +4,7 @@
  * Discovers user skills from the bootstrap home directories through
  * `ISkillDiscovery`, contributing them at priority 20 (above extra / plugin /
  * builtin, below workspace). Reads home paths from `bootstrap`. Watches the
- * candidate root paths (existing or not) through `pathWatch` and
+ * candidate root paths (existing or not) through a `SkillRootWatcher` and
  * re-fires `onDidChange` on debounced fs changes. Bound at App scope.
  */
 
@@ -14,10 +14,8 @@ import { Emitter, type Event } from '#/_base/event';
 import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
-import {
-  type IPathWatch,
-  IPathWatchService,
-} from '#/app/pathWatch/pathWatch';
+import { IHostFileSystem } from '#/os/interface/hostFileSystem';
+import { IHostFsWatchService } from '#/os/interface/hostFsWatch';
 
 import {
   MERGE_ALL_AVAILABLE_SKILLS_SECTION,
@@ -25,6 +23,7 @@ import {
 } from './configSection';
 import { ISkillCatalogRuntimeOptions } from './skillCatalogRuntimeOptions';
 import { ISkillDiscovery } from './skillDiscovery';
+import { SkillRootWatcher } from './skillRootWatch';
 import { resolveUserSkillRoots } from './skillRoots';
 import {
   isSkillLoadAborted,
@@ -32,7 +31,6 @@ import {
   type ISkillSource,
   type SkillContribution,
 } from './skillSource';
-import { SKILL_ROOT_WATCH_OPTIONS } from './skillTraversal';
 
 export interface IUserFileSkillSource extends ISkillSource {
   readonly _serviceBrand: undefined;
@@ -48,18 +46,19 @@ export class UserFileSkillSource extends Disposable implements IUserFileSkillSou
   readonly priority = SKILL_SOURCE_PRIORITY.user;
   private readonly onDidChangeEmitter = this._register(new Emitter<void>());
   readonly onDidChange: Event<void> = this.onDidChangeEmitter.event;
-  private readonly watcher: IPathWatch;
+  private readonly watcher: SkillRootWatcher;
 
   constructor(
     @ISkillDiscovery private readonly discovery: ISkillDiscovery,
     @IBootstrapService private readonly bootstrap: IBootstrapService,
     @IConfigService private readonly config: IConfigService,
     @ISkillCatalogRuntimeOptions private readonly runtimeOptions: ISkillCatalogRuntimeOptions,
-    @IPathWatchService pathWatch: IPathWatchService,
+    @IHostFsWatchService hostFsWatch: IHostFsWatchService,
+    @IHostFileSystem hostFs: IHostFileSystem,
   ) {
     super();
     this.watcher = this._register(
-      pathWatch.createWatch(SKILL_ROOT_WATCH_OPTIONS, () => {
+      new SkillRootWatcher(hostFsWatch, hostFs, () => {
         this.onDidChangeEmitter.fire();
       }),
     );

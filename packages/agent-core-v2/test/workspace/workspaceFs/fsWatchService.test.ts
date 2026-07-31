@@ -1,11 +1,10 @@
 /**
- * `workspaceFs` fs-watch (L3) — verifies the shared path-watch fan-out:
+ * `workspaceFs` fs-watch (L3) — verifies the shared os watcher fan-out:
  * confinement to each subscription's declared subtree, workspace-relative
- * path mapping (including events reported against the canonical root of a
+ * path mapping (including events reported against the canonical target of a
  * symlinked handler root), per-subscription debounce coalescing and window
- * truncation, `.gitignore` filtering, and the handle lifecycle (one pooled
- * path watch per handler no matter how many subscriptions), using a fake
- * shared path watch.
+ * truncation, `.gitignore` filtering, and the handle lifecycle (one os watch
+ * per handler no matter how many subscriptions), using a fake os watcher.
  */
 
 import { join } from 'node:path';
@@ -14,13 +13,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { LifecycleScope } from '#/_base/di/scope';
 import { createScopedTestHost, stubPair } from '#/_base/di/test';
-import {
-  type IPathWatch,
-  IPathWatchService,
-  type PathWatchEvent,
-} from '#/app/pathWatch/pathWatch';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
-import type { HostFsChange } from '#/os/interface/hostFsWatch';
+import {
+  type HostFsChange,
+  type IHostFsWatchHandle,
+  IHostFsWatchService,
+} from '#/os/interface/hostFsWatch';
 import { IWorkspaceContext } from '#/workspace/workspaceContext/workspaceContext';
 import { IWorkspaceDirs } from '#/workspace/workspaceDirs/workspaceDirs';
 import type { FsChangeEvent } from '#/workspace/workspaceFs/fsWatch';
@@ -59,54 +57,53 @@ function stubWorkspaceDirs(): IWorkspaceDirs {
   };
 }
 
-interface FakePathWatch {
-  readonly service: IPathWatchService;
-  readonly setPathsCalls: string[][];
+interface FakeWatch {
+  readonly service: IHostFsWatchService;
+  readonly watchCalls: string[];
   fire: (
     rel: string,
     action: HostFsChange['action'],
     kind?: HostFsChange['kind'],
-    canonicalRoot?: string,
+    root?: string,
   ) => void;
   readonly disposedCount: () => number;
 }
 
-function fakePathWatch(): FakePathWatch {
-  let listener: ((event: PathWatchEvent) => void) | undefined;
+function fakeHostFsWatch(): FakeWatch {
+  const watchCalls: string[] = [];
+  let listener: ((e: HostFsChange) => void) | undefined;
   let disposedCount = 0;
-  const setPathsCalls: string[][] = [];
-  const service: IPathWatchService = {
+  const handle: IHostFsWatchHandle = {
+    onDidChange: (l) => {
+      listener = l;
+      return { dispose: () => (listener = undefined) };
+    },
+    dispose: () => {
+      disposedCount += 1;
+      listener = undefined;
+    },
+  };
+  const service: IHostFsWatchService = {
     _serviceBrand: undefined,
-    createWatch: (_options, onDidChange): IPathWatch => {
-      listener = onDidChange;
-      return {
-        setPaths: (paths) => {
-          setPathsCalls.push([...paths]);
-          return Promise.resolve();
-        },
-        dispose: () => {
-          disposedCount += 1;
-          listener = undefined;
-        },
-      };
+    watch: (path) => {
+      watchCalls.push(path);
+      return handle;
     },
   };
   return {
     service,
-    setPathsCalls,
-    fire: (rel, action, kind = 'file', canonicalRoot) =>
-      listener?.({
-        watchedPath: WORK_DIR,
-        canonicalPath: canonicalRoot,
-        change: { path: join(canonicalRoot ?? WORK_DIR, rel), action, kind },
-      }),
+    watchCalls,
+    fire: (rel, action, kind = 'file', root = WORK_DIR) =>
+      listener?.({ path: join(root, rel), action, kind }),
     disposedCount: () => disposedCount,
   };
 }
 
-function fakeHostFs(gitignore?: string): IHostFileSystem {
+function fakeHostFs(gitignore?: string, canonicalRoot?: string): IHostFileSystem {
   return {
     _serviceBrand: undefined,
+    realpath: async (p: string) =>
+      canonicalRoot !== undefined && p === WORK_DIR ? canonicalRoot : p,
     readText: async (p: string) => {
       if (gitignore !== undefined && p === join(WORK_DIR, '.gitignore')) return gitignore;
       const err = new Error(`ENOENT: ${p}`) as NodeJS.ErrnoException;
@@ -118,17 +115,17 @@ function fakeHostFs(gitignore?: string): IHostFileSystem {
 
 interface Harness {
   readonly svc: IWorkspaceFsWatchService;
-  readonly watch: FakePathWatch;
+  readonly watch: FakeWatch;
 }
 
-function makeWorkspace(gitignore?: string): Harness {
-  const watch = fakePathWatch();
+function makeWorkspace(gitignore?: string, canonicalRoot?: string): Harness {
+  const watch = fakeHostFsWatch();
   const host = createScopedTestHost();
   const workspace = host.child(LifecycleScope.Workspace, 'w1', [
     stubPair(IWorkspaceContext, stubWorkspaceContext()),
     stubPair(IWorkspaceDirs, stubWorkspaceDirs()),
-    stubPair(IPathWatchService, watch.service),
-    stubPair(IHostFileSystem, fakeHostFs(gitignore)),
+    stubPair(IHostFsWatchService, watch.service),
+    stubPair(IHostFileSystem, fakeHostFs(gitignore, canonicalRoot)),
   ]);
   const svc = workspace.accessor.get(IWorkspaceFsWatchService);
   disposers.push(() => host.dispose());
@@ -156,7 +153,7 @@ describe('WorkspaceFsWatchService', () => {
     const { svc, watch } = makeWorkspace();
     const sub = svc.subscribe();
     sub.setWatchedPaths(['src']);
-    expect(watch.setPathsCalls).toEqual([[WORK_DIR]]);
+    expect(watch.watchCalls).toEqual([WORK_DIR]);
     expect(sub.watchedPaths).toEqual(['src']);
   });
 
@@ -174,11 +171,13 @@ describe('WorkspaceFsWatchService', () => {
     expect(events[0]?.changes).toEqual([{ path: 'src/a.ts', change: 'created', kind: 'file' }]);
   });
 
-  it('maps events reported against the canonical root back to workspace-relative paths', () => {
-    const { svc, watch } = makeWorkspace();
+  it('maps events reported against the canonical root of a symlinked handler root', async () => {
+    const { svc, watch } = makeWorkspace(undefined, '/private/repo');
     const sub = svc.subscribe();
     sub.setWatchedPaths(['src']);
     const events = collect(sub);
+    // Let the constructor's realpath probe settle so the canonical root is known.
+    await vi.advanceTimersByTimeAsync(0);
 
     watch.fire('src/a.ts', 'created', 'file', '/private/repo');
     vi.advanceTimersByTime(200);
@@ -274,7 +273,7 @@ describe('WorkspaceFsWatchService', () => {
     const eventsA = collect(subA);
     const eventsB = collect(subB);
 
-    expect(watch.setPathsCalls).toEqual([[WORK_DIR]]);
+    expect(watch.watchCalls).toEqual([WORK_DIR]);
 
     watch.fire('src/a.ts', 'created');
     watch.fire('lib/b.ts', 'modified');
@@ -293,7 +292,7 @@ describe('WorkspaceFsWatchService', () => {
     const subB = svc.subscribe();
     subA.setWatchedPaths(['src']);
     subB.setWatchedPaths(['lib']);
-    expect(watch.setPathsCalls).toEqual([[WORK_DIR]]);
+    expect(watch.watchCalls).toEqual([WORK_DIR]);
 
     subA.setWatchedPaths([]);
     expect(watch.disposedCount()).toBe(0);

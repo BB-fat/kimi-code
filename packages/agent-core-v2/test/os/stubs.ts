@@ -4,7 +4,7 @@
  * Lives under `test/` (not `src/`) so test-support code stays out of the
  * production tree. Import from a relative path (`./stubs` or `../os/stubs`).
  * The fake records watched paths/options and routes synthetic change events
- * through the recursive, depth, and ignored topology of each handle.
+ * through the recursive and ignored topology of each handle.
  */
 
 import { Emitter } from '#/_base/event';
@@ -37,7 +37,6 @@ export function stubHostFsWatch(): StubHostFsWatch {
       const entry = { path, options, emitter };
       watchers.push(entry);
       return {
-        ready: Promise.resolve(),
         onDidChange: emitter.event,
         dispose: () => {
           const index = watchers.indexOf(entry);
@@ -72,8 +71,6 @@ function watchReceives(
   if (!changedPath.startsWith(`${root}/`)) return false;
   const relative = changedPath.slice(root.length + 1);
   const segments = relative.split('/').filter((segment) => segment.length > 0);
-  const directoryDepth = Math.max(0, segments.length - 1);
   if (options?.recursive === false && segments.length > 1) return false;
-  if (options?.depth !== undefined && directoryDepth > options.depth) return false;
   return true;
 }

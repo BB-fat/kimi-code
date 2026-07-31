@@ -19,7 +19,6 @@ import {
   _clearScopedRegistryForTests,
   LifecycleScope,
   registerScopedService,
-  ScopeActivation,
 } from '#/_base/di/scope';
 import { Emitter, Event } from '#/_base/event';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
@@ -27,8 +26,6 @@ import { IPluginService } from '#/app/plugin/plugin';
 import { PluginService } from '#/app/plugin/pluginService';
 import type { ReloadSummary } from '#/app/plugin/types';
 import { IProviderService } from '#/kosong/provider/provider';
-import { IPathWatchService } from '#/app/pathWatch/pathWatch';
-import { PathWatchService } from '#/app/pathWatch/pathWatchService';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IHostFsWatchService, type HostFsChange, type IHostFsWatchHandle } from '#/os/interface/hostFsWatch';
 import { IWorkspaceContext } from '#/workspace/workspaceContext/workspaceContext';
@@ -63,7 +60,7 @@ import { createFakeHostFs } from '../../tools/fixtures/fake-exec';
 
 const bootstrapStub = stubBootstrap('/home');
 
-function pathWatchHostFs(): IHostFileSystem {
+function watchHostFs(): IHostFileSystem {
   return createFakeHostFs({
     stat: async () => ({ isFile: false, isDirectory: true, size: 0 }),
     realpath: async (path) => path,
@@ -159,7 +156,6 @@ function fsWatchStub(): IHostFsWatchService {
   return {
     _serviceBrand: undefined,
     watch: (): IHostFsWatchHandle => ({
-      ready: Promise.resolve(),
       onDidChange: Event.None as Event<HostFsChange>,
       dispose: () => {},
     }),
@@ -185,7 +181,7 @@ function makeHost(
     stubPair(IConfigService, config),
     stubPair(ISkillCatalogRuntimeOptions, runtimeOptions),
     stubPair(IPluginService, pluginStub(pluginRoots, pluginReloadEmitter)),
-    stubPair(IHostFileSystem, pathWatchHostFs()),
+    stubPair(IHostFileSystem, watchHostFs()),
     stubPair(IHostFsWatchService, watch),
   ]);
   const workspace = host.child(LifecycleScope.Workspace, 'w1', [stubPair(IWorkspaceContext, ws)]);
@@ -238,13 +234,6 @@ describe('WorkspaceSkillCatalogService', () => {
     registerScopedService(LifecycleScope.App, IBuiltinSkillSource, BuiltinSkillSource);
     registerScopedService(LifecycleScope.App, IUserFileSkillSource, UserFileSkillSource);
     registerScopedService(LifecycleScope.App, IPluginService, PluginService);
-    registerScopedService(
-      LifecycleScope.App,
-      IPathWatchService,
-      PathWatchService,
-      ScopeActivation.OnScopeCreated,
-      'pathWatch',
-    );
     registerScopedService(
       LifecycleScope.Workspace,
       IWorkspaceSkillCatalog,
@@ -388,7 +377,7 @@ describe('WorkspaceSkillCatalogService', () => {
       stubPair(IConfigService, config),
       stubPair(ISkillCatalogRuntimeOptions, runtimeOptions),
       stubPair(IPluginService, pluginStub()),
-      stubPair(IHostFileSystem, pathWatchHostFs()),
+      stubPair(IHostFileSystem, watchHostFs()),
       stubPair(IHostFsWatchService, fsWatchStub()),
     ]);
     const workspace = host.child(LifecycleScope.Workspace, 'w1', [stubPair(IWorkspaceContext, ws)]);
@@ -429,7 +418,7 @@ describe('WorkspaceSkillCatalogService', () => {
       stubPair(IConfigService, config),
       stubPair(ISkillCatalogRuntimeOptions, runtimeOptions),
       stubPair(IPluginService, pluginStub()),
-      stubPair(IHostFileSystem, pathWatchHostFs()),
+      stubPair(IHostFileSystem, watchHostFs()),
       stubPair(IHostFsWatchService, fsWatchStub()),
     ]);
     const workspace = host.child(LifecycleScope.Workspace, 'w1', [stubPair(IWorkspaceContext, ws)]);
@@ -647,7 +636,7 @@ describe('WorkspaceSkillCatalogService', () => {
         _serviceBrand: undefined,
       } as unknown as ISkillCatalogRuntimeOptions),
       stubPair(IPluginService, pluginStub()),
-      stubPair(IHostFileSystem, pathWatchHostFs()),
+      stubPair(IHostFileSystem, watchHostFs()),
       stubPair(IHostFsWatchService, fsWatchStub()),
     ]);
     const workspace = host.child(LifecycleScope.Workspace, 'w1', [
@@ -708,7 +697,7 @@ describe('WorkspaceSkillCatalogService', () => {
         _serviceBrand: undefined,
       } as unknown as ISkillCatalogRuntimeOptions),
       stubPair(IPluginService, pluginService),
-      stubPair(IHostFileSystem, pathWatchHostFs()),
+      stubPair(IHostFileSystem, watchHostFs()),
       stubPair(IHostFsWatchService, fsWatchStub()),
     ]);
     const workspace = host.child(LifecycleScope.Workspace, 'w1', [
@@ -768,7 +757,7 @@ describe('WorkspaceSkillCatalogService', () => {
         _serviceBrand: undefined,
       } as unknown as ISkillCatalogRuntimeOptions),
       stubPair(IProviderService, stubProviderService()),
-      stubPair(IHostFileSystem, pathWatchHostFs()),
+      stubPair(IHostFileSystem, watchHostFs()),
       stubPair(IHostFsWatchService, fsWatchStub()),
     ]);
     const ws = workspaceContextStub('/work');
@@ -827,7 +816,7 @@ describe('WorkspaceSkillCatalogService', () => {
       stubPair(IPluginService, pluginStub()),
       stubPair(ILogService, stubLog()),
       stubPair(ISkillDiscovery, new FileSkillDiscovery(stubLog())),
-      stubPair(IHostFileSystem, pathWatchHostFs()),
+      stubPair(IHostFileSystem, watchHostFs()),
       stubPair(IHostFsWatchService, new HostFsWatchService()),
     ]);
     const workspace = host.child(LifecycleScope.Workspace, 'w1', [
@@ -885,7 +874,7 @@ describe('WorkspaceSkillCatalogService', () => {
         _serviceBrand: undefined,
       } as unknown as ISkillCatalogRuntimeOptions),
       stubPair(IPluginService, pluginStub()),
-      stubPair(IHostFileSystem, pathWatchHostFs()),
+      stubPair(IHostFileSystem, watchHostFs()),
       stubPair(IHostFsWatchService, watch),
     ]);
     const workspace = host.child(LifecycleScope.Workspace, 'w1', [
@@ -926,7 +915,7 @@ describe('WorkspaceSkillCatalogService', () => {
         _serviceBrand: undefined,
       } as unknown as ISkillCatalogRuntimeOptions),
       stubPair(IPluginService, pluginStub()),
-      stubPair(IHostFileSystem, pathWatchHostFs()),
+      stubPair(IHostFileSystem, watchHostFs()),
       stubPair(IHostFsWatchService, stubHostFsWatch()),
     ]);
     const workspace = host.child(LifecycleScope.Workspace, 'w1', [

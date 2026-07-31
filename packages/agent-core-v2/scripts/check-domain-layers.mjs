@@ -187,7 +187,6 @@ const DOMAIN_LAYER = new Map([
   ['model', 2],
   ['sessionIndex', 2],
   ['sessionStore', 2],
-  ['pathWatch', 2],
   // `mcpCore` is the scope-agnostic MCP connection core: the connection
   // manager, the stdio/SSE/HTTP transport clients, the OAuth flow, the
   // server-config schemas, and the `McpOAuthStore` port. It holds no file

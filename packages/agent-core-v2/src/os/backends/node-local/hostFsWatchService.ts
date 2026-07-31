@@ -24,12 +24,10 @@ import {
 const DEFAULT_IGNORED = (p: string): boolean => /(?:^|[/\\])\.git(?:$|[/\\])/.test(p);
 
 class HostFsWatchHandle implements IHostFsWatchHandle {
-  readonly ready: Promise<void>;
   readonly onDidChange: Event<HostFsChange>;
 
   private readonly emitter: Emitter<HostFsChange>;
   private readonly watcher: FSWatcher;
-  private readyResolver: (() => void) | undefined;
   private disposed = false;
 
   constructor(path: string, options: HostFsWatchOptions | undefined) {
@@ -38,20 +36,9 @@ class HostFsWatchHandle implements IHostFsWatchHandle {
     this.watcher = new FSWatcher({
       ignoreInitial: true,
       persistent: false,
-      followSymlinks: options?.followSymlinks ?? false,
-      depth: options?.recursive === false ? 0 : options?.depth,
-      usePolling: options?.pollingIntervalMs !== undefined,
-      interval: options?.pollingIntervalMs ?? 100,
+      followSymlinks: false,
+      depth: options?.recursive === false ? 0 : undefined,
       ignored: options?.ignored ?? DEFAULT_IGNORED,
-    });
-    this.ready = new Promise((resolve) => {
-      this.readyResolver = resolve;
-    });
-    this.watcher.once('ready', () => {
-      this.markReady();
-    });
-    this.watcher.once('error', () => {
-      this.markReady();
     });
     this.watcher.on('all', (eventName: string, absPath: string) => {
       const mapped = mapChokidarEvent(eventName, absPath);
@@ -66,15 +53,8 @@ class HostFsWatchHandle implements IHostFsWatchHandle {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    this.markReady();
     void this.watcher.close().catch(() => undefined);
     this.emitter.dispose();
-  }
-
-  private markReady(): void {
-    const resolve = this.readyResolver;
-    this.readyResolver = undefined;
-    resolve?.();
   }
 }
 

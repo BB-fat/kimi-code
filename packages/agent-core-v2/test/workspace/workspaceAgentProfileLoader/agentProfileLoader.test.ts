@@ -113,7 +113,6 @@ function fsWatchStub(): IHostFsWatchService {
   return {
     _serviceBrand: undefined,
     watch: (): IHostFsWatchHandle => ({
-      ready: Promise.resolve(),
       onDidChange: Event.None as Event<HostFsChange>,
       dispose: () => {},
     }),
