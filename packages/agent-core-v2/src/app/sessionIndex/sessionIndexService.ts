@@ -53,6 +53,7 @@ import {
   CHILD_SESSION_KIND_KEY,
   ISessionIndex,
   PARENT_SESSION_ID_KEY,
+  READ_MODEL_SUMMARY_VERSION,
   type SessionListQuery,
   type SessionSummary,
 } from './sessionIndex';
@@ -61,6 +62,8 @@ const META_SCOPE = 'session-meta';
 const META_KEY = 'state.json';
 const SESSION_COLLECTION = 'session';
 const READ_MODEL_FLAG = 'persistence_minidb_readmodel';
+
+type CachedSessionSummary = SessionSummary & { readonly v: number };
 
 function parseTime(value: unknown): number {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -71,13 +74,19 @@ function parseTime(value: unknown): number {
   return 0;
 }
 
-function toTitleKind(titleKind: unknown, isCustomTitle: unknown): SessionSummary['titleKind'] {
-  // Same priority as the metadata document's canonical normalization: a
-  // legacy writer's explicit custom marker outranks a stale titleKind.
-  if (isCustomTitle === true) return 'custom';
-  return titleKind === 'replaceable' || titleKind === 'generated' || titleKind === 'custom'
-    ? titleKind
-    : undefined;
+function toTitleKind(meta: Record<string, unknown>): SessionSummary['titleKind'] {
+  const title = typeof meta['title'] === 'string' ? meta['title'] : undefined;
+  const titleKind = meta['titleKind'];
+  if (title !== undefined && meta['isCustomTitle'] === true) return 'custom';
+  if (
+    title !== undefined &&
+    (titleKind === 'replaceable' || titleKind === 'generated' || titleKind === 'custom')
+  ) {
+    return titleKind;
+  }
+  if (title !== undefined && meta['isCustomTitle'] === false) return 'replaceable';
+  if (typeof meta['customTitle'] === 'string') return 'custom';
+  return title === undefined ? undefined : 'replaceable';
 }
 
 function recoverCwd(meta: Record<string, unknown>): string | undefined {
@@ -110,10 +119,11 @@ function matchesChildOf(summary: SessionSummary, parentId: string | undefined): 
  * fields the session-summary contract requires; anything else is treated as a
  * cold miss and rebuilt from disk.
  */
-function isSessionSummaryShape(value: unknown): value is SessionSummary {
+function isSessionSummaryShape(value: unknown): value is CachedSessionSummary {
   if (value === null || typeof value !== 'object') return false;
   const summary = value as Record<string, unknown>;
   return (
+    summary['v'] === READ_MODEL_SUMMARY_VERSION &&
     typeof summary['id'] === 'string' &&
     typeof summary['workspaceId'] === 'string' &&
     typeof summary['createdAt'] === 'number' &&
@@ -247,11 +257,17 @@ export class FileSessionIndex implements ISessionIndex {
     sessionId: string,
   ): Promise<SessionSummary | undefined> {
     const cached: unknown = await this.queryStore.get(SESSION_COLLECTION, sessionId);
-    if (isSessionSummaryShape(cached)) return cached;
+    if (isSessionSummaryShape(cached)) {
+      const { v: _version, ...summary } = cached;
+      return summary;
+    }
     const summary = await this.readSummary(workspaceId, sessionId);
     if (summary !== undefined) {
       // Also overwrites a cache entry that failed the shape check above.
-      await this.queryStore.put(SESSION_COLLECTION, sessionId, summary);
+      await this.queryStore.put(SESSION_COLLECTION, sessionId, {
+        ...summary,
+        v: READ_MODEL_SUMMARY_VERSION,
+      });
     }
     return summary;
   }
@@ -343,7 +359,7 @@ export class FileSessionIndex implements ISessionIndex {
       workspaceId,
       cwd: recoverCwd(meta),
       title: typeof meta['title'] === 'string' ? meta['title'] : undefined,
-      titleKind: toTitleKind(meta['titleKind'], meta['isCustomTitle']),
+      titleKind: toTitleKind(meta),
       lastPrompt: typeof meta['lastPrompt'] === 'string' ? meta['lastPrompt'] : undefined,
       createdAt: parseTime(meta['createdAt']),
       updatedAt: parseTime(meta['updatedAt']),

@@ -15,7 +15,11 @@ import { ILogService } from '#/_base/log/log';
 import { encodeWorkDirKey } from '#/_base/utils/workdir-slug';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IFlagService } from '#/app/flag/flag';
-import { ISessionIndex, type SessionSummary } from '#/app/sessionIndex/sessionIndex';
+import {
+  ISessionIndex,
+  READ_MODEL_SUMMARY_VERSION,
+  type SessionSummary,
+} from '#/app/sessionIndex/sessionIndex';
 import { FileSessionIndex } from '#/app/sessionIndex/sessionIndexService';
 import { MiniDbQueryStore } from '#/persistence/backends/minidb/miniDbQueryStore';
 import { JsonAtomicDocumentStore } from '#/persistence/backends/node-fs/atomicDocumentStore';
@@ -144,11 +148,13 @@ describe('FileSessionIndex (legacy)', () => {
       isCustomTitle: true,
     });
     await seedSession('plain', { title: 'plain' });
+    await seedSession('legacy-custom', { customTitle: 'legacy title' });
 
     const store = build();
     expect((await store.get('generated'))?.titleKind).toBe('generated');
     expect((await store.get('stale-mixed'))?.titleKind).toBe('custom');
-    expect((await store.get('plain'))?.titleKind).toBeUndefined();
+    expect((await store.get('plain'))?.titleKind).toBe('replaceable');
+    expect((await store.get('legacy-custom'))?.titleKind).toBe('custom');
   });
 
   it('list filters by sessionId without enumerating all sessions', async () => {
@@ -314,13 +320,14 @@ describe('FileSessionIndex (read model)', () => {
     await fsp.writeFile(join(dir, 'state.json'), JSON.stringify(meta));
   }
 
-  function summary(id: string, overrides: Partial<SessionSummary> = {}): SessionSummary {
+  function summary(id: string, overrides: Partial<SessionSummary> = {}) {
     return {
       id,
       workspaceId,
       createdAt: 1,
       updatedAt: 2,
       archived: false,
+      v: READ_MODEL_SUMMARY_VERSION,
       ...overrides,
     };
   }
@@ -371,6 +378,29 @@ describe('FileSessionIndex (read model)', () => {
     // The bad entry is overwritten by the disk backfill.
     const cached = await queryStore.get<SessionSummary>(SESSION_COLLECTION, 's1');
     expect(cached?.archived).toBe(false);
+  });
+
+  it('treats a cache entry stamped with an older summary version as a cold miss', async () => {
+    await seedSession('s1', {
+      title: '用户标题',
+      titleKind: 'replaceable',
+      isCustomTitle: true,
+      createdAt: 1,
+      updatedAt: 2,
+    });
+    const store = build();
+    await queryStore.put(SESSION_COLLECTION, 's1', {
+      ...summary('s1', { title: '用户标题', titleKind: 'replaceable' }),
+      v: 1,
+    });
+
+    const got = await store.get('s1');
+    // The stale-stamped entry is ignored and backfilled from disk, which
+    // honors the legacy custom marker over the stale titleKind.
+    expect(got?.titleKind).toBe('custom');
+    const cached = await queryStore.get<Record<string, unknown>>(SESSION_COLLECTION, 's1');
+    expect(cached?.['v']).toBe(READ_MODEL_SUMMARY_VERSION);
+    expect(cached?.['titleKind']).toBe('custom');
   });
 
   it('get falls back to disk when the cached entry fails the shape check', async () => {
