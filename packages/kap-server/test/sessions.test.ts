@@ -627,7 +627,7 @@ describe('server-v2 /api/v1/sessions', () => {
       method: 'chat_title',
       params: {
         chat_content:
-          'user 1: first REST prompt\nuser 2: second REST prompt\nuser 3: third REST prompt',
+          'user: first REST prompt\nuser: second REST prompt\nuser: third REST prompt',
       },
     });
 

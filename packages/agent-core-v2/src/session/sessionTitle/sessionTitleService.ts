@@ -155,7 +155,7 @@ export class SessionTitleService implements ISessionTitleService {
 function titleInputFromPrompts(prompts: readonly string[]): string | undefined {
   if (prompts.length === 0) return undefined;
   return prompts
-    .map((prompt, index) => `user ${index + 1}: ${prompt}`)
+    .map((prompt) => `user: ${prompt}`)
     .join('\n')
     .slice(0, MAX_TITLE_INPUT_LENGTH);
 }

@@ -237,7 +237,7 @@ describe('SessionTitleService', () => {
     const [, init] = fetchMock.mock.calls[0]!;
     expect(JSON.parse(init?.body as string)).toEqual({
       method: 'chat_title',
-      params: { chat_content: 'user 1: 帮我看一下这个 Go 的 nil pointer 报错' },
+      params: { chat_content: 'user: 帮我看一下这个 Go 的 nil pointer 报错' },
     });
     expect(new Headers(init?.headers as Record<string, string>).get('authorization')).toBe(
       'Bearer test-token',
@@ -260,7 +260,7 @@ describe('SessionTitleService', () => {
     expect(JSON.parse(init?.body as string)).toEqual({
       method: 'chat_title',
       params: {
-        chat_content: 'user 1: 先帮我搭一个 Vite 项目\nuser 2: 加上路由\nuser 3: 现在配一下 ESLint',
+        chat_content: 'user: 先帮我搭一个 Vite 项目\nuser: 加上路由\nuser: 现在配一下 ESLint',
       },
     });
   });
@@ -272,7 +272,7 @@ describe('SessionTitleService', () => {
 
     const [, init] = fetchMock.mock.calls[0]!;
     const body = JSON.parse(init?.body as string) as { params: { chat_content: string } };
-    expect(body.params.chat_content.startsWith('user 1: 很长的输入')).toBe(true);
+    expect(body.params.chat_content.startsWith('user: 很长的输入')).toBe(true);
     expect(body.params.chat_content).toHaveLength(1000);
   });
 
