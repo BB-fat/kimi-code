@@ -703,6 +703,65 @@ describe('KimiTUI message flow', () => {
     expect(driver.state.appState.sessionId).toBe('');
   });
 
+  it('blocks a skill command submitted while the lazy session is being created (v2 engine)', async () => {
+    const session = makeSession({ id: 'ses-lazy', activateSkill: vi.fn(async () => {}) });
+    const startupInput: KimiTUIStartupInput = {
+      ...makeStartupInput(),
+      engineV2: true,
+      cliOptions: { ...makeStartupInput().cliOptions, model: 'k2' },
+    };
+    const { driver, harness } = await makeDriver(
+      session,
+      {
+        listWorkspaceSkills: vi.fn(async () => [
+          {
+            name: 'my-skill',
+            description: 'A test skill',
+            path: '/tmp/my-skill',
+            source: 'user',
+          },
+        ]),
+        listPluginCommands: vi.fn(async () => []),
+      },
+      startupInput,
+    );
+    await (
+      driver as unknown as { refreshSkillCommands(): Promise<void> }
+    ).refreshSkillCommands();
+
+    // A prompt and a skill command both trigger the same in-flight creation.
+    driver.handleUserInput('hello');
+    driver.handleUserInput('/skill:my-skill');
+
+    await vi.waitFor(() => {
+      expect(session.prompt).toHaveBeenCalledWith('hello');
+    });
+    // The skill activation must be blocked, not run concurrently with the
+    // prompt's turn.
+    expect(session.activateSkill).not.toHaveBeenCalled();
+    expect(harness.createSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('manages plugins without creating a session (v2 engine)', async () => {
+    const session = makeSession({ id: 'ses-lazy' });
+    const listPlugins = vi.fn(async () => []);
+    const startupInput: KimiTUIStartupInput = {
+      ...makeStartupInput(),
+      engineV2: true,
+      // No model configured: /plugins must still work via the app-global API.
+      cliOptions: { ...makeStartupInput().cliOptions },
+    };
+    const { driver, harness } = await makeDriver(session, { listPlugins }, startupInput);
+
+    driver.handleUserInput('/plugins list');
+
+    await vi.waitFor(() => {
+      expect(listPlugins).toHaveBeenCalled();
+    });
+    expect(harness.createSession).not.toHaveBeenCalled();
+    expect(driver.state.appState.sessionId).toBe('');
+  });
+
   it('tracks /clear as the clear alias for /new', async () => {
     const { driver, harness } = await makeDriver(makeSession({ id: 'ses-1' }));
     const nextSession = makeSession({ id: 'ses-2' });

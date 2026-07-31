@@ -43,9 +43,17 @@ import { handleAddDirCommand } from './add-dir';
 import { parseSlashInput } from './parse';
 import { handlePluginsCommand } from './plugins';
 import { handleProviderCommand } from './provider';
-import type { BuiltinSlashCommandName } from './registry';
+import {
+  findBuiltInSlashCommand,
+  resolveSlashCommandAvailability,
+  type BuiltinSlashCommandName,
+} from './registry';
 import { handleReloadCommand, handleReloadTuiCommand } from './reload';
-import { resolveSlashCommandInput, slashBusyMessage } from './resolve';
+import {
+  resolveSlashCommandInput,
+  slashBusyMessage,
+  slashCommandBusyReason,
+} from './resolve';
 import {
   handleExportDebugZipCommand,
   handleExportMdCommand,
@@ -220,6 +228,17 @@ async function executeSlashCommand(host: SlashCommandHost, input: string): Promi
       if (session === undefined) {
         session = await ensureSessionForCommand(host);
         if (session === undefined) return;
+        // A first prompt may have started a turn while the session was being
+        // created; skill commands are always busy-gated, so re-check the gate
+        // resolved before the await.
+        const busyReason = slashCommandBusyReason({
+          isStreaming: host.state.appState.streamingPhase !== 'idle',
+          isCompacting: host.state.appState.isCompacting,
+        });
+        if (busyReason !== undefined) {
+          host.showError(slashBusyMessage(intent.commandName, busyReason));
+          return;
+        }
       }
       host.track('input_command', {
         command: intent.commandName,
@@ -237,6 +256,16 @@ async function executeSlashCommand(host: SlashCommandHost, input: string): Promi
       if (session === undefined) {
         session = await ensureSessionForCommand(host);
         if (session === undefined) return;
+        // Same busy re-check as the skill path: plugin commands are always
+        // busy-gated too.
+        const busyReason = slashCommandBusyReason({
+          isStreaming: host.state.appState.streamingPhase !== 'idle',
+          isCompacting: host.state.appState.isCompacting,
+        });
+        if (busyReason !== undefined) {
+          host.showError(slashBusyMessage(intent.commandName, busyReason));
+          return;
+        }
       }
       host.track('input_command', { command: `${intent.pluginId}:${intent.commandName}` });
       host.activatePluginCommand(session, intent.pluginId, intent.commandName, intent.args);
@@ -293,7 +322,6 @@ const SESSION_REQUIRING_COMMANDS: ReadonlySet<BuiltinSlashCommandName> = new Set
   'mcp',
   'permission',
   'plan',
-  'plugins',
   'status',
   'swarm',
   'title',
@@ -311,6 +339,22 @@ async function handleBuiltInSlashCommand(
   if (host.session === undefined && SESSION_REQUIRING_COMMANDS.has(name)) {
     const session = await ensureSessionForCommand(host);
     if (session === undefined) return;
+    // A first prompt may have started a turn while the session was being
+    // created; re-check the availability gate that was resolved before the
+    // await (idle-only commands are blocked while a turn is active).
+    const command = findBuiltInSlashCommand(name);
+    const busyReason = slashCommandBusyReason({
+      isStreaming: host.state.appState.streamingPhase !== 'idle',
+      isCompacting: host.state.appState.isCompacting,
+    });
+    if (
+      busyReason !== undefined &&
+      command !== undefined &&
+      resolveSlashCommandAvailability(command, args) === 'idle-only'
+    ) {
+      host.showError(slashBusyMessage(name, busyReason));
+      return;
+    }
   }
   switch (name) {
     case 'exit':
