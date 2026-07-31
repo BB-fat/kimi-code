@@ -603,10 +603,7 @@ export class Session {
   }
 
   /** @internal */
-  emitMetaUpdated(patch: {
-    readonly title?: string | undefined;
-    readonly isCustomTitle?: boolean | undefined;
-  }): void {
+  emitMetaUpdated(patch: { readonly title?: string; readonly isCustomTitle?: boolean }): void {
     this.emit({
       type: 'session.meta.updated',
       sessionId: this.id,

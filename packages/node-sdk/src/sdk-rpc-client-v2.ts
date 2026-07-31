@@ -749,6 +749,21 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   }
 
   /**
+   * Multi-key variant of {@link runSessionAccess}: acquires the queues in
+   * sorted order so concurrent multi-key operations (fork A→B vs fork B→A)
+   * cannot deadlock.
+   */
+  private runSessionAccessAll<T>(sessionIds: readonly string[], work: () => Promise<T>): Promise<T> {
+    const keys = [...new Set(sessionIds)].sort();
+    let chained: () => Promise<T> = work;
+    for (const key of [...keys].reverse()) {
+      const inner = chained;
+      chained = () => this.runSessionAccess(key, inner);
+    }
+    return chained();
+  }
+
+  /**
    * Runs `action` against the session without changing its live footprint: a
    * session that is already live (publicly resumed or created through this
    * client) is used in place and left open, while a cold session is resumed
@@ -1107,19 +1122,24 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       );
     }
     // The source session's reads (metadata, wire flush) stay atomic against
-    // its close/reload through the per-session queue.
-    return this.runSessionAccess(input.id, async () => {
-      const forkHandler = await handlerForSession(this.engineAccessor, input.id);
-      if (forkHandler === undefined) throw SDKRpcClientV2.sessionNotFound(input.id);
-      const handle = await forkHandler.accessor.get(IWorkspaceHandlerService).fork({
-        sourceSessionId: input.id,
-        newSessionId: input.forkId,
-        title: input.title,
-        metadata: input.metadata,
-      });
-      this.wireSession(handle);
-      return this.resumedSessionSummary(handle);
-    });
+    // its close/reload through the per-session queue; an explicit target id
+    // takes a second (sorted) queue so fork(A→X) is also atomic against
+    // create(X) / fork(B→X).
+    return this.runSessionAccessAll(
+      input.forkId === undefined ? [input.id] : [input.id, input.forkId],
+      async () => {
+        const forkHandler = await handlerForSession(this.engineAccessor, input.id);
+        if (forkHandler === undefined) throw SDKRpcClientV2.sessionNotFound(input.id);
+        const handle = await forkHandler.accessor.get(IWorkspaceHandlerService).fork({
+          sourceSessionId: input.id,
+          newSessionId: input.forkId,
+          title: input.title,
+          metadata: input.metadata,
+        });
+        this.wireSession(handle);
+        return this.resumedSessionSummary(handle);
+      },
+    );
   }
 
   override async closeSession(input: SessionIdRpcInput): Promise<void> {

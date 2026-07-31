@@ -64,6 +64,7 @@ export class KimiHarness {
   private readonly uiMode: string;
   private readonly telemetry: TelemetryClient;
   private readonly activeSessions = new Map<string, Session>();
+  private readonly resumeInflight = new Map<string, Promise<Session>>();
   private readonly ensureConfigFileImpl: () => Promise<void>;
   private readonly closeImpl: () => void | Promise<void>;
   private readonly sessionStartedProperties: TelemetryProperties;
@@ -152,6 +153,23 @@ export class KimiHarness {
       return active;
     }
 
+    // Coalesce concurrent resumes of the same id onto one facade; without
+    // this, parallel callers each build their own Session over the shared
+    // engine handle, and one facade's close kills the engine handle under
+    // the other.
+    const inflight = this.resumeInflight.get(id);
+    if (inflight !== undefined) return inflight;
+    const run = this.doResumeSession(input, id);
+    this.resumeInflight.set(id, run);
+    try {
+      return await run;
+    } finally {
+      if (this.resumeInflight.get(id) === run) this.resumeInflight.delete(id);
+    }
+  }
+
+  private async doResumeSession(input: ResumeSessionInput, id: string): Promise<Session> {
+    const { kaos, persistenceKaos, sessionStartedProperties, ...resumeInput } = input;
     const summary =
       kaos === undefined && persistenceKaos === undefined
         ? await this.rpc.resumeSession({ ...resumeInput, id })

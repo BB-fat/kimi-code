@@ -372,6 +372,50 @@ key = "${titleOAuthRef.key}"
     }
   });
 
+  it('coalesces concurrent public resumes onto one session facade', async () => {
+    const { harness } = await makeHarness();
+    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-work-'));
+    tempDirs.push(workDir);
+
+    try {
+      const session = await harness.createSession({ id: 'ses_coalesce', workDir });
+      await session.close();
+
+      const [first, second] = await Promise.all([
+        harness.resumeSession({ id: 'ses_coalesce' }),
+        harness.resumeSession({ id: 'ses_coalesce' }),
+      ]);
+
+      // One engine handle, one facade: a later close on either reference
+      // must not strand a second live facade over the same handle.
+      expect(first).toBe(second);
+      expect(harness.getSession('ses_coalesce')).toBe(first);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('reports the title state in listSessions as well as in the resumed summary', async () => {
+    const { harness } = await makeHarness();
+    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-work-'));
+    tempDirs.push(workDir);
+
+    try {
+      const session = await harness.createSession({ id: 'ses_title_kind', workDir });
+      await harness.renameSession({ id: session.id, title: '我的标题' });
+
+      // The list path (index → klient contract → mapper) must project the
+      // same canonical title state the resume path serves.
+      const listed = await harness.listSessions({ workDir });
+      expect(listed.find((item) => item.id === session.id)?.titleKind).toBe('custom');
+      await session.close();
+      const resumed = await harness.resumeSession({ id: session.id });
+      expect(resumed.summary?.titleKind).toBe('custom');
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('serves listWorkspaceSkills through the engineAccessor escape hatch', async () => {
     const { harness, homeDir } = await makeHarness();
     const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-work-'));
