@@ -583,6 +583,49 @@ describe('SessionTitleService', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('runs a forced regeneration independently of a plain in-flight call', async () => {
+    const pendingFetch = createPendingFetch();
+    fetchMock.mockImplementationOnce(pendingFetch.fetch);
+    titlePrompts = ['hello'];
+
+    const plain = ix.get(ISessionTitleService).generateTitle();
+    await pendingFetch.started;
+    // The forced call neither joins the plain call's slot nor waits for it.
+    const forced = ix.get(ISessionTitleService).generateTitle({ force: true });
+    await expect(forced).resolves.toBe('生成的标题');
+
+    pendingFetch.resolve(
+      new Response(JSON.stringify({ title: '普通标题' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    await expect(plain).resolves.toBe('普通标题');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not share a forced in-flight result with a plain call', async () => {
+    await metadata.setGeneratedTitleIfUncustomized('已生成的标题');
+    const pendingFetch = createPendingFetch();
+    fetchMock.mockImplementationOnce(pendingFetch.fetch);
+    titlePrompts = ['hello'];
+
+    const forced = ix.get(ISessionTitleService).generateTitle({ force: true });
+    await pendingFetch.started;
+    // An already-generated title makes the plain call exit early on its own
+    // instead of riding the forced regeneration's result.
+    await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    pendingFetch.resolve(
+      new Response(JSON.stringify({ title: '强制标题' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    await expect(forced).resolves.toBe('强制标题');
+  });
+
   it('returns unavailable without calling the backend when no prompt was seen', async () => {
     await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
     expect(fetchMock).not.toHaveBeenCalled();

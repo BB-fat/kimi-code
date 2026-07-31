@@ -106,17 +106,19 @@ export class SessionMetadata extends Disposable implements ISessionMetadata {
   }
 
   async update(patch: SessionMetaPatch): Promise<void> {
-    return this.enqueueUpdate(() => this.applyUpdate(patch));
+    await this.enqueueUpdate(() => this.applyUpdate(patch));
   }
 
-  private async applyUpdate(patch: SessionMetaPatch): Promise<void> {
+  private async applyUpdate(patch: SessionMetaPatch, allowWhen?: () => boolean): Promise<boolean> {
     await this.ready;
+    if (allowWhen?.() === false) return false;
     this.data = { ...this.data, ...patch, updatedAt: Date.now() };
     await this.store.set(this.scope, META_KEY, encodeSessionMeta(this.data));
     await this.mirrorToReadModel();
     this._onDidChangeMetadata.fire({
       changed: Object.keys(patch) as (keyof SessionMeta)[],
     });
+    return true;
   }
 
   async setTitle(title: string): Promise<void> {
@@ -127,9 +129,7 @@ export class SessionMetadata extends Disposable implements ISessionMetadata {
     return this.enqueueUpdate(async () => {
       await this.ready;
       if (this.data.titleKind === 'custom') return false;
-      if (allowWhen?.() === false) return false;
-      await this.applyUpdate({ title, titleKind: 'generated' });
-      return true;
+      return this.applyUpdate({ title, titleKind: 'generated' }, allowWhen);
     });
   }
 

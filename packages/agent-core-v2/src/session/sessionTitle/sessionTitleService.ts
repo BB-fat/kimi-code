@@ -9,9 +9,11 @@
  * (the kap-server route), gated by a managed Kimi Code OAuth login; any
  * failure degrades to keeping the current title, and a custom title set by
  * the user is never overwritten. An already-generated title is not
- * regenerated unless forced. The whole `generateTitle()` call is the
- * coalesced unit the `sessionLifecycleHooks` `onWillCloseSession` slot
- * drains before the scope is disposed, and the write-back is dropped once
+ * regenerated unless forced. Plain calls coalesce onto one shared
+ * in-flight generation while a forced regeneration always runs on its
+ * own; every active generation is drained through the
+ * `sessionLifecycleHooks` `onWillCloseSession` slot before the scope is
+ * disposed, and the write-back is dropped once
  * this scope's `sessionLifetime` signal fires — the in-flight request
  * carries the signal, and the metadata update re-checks it inside the
  * serialized write so an abort landing while the update sits queued still
@@ -59,7 +61,8 @@ const MAX_TITLE_PROMPTS = 3;
 export class SessionTitleService implements ISessionTitleService {
   declare readonly _serviceBrand: undefined;
 
-  private _generation: Promise<string | undefined> | undefined;
+  private _shared: Promise<string | undefined> | undefined;
+  private readonly _active = new Set<Promise<string | undefined>>();
 
   constructor(
     @ISessionContext private readonly ctx: ISessionContext,
@@ -75,20 +78,24 @@ export class SessionTitleService implements ISessionTitleService {
     @ILogService private readonly log: ILogService,
   ) {
     lifecycleHooks.onWillCloseSession.register('sessionTitle', async (_event, next) => {
-      await this._generation?.catch(() => undefined);
+      await Promise.allSettled([...this._active]);
       await next();
     });
   }
 
   async generateTitle(options?: { readonly force?: boolean }): Promise<string | undefined> {
     if (this.lifetime.signal.aborted) return undefined;
-    const inFlight = this._generation;
-    if (inFlight !== undefined) return inFlight;
-    const settled = this.generateTitleOnce(options).finally(() => {
-      if (this._generation === settled) this._generation = undefined;
+    // Plain calls coalesce onto the shared in-flight slot; a forced
+    // regeneration always runs on its own so it is neither swallowed by a
+    // plain call's early exit nor shares its result with one.
+    if (options?.force !== true && this._shared !== undefined) return this._shared;
+    const tracked = this.generateTitleOnce(options).finally(() => {
+      this._active.delete(tracked);
+      if (this._shared === tracked) this._shared = undefined;
     });
-    this._generation = settled;
-    return settled;
+    this._active.add(tracked);
+    if (options?.force !== true) this._shared = tracked;
+    return tracked;
   }
 
   private async generateTitleOnce(options?: {
