@@ -1,4 +1,9 @@
-import type { CreateSessionOptions, KimiHarness, Session } from '@moonshot-ai/kimi-code-sdk';
+import type {
+  CreateSessionOptions,
+  KimiHarness,
+  Session,
+  ThinkingEffort,
+} from '@moonshot-ai/kimi-code-sdk';
 
 import { createKimiCodeUserAgent } from '#/cli/version';
 
@@ -24,6 +29,7 @@ export interface AuthFlowHost {
   session: Session | undefined;
   readonly harness: KimiHarness;
   readonly options: KimiTUIOptions;
+  readonly engineV2: boolean;
 
   setAppState(patch: Partial<AppState>): void;
   setStartupReady(): void;
@@ -72,6 +78,17 @@ export class AuthFlowController {
       if (effort !== undefined) {
         await host.session.setThinking(effort);
       }
+      return;
+    }
+
+    if (host.engineV2) {
+      // Lazy session creation (v2 engine): configure the model only; the
+      // session is created on the first message.
+      const patch: Partial<AppState> = { model };
+      if (effort !== undefined) {
+        patch.thinkingEffort = effort as ThinkingEffort;
+      }
+      host.setAppState(patch);
       return;
     }
 

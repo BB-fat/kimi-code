@@ -630,6 +630,15 @@ export abstract class SDKRpcClientBase {
     return rpc.listPluginCommands({ sessionId: input.sessionId });
   }
 
+  /**
+   * App-global plugin command list, no session required. The v1 engine only
+   * exposes plugin commands through a live session, so the base returns an
+   * empty list; the v2 client overrides with the app-global live view.
+   */
+  async listPluginCommandsGlobal(): Promise<readonly PluginCommandDef[]> {
+    return [];
+  }
+
   async listBackgroundTasks(
     input: SessionIdRpcInput & { activeOnly?: boolean; limit?: number },
   ): Promise<readonly BackgroundTaskInfo[]> {

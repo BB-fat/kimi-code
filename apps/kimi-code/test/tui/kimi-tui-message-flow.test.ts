@@ -303,13 +303,14 @@ function makeHarness(session = makeSession(), overrides: Record<string, unknown>
 async function makeDriver(
   session = makeSession(),
   harnessOverrides: Record<string, unknown> = {},
+  startupInput: KimiTUIStartupInput = makeStartupInput(),
 ): Promise<{
   driver: MessageDriver;
   session: ReturnType<typeof makeSession>;
   harness: ReturnType<typeof makeHarness>;
 }> {
   const harness = makeHarness(session, harnessOverrides);
-  const driver = new KimiTUI(harness as never, makeStartupInput()) as unknown as MessageDriver;
+  const driver = new KimiTUI(harness as never, startupInput) as unknown as MessageDriver;
   vi.spyOn(driver.state.ui, 'requestRender').mockImplementation(() => {});
   vi.spyOn(driver.state.terminal, 'setProgress').mockImplementation(() => {});
   driver.persistInputHistory = vi.fn(async () => {});
@@ -460,6 +461,97 @@ describe('KimiTUI message flow', () => {
     expect(harness.track).toHaveBeenCalledWith('shortcut_editor', undefined);
     expect(harness.track).toHaveBeenCalledWith('shortcut_expand', undefined);
     expect(harness.track).toHaveBeenCalledWith('shortcut_paste', { kind: 'text' });
+  });
+
+  it('lazily creates the session on the first message (v2 engine)', async () => {
+    const session = makeSession({ id: 'ses-lazy' });
+    const startupInput: KimiTUIStartupInput = {
+      ...makeStartupInput(),
+      engineV2: true,
+      cliOptions: { ...makeStartupInput().cliOptions, model: 'k2' },
+    };
+    const { driver, harness } = await makeDriver(session, {}, startupInput);
+
+    // Startup stays session-less on the v2 engine.
+    expect(harness.createSession).not.toHaveBeenCalled();
+    expect(driver.state.appState.sessionId).toBe('');
+    expect(driver.state.appState.model).toBe('k2');
+
+    driver.handleUserInput('hello');
+
+    await vi.waitFor(() => {
+      expect(session.prompt).toHaveBeenCalledWith('hello');
+    });
+    expect(harness.createSession).toHaveBeenCalledTimes(1);
+    expect(harness.createSession).toHaveBeenCalledWith({
+      workDir: '/tmp/proj-a',
+      model: 'k2',
+      thinking: undefined,
+      permission: 'manual',
+      planMode: undefined,
+    });
+    expect(driver.getCurrentSessionId()).toBe('ses-lazy');
+  });
+
+  it('lazily creates the session for session-requiring slash commands (v2 engine)', async () => {
+    const session = makeSession({ id: 'ses-lazy' });
+    const startupInput: KimiTUIStartupInput = {
+      ...makeStartupInput(),
+      engineV2: true,
+      cliOptions: { ...makeStartupInput().cliOptions, model: 'k2' },
+    };
+    const { driver, harness } = await makeDriver(session, {}, startupInput);
+
+    expect(harness.createSession).not.toHaveBeenCalled();
+
+    driver.handleUserInput('/auto on');
+
+    await vi.waitFor(() => {
+      expect(session.setPermission).toHaveBeenCalledWith('auto');
+    });
+    expect(harness.createSession).toHaveBeenCalledTimes(1);
+    expect(driver.state.appState.permissionMode).toBe('auto');
+    expect(driver.getCurrentSessionId()).toBe('ses-lazy');
+  });
+
+  it('lazily creates the session for skill commands (v2 engine)', async () => {
+    const session = makeSession({ id: 'ses-lazy', activateSkill: vi.fn(async () => {}) });
+    const startupInput: KimiTUIStartupInput = {
+      ...makeStartupInput(),
+      engineV2: true,
+      cliOptions: { ...makeStartupInput().cliOptions, model: 'k2' },
+    };
+    const { driver, harness } = await makeDriver(
+      session,
+      {
+        listWorkspaceSkills: vi.fn(async () => [
+          {
+            name: 'my-skill',
+            description: 'A test skill',
+            path: '/tmp/my-skill',
+            source: 'user',
+          },
+        ]),
+        listPluginCommands: vi.fn(async () => []),
+      },
+      startupInput,
+    );
+    // `makeDriver` stops after init(); the skill command list is refreshed in
+    // finishStartup, so resolve it here to exercise the workspace-level path.
+    await (
+      driver as unknown as { refreshSkillCommands(): Promise<void> }
+    ).refreshSkillCommands();
+
+    // Startup resolves skill commands from the workspace, no session needed.
+    expect(harness.createSession).not.toHaveBeenCalled();
+
+    driver.handleUserInput('/skill:my-skill');
+
+    await vi.waitFor(() => {
+      expect(session.activateSkill).toHaveBeenCalledWith('my-skill', '');
+    });
+    expect(harness.createSession).toHaveBeenCalledTimes(1);
+    expect(driver.getCurrentSessionId()).toBe('ses-lazy');
   });
 
   it('tracks /clear as the clear alias for /new', async () => {

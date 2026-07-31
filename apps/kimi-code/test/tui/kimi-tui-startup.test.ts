@@ -281,6 +281,80 @@ describe('KimiTUI startup', () => {
     });
   });
 
+  it('starts session-less on the v2 engine and carries startup flags to appState', async () => {
+    const harness = makeHarness(makeSession(), {
+      getConfig: vi.fn(async () => ({
+        models: {
+          k2: { model: 'moonshot-v1', maxContextSize: 200 },
+        },
+        defaultModel: 'k2',
+        // CLI --yolo must win over the config default.
+        defaultPermissionMode: 'auto',
+      })),
+    });
+    const driver = makeDriver(
+      harness,
+      { ...makeStartupInput({ model: 'k2', yolo: true }), engineV2: true },
+    );
+
+    await expect(driver.init()).resolves.toBe(false);
+
+    expect(harness.createSession).not.toHaveBeenCalled();
+    expect(driver.state.startupState).toBe('ready');
+    expect(driver.state.appState).toMatchObject({
+      sessionId: '',
+      model: 'k2',
+      permissionMode: 'yolo',
+    });
+  });
+
+  it('shows config defaults in appState before the lazy session exists (v2)', async () => {
+    const harness = makeHarness(makeSession(), {
+      getConfig: vi.fn(async () => ({
+        models: {
+          k2: { model: 'moonshot-v1', maxContextSize: 200 },
+        },
+        defaultModel: 'k2',
+        defaultPermissionMode: 'auto',
+        defaultPlanMode: true,
+        thinking: { enabled: true, effort: 'high' },
+      })),
+    });
+    const driver = makeDriver(harness, { ...makeStartupInput(), engineV2: true });
+
+    await expect(driver.init()).resolves.toBe(false);
+
+    expect(harness.createSession).not.toHaveBeenCalled();
+    expect(driver.state.appState).toMatchObject({
+      sessionId: '',
+      model: 'k2',
+      maxContextTokens: 200,
+      permissionMode: 'auto',
+      planMode: true,
+      thinkingEffort: 'high',
+    });
+  });
+
+  it('carries the --agent/--agent-file binding for the lazy-created first session (v2)', async () => {
+    const harness = makeHarness(makeSession());
+    const driver = makeDriver(
+      harness,
+      {
+        ...makeStartupInput({ model: 'k2', agentFiles: ['agent.md'] }),
+        engineV2: true,
+        agentProfile: 'reviewer',
+      },
+    );
+
+    await expect(driver.init()).resolves.toBe(false);
+
+    expect(harness.createSession).not.toHaveBeenCalled();
+    expect(driver.state.appState).toMatchObject({
+      agentProfile: 'reviewer',
+      agentFiles: ['agent.md'],
+    });
+  });
+
   it('binds the resolved agent profile and agent files to the startup session', async () => {
     const session = makeSession();
     const harness = makeHarness(session);

@@ -733,6 +733,11 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     input: SessionIdRpcInput,
   ): Promise<readonly PluginCommandDef[]> {
     void input;
+    return this.listPluginCommandsGlobal();
+  }
+
+  /** App-global live view of the enabled plugin commands, no session required. */
+  override async listPluginCommandsGlobal(): Promise<readonly PluginCommandDef[]> {
     return this.klient.global.plugins.listCommands();
   }
 

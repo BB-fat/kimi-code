@@ -103,6 +103,8 @@ export interface SlashCommandHost {
   state: TUIState;
   session: Session | undefined;
   readonly harness: KimiHarness;
+  /** agent-core-v2 engine (KIMI_CODE_EXPERIMENTAL_FLAG); enables lazy session creation. */
+  readonly engineV2: boolean;
   cancelInFlight: (() => void) | undefined;
   deferUserMessages: boolean;
 
@@ -120,6 +122,12 @@ export interface SlashCommandHost {
 
   // Session
   requireSession(): Session;
+  /**
+   * Lazy-create the session on first use (v2 engine). Returns the existing
+   * session, or undefined (with the error already surfaced) when creation
+   * fails.
+   */
+  ensureSession(): Promise<Session | undefined>;
   switchToSession(session: Session, message: string): Promise<void>;
   reloadCurrentSessionView(session: Session, message: string): Promise<void>;
   beginSessionRequest(): void;
@@ -204,10 +212,14 @@ async function executeSlashCommand(host: SlashCommandHost, input: string): Promi
       host.showError(`Invalid slash command: /${intent.commandName}`);
       return;
     case 'skill': {
-      const session = host.session;
-      if (host.state.appState.model.trim().length === 0 || session === undefined) {
+      if (host.state.appState.model.trim().length === 0) {
         host.showError(LLM_NOT_SET_MESSAGE);
         return;
+      }
+      let session = host.session;
+      if (session === undefined) {
+        session = await ensureSessionForCommand(host);
+        if (session === undefined) return;
       }
       host.track('input_command', {
         command: intent.commandName,
@@ -221,10 +233,10 @@ async function executeSlashCommand(host: SlashCommandHost, input: string): Promi
         host.showError(LLM_NOT_SET_MESSAGE);
         return;
       }
-      const session = host.session;
+      let session = host.session;
       if (session === undefined) {
-        host.showError(LLM_NOT_SET_MESSAGE);
-        return;
+        session = await ensureSessionForCommand(host);
+        if (session === undefined) return;
       }
       host.track('input_command', { command: `${intent.pluginId}:${intent.commandName}` });
       host.activatePluginCommand(session, intent.pluginId, intent.commandName, intent.args);
@@ -253,11 +265,54 @@ async function executeSlashCommand(host: SlashCommandHost, input: string): Promi
   }
 }
 
+/**
+ * Lazy-create the session for a slash command that needs one (v2 engine).
+ * v1 keeps the historical "no active session" error; on v2 a missing session
+ * means the TUI started session-less, so commands create it on first use.
+ * Returns undefined (error already shown) when creation fails.
+ */
+async function ensureSessionForCommand(host: SlashCommandHost): Promise<Session | undefined> {
+  if (!host.engineV2) {
+    host.showError(LLM_NOT_SET_MESSAGE);
+    return undefined;
+  }
+  return host.ensureSession();
+}
+
+/** Builtin commands that need an active session; lazy-created on the v2 engine. */
+const SESSION_REQUIRING_COMMANDS: ReadonlySet<BuiltinSlashCommandName> = new Set([
+  'add-dir',
+  'auto',
+  'btw',
+  'compact',
+  'export-debug-zip',
+  'export-md',
+  'fork',
+  'goal',
+  'init',
+  'mcp',
+  'permission',
+  'plan',
+  'plugins',
+  'settings',
+  'status',
+  'swarm',
+  'title',
+  'undo',
+  'usage',
+  'web',
+  'yolo',
+]);
+
 async function handleBuiltInSlashCommand(
   host: SlashCommandHost,
   name: BuiltinSlashCommandName,
   args: string,
 ): Promise<void> {
+  if (host.session === undefined && SESSION_REQUIRING_COMMANDS.has(name)) {
+    const session = await ensureSessionForCommand(host);
+    if (session === undefined) return;
+  }
   switch (name) {
     case 'exit':
       void host.stop();
@@ -282,7 +337,14 @@ async function handleBuiltInSlashCommand(
       void showMcpServers(host);
       return;
     case 'plugins':
-      void handlePluginsCommand(host, args);
+      // `handlePluginsCommand` throws when no session is active (its own
+      // requireSession), so catch here instead of letting the `void` call
+      // reject unhandled.
+      try {
+        await handlePluginsCommand(host, args);
+      } catch (error) {
+        host.showError(formatErrorMessage(error));
+      }
       return;
     case 'add-dir':
       await handleAddDirCommand(host, args);

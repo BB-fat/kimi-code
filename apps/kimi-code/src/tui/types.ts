@@ -31,6 +31,11 @@ export interface AppState {
   sessionId: string;
   permissionMode: PermissionMode;
   planMode: boolean;
+  /** Resolved profile name from --agent/--agent-file, carried to the
+   * lazy-created first session when the TUI starts session-less. */
+  agentProfile?: string;
+  /** Raw --agent-file paths, passed to session creation alongside `agentProfile`. */
+  agentFiles?: readonly string[];
   /** 'bash' when the editor is in `!` shell-command mode. */
   inputMode: 'prompt' | 'bash';
   swarmMode: boolean;

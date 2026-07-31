@@ -24,6 +24,7 @@ import type {
   ListSessionsOptions,
   McpServerConfig,
   McpTestResult,
+  PluginCommandDef,
   RenameSessionInput,
   ResumeSessionInput,
   ReloadSessionInput,
@@ -254,6 +255,14 @@ export class KimiHarness {
   /** Skills visible to a new session in `workDir`, without creating that session. */
   async listWorkspaceSkills(workDir: string): Promise<readonly SkillSummary[]> {
     return this.rpc.listWorkspaceSkills(workDir);
+  }
+
+  /**
+   * App-global plugin command list, no session required. Empty on the v1
+   * engine, which only exposes plugin commands through a live session.
+   */
+  async listPluginCommands(): Promise<readonly PluginCommandDef[]> {
+    return this.rpc.listPluginCommandsGlobal();
   }
 
   /**

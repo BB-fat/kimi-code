@@ -10,8 +10,10 @@ import type {
   CreateSessionOptions,
   KimiHarness,
   PermissionMode,
+  PluginCommandDef,
   PromptPart,
   Session,
+  SkillSummary,
   WorkspaceTrustInfo,
 } from '@moonshot-ai/kimi-code-sdk';
 import type { MigrationPlan } from '@moonshot-ai/migration-legacy';
@@ -144,6 +146,7 @@ import { REPLAY_TURN_LIMIT } from './utils/message-replay';
 import { hasPatchChanges } from './utils/object-patch';
 import { sessionRowsForPicker } from './utils/session-picker-rows';
 import { formatBashOutputForDisplay } from './utils/shell-output';
+import { thinkingEffortFromConfig } from './utils/thinking-config';
 import { combineStartupNotice, isOAuthLoginRequiredError } from './utils/startup';
 import { installTerminalFocusTracking } from './utils/terminal-focus';
 import { notifyTerminalOnce } from './utils/terminal-notification';
@@ -327,7 +330,8 @@ export class KimiTUI {
   private isShuttingDown = false;
   private readonly migrationPlan: MigrationPlan | null;
   private readonly migrateOnly: boolean;
-  private readonly engineV2: boolean;
+  /** Whether the harness runs on the agent-core-v2 engine (lazy session creation). */
+  readonly engineV2: boolean;
   private startupNotice: string | undefined;
   private lastActivityMode: string | undefined;
   private currentLoadingTip: { kind: LoadingTipKind; tip: string | undefined } | undefined =
@@ -485,6 +489,19 @@ export class KimiTUI {
 
   async refreshSkillCommands(session?: SkillListSession): Promise<void> {
     if (session === undefined) {
+      // v2 engine: skills live on the workspace handler, not the session, so
+      // they are available before the first (lazy) session is created. The
+      // workspace-level list lacks plugin skills; the session list fills that
+      // in once a session exists.
+      if (this.engineV2) {
+        try {
+          const skills = await this.harness.listWorkspaceSkills(this.state.appState.workDir);
+          this.applySkillCommands(skills);
+          return;
+        } catch {
+          return;
+        }
+      }
       this.skillCommands = [];
       this.skillCommandMap.clear();
       this.setupAutocomplete();
@@ -497,6 +514,10 @@ export class KimiTUI {
     } catch {
       return;
     }
+    this.applySkillCommands(skills);
+  }
+
+  private applySkillCommands(skills: readonly SkillSummary[]): void {
     const skillCommands = buildSkillSlashCommands(skills);
     this.skillCommands = skillCommands.commands;
     this.skillCommandMap.clear();
@@ -508,6 +529,17 @@ export class KimiTUI {
 
   async refreshPluginCommands(session?: Session): Promise<void> {
     if (session === undefined) {
+      // v2 engine: the enabled plugin commands are an app-global live view,
+      // available before the first (lazy) session is created.
+      if (this.engineV2) {
+        try {
+          const defs = await this.harness.listPluginCommands();
+          this.applyPluginCommands(defs);
+          return;
+        } catch {
+          return;
+        }
+      }
       this.pluginCommands = [];
       this.pluginCommandMap.clear();
       this.setupAutocomplete();
@@ -520,6 +552,10 @@ export class KimiTUI {
     } catch {
       return;
     }
+    this.applyPluginCommands(defs);
+  }
+
+  private applyPluginCommands(defs: readonly PluginCommandDef[]): void {
     const pluginSlashCommands = buildPluginSlashCommands(defs);
     this.pluginCommands = pluginSlashCommands.commands;
     this.pluginCommandMap.clear();
@@ -822,6 +858,39 @@ export class KimiTUI {
             );
           }
         }
+      } else if (this.engineV2) {
+        // Lazy session creation (v2 engine): start session-less and create the
+        // session on the first message. Startup flags are carried in appState
+        // and applied when that session is created; until then the footer
+        // shows the config defaults the engine would apply at createSession
+        // time (model, permission, plan mode, thinking effort, context cap).
+        const config = await this.harness.getConfig({ reload: true });
+        const patch: Partial<AppState> = {};
+        const startupModel = startup.model ?? config.defaultModel;
+        if (startupModel !== undefined) {
+          patch.model = startupModel;
+          const selected = config.models?.[startupModel];
+          if (selected?.maxContextSize !== undefined) {
+            patch.maxContextTokens = selected.maxContextSize;
+          }
+        }
+        // CLI --auto/--yolo/--plan win over config defaults; the flags are
+        // re-applied by applyStartupPermissionAndPlanToAppState below.
+        if (!startup.auto && !startup.yolo && config.defaultPermissionMode !== undefined) {
+          patch.permissionMode = config.defaultPermissionMode;
+        }
+        if (!startup.plan && config.defaultPlanMode !== undefined) {
+          patch.planMode = config.defaultPlanMode;
+        }
+        const effort = thinkingEffortFromConfig(config.thinking);
+        if (effort !== undefined) {
+          patch.thinkingEffort = effort;
+        }
+        if (startup.agentProfile !== undefined || startup.agentFiles !== undefined) {
+          patch.agentProfile = startup.agentProfile;
+          patch.agentFiles = startup.agentFiles?.length ? [...startup.agentFiles] : undefined;
+        }
+        this.setAppState(patch);
       } else {
         session = await this.harness.createSession(createSessionOptions);
       }
@@ -837,11 +906,13 @@ export class KimiTUI {
       return false;
     }
 
-    if (session === undefined) {
+    if (!this.engineV2 && session === undefined) {
       throw new Error('Startup session was not initialized.');
     }
-    await this.setSession(session);
-    await this.syncRuntimeState(session);
+    if (session !== undefined) {
+      await this.setSession(session);
+      await this.syncRuntimeState(session);
+    }
     this.applyStartupPermissionAndPlanToAppState();
     this.state.startupState = 'ready';
     return shouldReplayHistory;
@@ -1029,17 +1100,21 @@ export class KimiTUI {
         this.state.ui.requestRender();
         return;
       }
-      this.runShellCommandFromInput(text);
+      void this.runShellCommandFromInput(text);
       return;
     }
     slashCommands.dispatchInput(this, text);
   }
 
-  private runShellCommandFromInput(command: string): void {
-    const session = this.session;
+  private async runShellCommandFromInput(command: string): Promise<void> {
+    let session = this.session;
     if (session === undefined) {
-      this.showError('No active session for shell command.');
-      return;
+      if (!this.engineV2) {
+        this.showError('No active session for shell command.');
+        return;
+      }
+      session = await this.ensureSession();
+      if (session === undefined) return;
     }
     // Echo the command locally (bash-input) with a `$` prompt. The agent also
     // records it for resume; this is the live view.
@@ -1143,14 +1218,14 @@ export class KimiTUI {
     const session = this.session;
     if (session === undefined) return;
     if (item.mode === 'bash') {
-      this.runShellCommandFromInput(item.text);
+      void this.runShellCommandFromInput(item.text);
     } else {
       this.sendQueuedMessage(session, item);
     }
     this.updateQueueDisplay();
   }
 
-  sendNormalUserInput(text: string): void {
+  async sendNormalUserInput(text: string): Promise<void> {
     if (this.btwPanelController.sendUserInput(text)) return;
     if (this.state.appState.model.trim().length === 0) {
       this.showError(LLM_NOT_SET_MESSAGE);
@@ -1169,10 +1244,14 @@ export class KimiTUI {
       return;
     }
     if (!this.validateMediaCapabilities(extraction)) return;
-    const session = this.session;
+    let session = this.session;
     if (session === undefined) {
-      this.showError(LLM_NOT_SET_MESSAGE);
-      return;
+      if (!this.engineV2) {
+        this.showError(LLM_NOT_SET_MESSAGE);
+        return;
+      }
+      session = await this.ensureSession();
+      if (session === undefined) return;
     }
     if (extraction.hasMedia) {
       this.sendMessage(session, text, {
@@ -1298,7 +1377,7 @@ export class KimiTUI {
 
   sendQueuedMessage(session: Session, item: QueuedMessage): void {
     if (item.mode === 'bash') {
-      this.runShellCommandFromInput(item.text);
+      void this.runShellCommandFromInput(item.text);
       return;
     }
     this.harness.withInteractiveAgent(item.agentId ?? MAIN_AGENT_ID, () => {
@@ -1560,7 +1639,7 @@ export class KimiTUI {
     return this.session;
   }
 
-  private async createSessionFromCurrentState(): Promise<Session> {
+  private async createSessionFromCurrentState(bindStartupAgent = false): Promise<Session> {
     const model = this.state.appState.model.trim();
     if (model.length === 0) {
       throw new Error(LLM_NOT_SET_MESSAGE);
@@ -1575,7 +1654,57 @@ export class KimiTUI {
     if (this.state.appState.additionalDirs.length > 0) {
       options.additionalDirs = [...this.state.appState.additionalDirs];
     }
+    if (bindStartupAgent) {
+      // The --agent/--agent-file startup binding is consumed by the first
+      // lazy-created session; `/new` sessions fall back to the default profile.
+      if (this.state.appState.agentProfile !== undefined) {
+        options.agentProfile = this.state.appState.agentProfile;
+      }
+      if (this.state.appState.agentFiles !== undefined) {
+        options.agentFiles = [...this.state.appState.agentFiles];
+      }
+    }
     return this.harness.createSession(options);
+  }
+
+  /**
+   * Lazy-create the session on first use (v2 engine, session-less startup).
+   * Returns the existing session, or creates one from the current state and
+   * runs the same assembly `createNewSession` performs. Returns undefined and
+   * shows the error when creation fails; callers must still guard on
+   * `appState.model`.
+   */
+  async ensureSession(): Promise<Session | undefined> {
+    if (this.session !== undefined) return this.session;
+    let session: Session;
+    try {
+      session = await this.createSessionFromCurrentState(true);
+    } catch (error) {
+      const msg = formatErrorMessage(error);
+      this.showError(`Failed to start a session: ${msg}`);
+      return undefined;
+    }
+    this.resetSessionRuntime();
+    await this.setSession(session);
+    this.setAppState({ sessionId: session.id });
+    try {
+      await this.activateRuntime();
+      await this.syncRuntimeState(session);
+    } catch (error) {
+      this.sessionEventHandler.startSubscription();
+      const msg = formatErrorMessage(error);
+      this.showError(`Post-create setup failed: ${msg}`);
+      return undefined;
+    }
+    try {
+      await this.refreshSkillCommands(session);
+      await this.refreshPluginCommands(session);
+    } catch {
+      /* keep the new session usable even if dynamic skills fail */
+    }
+    this.sessionEventHandler.startSubscription();
+    void this.showSessionWarnings(session);
+    return session;
   }
 
   async setSession(session: Session): Promise<void> {
