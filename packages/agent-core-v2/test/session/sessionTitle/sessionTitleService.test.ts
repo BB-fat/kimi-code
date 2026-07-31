@@ -12,17 +12,15 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vite
 import { OAuthConnectionError, OAuthUnauthorizedError } from '@moonshot-ai/kimi-code-oauth';
 
 import { DisposableStore, type IDisposable } from '#/_base/di/lifecycle';
-import type { ServiceIdentifier } from '#/_base/di/instantiation';
 import {
   LifecycleScope,
   type IAgentScopeHandle,
-  type ISessionScopeHandle,
 } from '#/_base/di/scope';
 import { createServices, type TestInstantiationService } from '#/_base/di/test';
 import { Emitter } from '#/_base/event';
 import { IOAuthService } from '#/app/auth/auth';
 import { type DomainEvent, IEventService } from '#/app/event/event';
-import { IWorkspaceHandlerService } from '#/workspace/workspaceHandler/workspaceHandler';
+import { createHooks, type Hooks } from '#/hooks';
 import { HostRequestHeaders, IHostRequestHeaders } from '#/kosong/model/hostRequestHeaders';
 import {
   IProviderService,
@@ -34,6 +32,11 @@ import {
   IAgentLifecycleService,
   MAIN_AGENT_ID,
 } from '#/session/agentLifecycle/agentLifecycle';
+import {
+  ISessionLifecycleHooks,
+  type SessionLifecycleHookSlots,
+} from '#/session/sessionLifecycleHooks/sessionLifecycleHooks';
+import { ISessionLifetime } from '#/session/sessionLifetime/sessionLifetime';
 import {
   IAgentTitlePromptSource,
 } from '#/session/sessionTitle/agentTitlePromptSource';
@@ -137,20 +140,6 @@ function createPendingFetch() {
   };
 }
 
-function makeLiveSessionHandle(meta: ISessionMetadata): ISessionScopeHandle {
-  return {
-    id: SESSION_ID,
-    kind: LifecycleScope.Session,
-    accessor: {
-      get: <T>(id: ServiceIdentifier<T>) => {
-        if (id === ISessionMetadata) return meta as T;
-        throw new Error(`unexpected service ${String(id)}`);
-      },
-    },
-    dispose: () => undefined,
-  };
-}
-
 describe('SessionTitleService', () => {
   let disposables: DisposableStore;
   let ix: TestInstantiationService;
@@ -162,7 +151,8 @@ describe('SessionTitleService', () => {
   let forceTokenError: Error | undefined;
   let resolvedOAuthRefs: Array<OAuthRef | undefined>;
   let titlePrompts: readonly string[];
-  let liveSession: ISessionScopeHandle | undefined;
+  let lifetimeController: AbortController;
+  let lifecycleHooks: Hooks<SessionLifecycleHookSlots>;
   let tokenCalls: boolean[];
 
   beforeEach(() => {
@@ -173,7 +163,11 @@ describe('SessionTitleService', () => {
     tokenCalls = [];
     providers = { 'managed:kimi-code': MANAGED_PROVIDER };
     metadata = new FakeSessionMetadata();
-    liveSession = makeLiveSessionHandle(metadata);
+    lifetimeController = new AbortController();
+    lifecycleHooks = createHooks<SessionLifecycleHookSlots, keyof SessionLifecycleHookSlots>([
+      'onDidCreateSession',
+      'onWillCloseSession',
+    ]);
     events = new FakeEventService();
     fetchMock = vi.fn<(url: string, init?: RequestInit) => Promise<Response>>(
       async () =>
@@ -213,9 +207,11 @@ describe('SessionTitleService', () => {
           get: () => mainAgent,
         });
         reg.defineInstance(IEventService, events);
-        reg.definePartialInstance(IWorkspaceHandlerService, {
-          get: () => liveSession,
+        reg.defineInstance(ISessionLifetime, {
+          _serviceBrand: undefined,
+          signal: lifetimeController.signal,
         });
+        reg.defineInstance(ISessionLifecycleHooks, lifecycleHooks);
         reg.defineInstance(IProviderService, stubProviderService(providers));
         reg.definePartialInstance(IOAuthService, {
           resolveTokenProvider: (_provider, oauthRef) => {
@@ -362,25 +358,83 @@ describe('SessionTitleService', () => {
     expect(metadata.meta.title).toBe('user 取的标题');
   });
 
-  it('drops the write-back when the session scope was superseded mid-flight', async () => {
+  it('drops the write-back when the lifetime signal aborts after the response arrived', async () => {
+    const pendingFetch = createPendingFetch();
+    fetchMock.mockImplementationOnce(pendingFetch.fetch);
     const applySpy = vi.spyOn(metadata, 'setGeneratedTitleIfUncustomized');
     titlePrompts = ['hello'];
-    liveSession = makeLiveSessionHandle(new FakeSessionMetadata());
 
-    await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const generation = ix.get(ISessionTitleService).generateTitle();
+    await pendingFetch.started;
+    lifetimeController.abort();
+    pendingFetch.resolve(
+      new Response(JSON.stringify({ title: '生成的标题' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    await expect(generation).resolves.toBeUndefined();
     expect(applySpy).not.toHaveBeenCalled();
     expect(metadata.meta.title).toBeUndefined();
   });
 
-  it('drops the write-back while the session is still resuming', async () => {
+  it('cancels the in-flight request when the lifetime signal aborts', async () => {
+    fetchMock.mockImplementationOnce(
+      async (_url, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            reject(new DOMException('The operation was aborted.', 'AbortError'));
+          });
+        }),
+    );
     const applySpy = vi.spyOn(metadata, 'setGeneratedTitleIfUncustomized');
     titlePrompts = ['hello'];
-    liveSession = undefined;
 
-    await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
+    const generation = ix.get(ISessionTitleService).generateTitle();
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+    lifetimeController.abort();
+
+    await expect(generation).resolves.toBeUndefined();
     expect(applySpy).not.toHaveBeenCalled();
     expect(metadata.meta.title).toBeUndefined();
+  });
+
+  it('returns unavailable without fetching when the scope is already closing', async () => {
+    lifetimeController.abort();
+    titlePrompts = ['hello'];
+
+    await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('drains an in-flight generation through onWillCloseSession', async () => {
+    const pendingFetch = createPendingFetch();
+    fetchMock.mockImplementationOnce(pendingFetch.fetch);
+    titlePrompts = ['hello'];
+
+    const generation = ix.get(ISessionTitleService).generateTitle();
+    await pendingFetch.started;
+
+    let drained = false;
+    const closeRun = lifecycleHooks.onWillCloseSession.run({ reason: 'exit' }).then(() => {
+      drained = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(drained).toBe(false);
+
+    pendingFetch.resolve(
+      new Response(JSON.stringify({ title: '生成的标题' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    await closeRun;
+    expect(drained).toBe(true);
+    await expect(generation).resolves.toBe('生成的标题');
+    expect(metadata.meta.title).toBe('生成的标题');
   });
 
   it('keeps the current title when the backend request fails', async () => {

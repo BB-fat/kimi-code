@@ -91,6 +91,11 @@ const DOMAIN_LAYER = new Map([
   // create-source/close-reason vocabulary; a pure contract with no IO, so it
   // sits in L1 beside `sessionContext`.
   ['sessionLifecycleHooks', 1],
+  // `sessionLifetime` is the per-session liveness seed (`AbortSignal`
+  // aborted by the Workspace-scope `workspaceHandler` when the session's
+  // close begins); a pure contract with no IO, so it sits in L1 beside
+  // `sessionLifecycleHooks`.
+  ['sessionLifetime', 1],
   // `scopeContext` is the Agent-scope seeded immutable facts value
   // (`agentId` plus a persistence scope helper); a pure seed with no IO, so it
   // sits in L1 beside `sessionContext`.

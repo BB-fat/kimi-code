@@ -34,9 +34,14 @@ export async function fetchChatTitle(
   url: string,
   accessToken: string,
   chatContent: string,
-  opts: { timeoutMs?: number; headers?: Record<string, string> } = {},
+  opts: { timeoutMs?: number; headers?: Record<string, string>; signal?: AbortSignal } = {},
 ): Promise<FetchChatTitleResult> {
   const controller = new AbortController();
+  if (opts.signal !== undefined) {
+    const external = opts.signal;
+    if (external.aborted) controller.abort();
+    else external.addEventListener('abort', () => { controller.abort(); }, { once: true });
+  }
   const timer = setTimeout(() => {
     controller.abort();
   }, opts.timeoutMs ?? 8000);
@@ -71,7 +76,9 @@ export async function fetchChatTitle(
     return { kind: 'ok', title };
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
-      return { kind: 'error', message: 'Failed to generate session title: request timed out.' };
+      const reason =
+        opts.signal?.aborted === true ? 'request aborted.' : 'request timed out.';
+      return { kind: 'error', message: `Failed to generate session title: ${reason}` };
     }
     const msg = error instanceof Error ? error.message : String(error);
     return { kind: 'error', message: `Failed to generate session title: ${msg}` };

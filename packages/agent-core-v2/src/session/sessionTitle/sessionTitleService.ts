@@ -9,8 +9,11 @@
  * (the kap-server route), gated by a managed Kimi Code OAuth login; any
  * failure degrades to keeping the current title, and a custom title set by
  * the user is never overwritten. An already-generated title is not
- * regenerated unless forced, and the write-back is dropped when this scope
- * is no longer the live session in `workspaceHandler`. Provider config comes
+ * regenerated unless forced, and the write-back is dropped once this
+ * scope's `sessionLifetime` signal fires — the in-flight request carries
+ * the signal, and a close drains the pending generation through the
+ * `sessionLifecycleHooks` `onWillCloseSession` slot before the scope is
+ * disposed. Provider config comes
  * from `provider`, the bearer token from `auth`, host identity headers from
  * `model`, prompt history from `agentLifecycle`/`sessionTitle`, and logs
  * through `log`. Bound at Session scope.
@@ -29,13 +32,18 @@ import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/
 import { ILogService } from '#/_base/log/log';
 import { IOAuthService } from '#/app/auth/auth';
 import { IEventService } from '#/app/event/event';
+import type { Hooks } from '#/hooks';
 import { IAgentLifecycleService, MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
 import { IHostRequestHeaders } from '#/kosong/model/hostRequestHeaders';
 import { IProviderService } from '#/kosong/provider/provider';
 import { isOAuthCatalogVendor } from '#/kosong/provider/providerDefinition';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import {
+  ISessionLifecycleHooks,
+  type SessionLifecycleHookSlots,
+} from '#/session/sessionLifecycleHooks/sessionLifecycleHooks';
+import { ISessionLifetime } from '#/session/sessionLifetime/sessionLifetime';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
-import { IWorkspaceHandlerService } from '#/workspace/workspaceHandler/workspaceHandler';
 
 import { IAgentTitlePromptSource } from './agentTitlePromptSource';
 import { ISessionTitleService } from './sessionTitle';
@@ -54,16 +62,27 @@ export class SessionTitleService implements ISessionTitleService {
   constructor(
     @ISessionContext private readonly ctx: ISessionContext,
     @ISessionMetadata private readonly metadata: ISessionMetadata,
+    @ISessionLifetime private readonly lifetime: ISessionLifetime,
+    @ISessionLifecycleHooks
+    lifecycleHooks: Hooks<SessionLifecycleHookSlots>,
     @IAgentLifecycleService private readonly agentLifecycle: IAgentLifecycleService,
     @IEventService private readonly eventService: IEventService,
-    @IWorkspaceHandlerService private readonly workspaceHandler: IWorkspaceHandlerService,
     @IProviderService private readonly providers: IProviderService,
     @IOAuthService private readonly oauth: IOAuthService,
     @IHostRequestHeaders private readonly hostHeaders: IHostRequestHeaders,
     @ILogService private readonly log: ILogService,
-  ) {}
+  ) {
+    // A close aborts the lifetime signal first, so the in-flight generation
+    // settles fast; draining it here keeps its metadata write ordered before
+    // the scope's disposal (and any later resume re-reading the document).
+    lifecycleHooks.onWillCloseSession.register('sessionTitle', async (_event, next) => {
+      await this._generation?.catch(() => undefined);
+      await next();
+    });
+  }
 
   async generateTitle(options?: { readonly force?: boolean }): Promise<string | undefined> {
+    if (this.lifetime.signal.aborted) return undefined;
     const current = await this.metadata.read();
     if (current.titleKind === 'custom') return undefined;
     if (current.titleKind === 'generated' && options?.force !== true) return undefined;
@@ -122,9 +141,10 @@ export class SessionTitleService implements ISessionTitleService {
           ...this.hostHeaders.headers,
           ...provider.customHeaders,
         },
+        signal: this.lifetime.signal,
       });
     let result = await requestTitle(token);
-    if (result.kind === 'error' && result.status === 401) {
+    if (result.kind === 'error' && result.status === 401 && !this.lifetime.signal.aborted) {
       try {
         token = await tokenProvider.getAccessToken({ force: true });
       } catch (error) {
@@ -138,10 +158,7 @@ export class SessionTitleService implements ISessionTitleService {
       this.log.debug(`chat_title request failed: ${result.message}`);
       return undefined;
     }
-    const live = this.workspaceHandler.get(this.ctx.sessionId);
-    if (live === undefined || live.accessor.get(ISessionMetadata) !== this.metadata) {
-      return undefined;
-    }
+    if (this.lifetime.signal.aborted) return undefined;
     const title = result.title.slice(0, MAX_GENERATED_TITLE_LENGTH);
     const applied = await this.metadata.setGeneratedTitleIfUncustomized(title);
     if (!applied) return undefined;
