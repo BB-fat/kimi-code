@@ -106,8 +106,9 @@ class FakeSessionMetadata implements ISessionMetadata {
     return this.update({ title, titleKind: 'custom' });
   }
 
-  async setGeneratedTitleIfUncustomized(title: string): Promise<boolean> {
+  async setGeneratedTitleIfUncustomized(title: string, allowWhen?: () => boolean): Promise<boolean> {
     if (this.meta.titleKind === 'custom') return false;
+    if (allowWhen?.() === false) return false;
     await this.update({ title, titleKind: 'generated' });
     return true;
   }
@@ -151,6 +152,7 @@ describe('SessionTitleService', () => {
   let forceTokenError: Error | undefined;
   let resolvedOAuthRefs: Array<OAuthRef | undefined>;
   let titlePrompts: readonly string[];
+  let promptSourceImpl: (limit: number) => Promise<readonly string[]>;
   let lifetimeController: AbortController;
   let lifecycleHooks: Hooks<SessionLifecycleHookSlots>;
   let tokenCalls: boolean[];
@@ -160,6 +162,7 @@ describe('SessionTitleService', () => {
     forceTokenError = undefined;
     resolvedOAuthRefs = [];
     titlePrompts = [];
+    promptSourceImpl = async (limit) => titlePrompts.slice(0, limit);
     tokenCalls = [];
     providers = { 'managed:kimi-code': MANAGED_PROVIDER };
     metadata = new FakeSessionMetadata();
@@ -195,7 +198,7 @@ describe('SessionTitleService', () => {
         reg.defineInstance(ISessionMetadata, metadata);
         const promptSource: IAgentTitlePromptSource = {
           _serviceBrand: undefined,
-          firstUserPrompts: async (limit) => titlePrompts.slice(0, limit),
+          firstUserPrompts: (limit) => promptSourceImpl(limit),
         };
         const mainAgent: IAgentScopeHandle = {
           id: MAIN_AGENT_ID,
@@ -418,12 +421,18 @@ describe('SessionTitleService', () => {
     const generation = ix.get(ISessionTitleService).generateTitle();
     await pendingFetch.started;
 
-    let drained = false;
-    const closeRun = lifecycleHooks.onWillCloseSession.run({ reason: 'exit' }).then(() => {
-      drained = true;
-    });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(drained).toBe(false);
+    let reachedTerminal = false;
+    const closeRun = lifecycleHooks.onWillCloseSession
+      .run({ reason: 'exit' }, async () => {
+        reachedTerminal = true;
+      })
+      .then(() => reachedTerminal);
+    // The hook chain must be parked on the pending generation, microtask-
+    // deterministically: the terminal callback cannot run while the fetch
+    // is unresolved.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(reachedTerminal).toBe(false);
 
     pendingFetch.resolve(
       new Response(JSON.stringify({ title: '生成的标题' }), {
@@ -431,10 +440,32 @@ describe('SessionTitleService', () => {
         headers: { 'Content-Type': 'application/json' },
       }),
     );
-    await closeRun;
-    expect(drained).toBe(true);
+    await expect(closeRun).resolves.toBe(true);
     await expect(generation).resolves.toBe('生成的标题');
     expect(metadata.meta.title).toBe('生成的标题');
+  });
+
+  it('drains a generation that is still collecting prompts through onWillCloseSession', async () => {
+    let resolvePrompts!: (prompts: readonly string[]) => void;
+    promptSourceImpl = async (limit) =>
+      new Promise<readonly string[]>((resolve) => {
+        resolvePrompts = (prompts) => resolve(prompts.slice(0, limit));
+      });
+
+    const generation = ix.get(ISessionTitleService).generateTitle();
+    let reachedTerminal = false;
+    const closeRun = lifecycleHooks.onWillCloseSession
+      .run({ reason: 'exit' }, async () => {
+        reachedTerminal = true;
+      })
+      .then(() => reachedTerminal);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(reachedTerminal).toBe(false);
+
+    resolvePrompts(['hello']);
+    await expect(closeRun).resolves.toBe(true);
+    await expect(generation).resolves.toBe('生成的标题');
   });
 
   it('keeps the current title when the backend request fails', async () => {

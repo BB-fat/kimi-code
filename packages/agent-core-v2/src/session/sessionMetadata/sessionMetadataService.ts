@@ -16,7 +16,13 @@
  * persist additionally double-writes the v1-readable `isCustomTitle`
  * marker derived from it, and on load an explicit `isCustomTitle: true`
  * outranks a stale `titleKind` (a v1 rename spreads the original document,
- * so the two can disagree). Re-registering an agent whose metadata is unchanged is
+ * so the two can disagree) while a `false` marker never downgrades a
+ * modern generated/custom state. The generated-title write path
+ * (`setGeneratedTitleIfUncustomized`) serializes through the same update
+ * queue as everything else and re-evaluates its caller-supplied veto
+ * (`allowWhen`) inside the queued write, so a session close landing while
+ * the update waits still drops the write-back.
+ * Re-registering an agent whose metadata is unchanged is
  * a no-op (no write, no mirror, no event), so resuming a session — which
  * re-registers its agents as they materialize — never bumps `updatedAt` and
  * never reorders session listings. Bound at Session scope.
@@ -117,10 +123,11 @@ export class SessionMetadata extends Disposable implements ISessionMetadata {
     await this.update({ title, titleKind: 'custom' });
   }
 
-  async setGeneratedTitleIfUncustomized(title: string): Promise<boolean> {
+  async setGeneratedTitleIfUncustomized(title: string, allowWhen?: () => boolean): Promise<boolean> {
     return this.enqueueUpdate(async () => {
       await this.ready;
       if (this.data.titleKind === 'custom') return false;
+      if (allowWhen?.() === false) return false;
       await this.applyUpdate({ title, titleKind: 'generated' });
       return true;
     });
@@ -157,6 +164,7 @@ export class SessionMetadata extends Disposable implements ISessionMetadata {
         workspaceId: this.ctx.workspaceId,
         cwd: this.ctx.cwd,
         title: this.data.title,
+        titleKind: this.data.titleKind,
         lastPrompt: this.data.lastPrompt,
         createdAt: this.data.createdAt,
         updatedAt: this.data.updatedAt,
@@ -270,17 +278,12 @@ function normalizeSessionTitle(
   raw: LegacySessionMeta,
 ): Pick<SessionMeta, 'title' | 'titleKind'> {
   const title = typeof raw.title === 'string' ? raw.title : undefined;
-  // A legacy writer's explicit custom marker outranks the `titleKind` it
-  // left behind: v1's rename spreads the original document, so a stale
-  // 'replaceable' / 'generated' travels along with `isCustomTitle: true`.
   if (title !== undefined && raw.isCustomTitle === true) {
     return { title, titleKind: 'custom' };
   }
   if (title !== undefined && isSessionTitleKind(raw.titleKind)) {
     return { title, titleKind: raw.titleKind };
   }
-  // The `false` marker only authors legacy documents without a titleKind —
-  // it never downgrades a modern generated/custom state (handled above).
   if (title !== undefined && raw.isCustomTitle === false) {
     return { title, titleKind: 'replaceable' };
   }
@@ -294,11 +297,6 @@ function isSessionTitleKind(value: unknown): value is SessionTitleKind {
   return value === 'replaceable' || value === 'generated' || value === 'custom';
 }
 
-/**
- * The persisted `state.json` shape: the canonical `titleKind` plus the
- * v1-readable `isCustomTitle` marker derived from it, so released v1 builds
- * keep honoring a custom title on sessions shared through one home.
- */
 type PersistedSessionMeta = SessionMeta & { readonly isCustomTitle: boolean };
 
 function encodeSessionMeta(meta: SessionMeta): PersistedSessionMeta {

@@ -8,7 +8,11 @@
  * `sessionLifecycleHooks` slots instance it runs around create/close, and
  * a per-session `sessionLifetime` abort signal it fires synchronously when
  * a close/archive begins — before any async close hook — so in-flight
- * session work can cancel itself and drop its write-back,
+ * session work can cancel itself and drop its write-back. A close/archive
+ * is tracked in a closing registry from that first synchronous step until
+ * the scope is disposed: `get`/`list` hide the session while it is
+ * closing, and `resume` waits the close out and re-materializes instead
+ * of returning the doomed handle,
  * tearing sessions down on close/archive — archiving flags the session's
  * `sessionMetadata`, removes its `agentLifecycle` agents, restoring clears
  * the archived flag, and broadcasts through `event`; session start and
@@ -169,6 +173,7 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
   private readonly _onDidForkSession = this._register(new Emitter<SessionForkedEvent>());
   readonly onDidForkSession: Event<SessionForkedEvent> = this._onDidForkSession.event;
   private readonly resuming = new Map<string, Promise<ISessionScopeHandle | undefined>>();
+  private readonly closing = new Map<string, Promise<void>>();
   private readonly sessionLifetimes = new Map<string, AbortController>();
 
   constructor(
@@ -360,13 +365,19 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
   }
 
   get(sessionId: string): ISessionScopeHandle | undefined {
-    if (this.resuming.has(sessionId)) return undefined;
+    if (this.resuming.has(sessionId) || this.closing.has(sessionId)) return undefined;
     return this.sessions.get(sessionId);
   }
 
   resume(sessionId: string, opts?: ResumeSessionOptions): Promise<ISessionScopeHandle | undefined> {
     const inflight = this.resuming.get(sessionId);
     if (inflight !== undefined) return inflight;
+    const closing = this.closing.get(sessionId);
+    if (closing !== undefined) {
+      // A close is already in flight — wait it out and re-materialize
+      // instead of handing back the doomed handle.
+      return closing.then(() => this.resume(sessionId, opts));
+    }
     const live = this.sessions.get(sessionId);
     if (live !== undefined) return Promise.resolve(live);
     const promise = this.doResume(sessionId, opts)
@@ -411,14 +422,20 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
   list(): readonly ISessionScopeHandle[] {
     const ready: ISessionScopeHandle[] = [];
     for (const [id, handle] of this.sessions) {
-      if (!this.resuming.has(id)) ready.push(handle);
+      if (!this.resuming.has(id) && !this.closing.has(id)) ready.push(handle);
     }
     return ready;
   }
 
   async close(sessionId: string): Promise<void> {
+    const inflight = this.closing.get(sessionId);
+    if (inflight !== undefined) return inflight;
     const handle = this.sessions.get(sessionId);
     if (handle === undefined) return;
+    return this.trackClosing(sessionId, this.doClose(sessionId, handle));
+  }
+
+  private async doClose(sessionId: string, handle: ISessionScopeHandle): Promise<void> {
     this.invalidateSessionLifetime(sessionId);
     await this.announceWillClose({ sessionId, handle, reason: 'exit' });
     this.sessions.delete(sessionId);
@@ -428,8 +445,14 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
   }
 
   async archive(sessionId: string): Promise<void> {
+    const inflight = this.closing.get(sessionId);
+    if (inflight !== undefined) return inflight;
     const handle = this.sessions.get(sessionId);
     if (handle === undefined) return;
+    return this.trackClosing(sessionId, this.doArchive(sessionId, handle));
+  }
+
+  private async doArchive(sessionId: string, handle: ISessionScopeHandle): Promise<void> {
     this.invalidateSessionLifetime(sessionId);
     const meta = handle.accessor.get(ISessionMetadata);
     await meta.setArchived(true);
@@ -442,6 +465,15 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
     this.sessions.delete(sessionId);
     handle.dispose();
     this._onDidArchiveSession.fire({ sessionId });
+  }
+
+  private async trackClosing(sessionId: string, run: Promise<void>): Promise<void> {
+    this.closing.set(sessionId, run);
+    try {
+      await run;
+    } finally {
+      if (this.closing.get(sessionId) === run) this.closing.delete(sessionId);
+    }
   }
 
   async restore(sessionId: string): Promise<ISessionScopeHandle | undefined> {
@@ -457,11 +489,6 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
       .onWillCloseSession.run({ reason: event.reason });
   }
 
-  /**
-   * Synchronously fires the session's liveness abort signal. Runs before any
-   * async close work (hooks, agent drain) so in-flight session services see
-   * the teardown immediately; idempotent — later calls are no-ops.
-   */
   private invalidateSessionLifetime(sessionId: string): void {
     const lifetime = this.sessionLifetimes.get(sessionId);
     if (lifetime === undefined) return;
@@ -479,6 +506,10 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
   async fork(opts: ForkSessionOptions): Promise<ISessionScopeHandle> {
     const sourceId = opts.sourceSessionId;
 
+    // Wait out an in-flight close of the source instead of capturing its
+    // doomed handle (a close starting mid-fork remains an accepted,
+    // pre-existing window — fork never quiesces the source).
+    await this.closing.get(sourceId);
     const sourceHandle = this.sessions.get(sourceId);
     const indexSummary = await this.index.get(sourceId);
     if (

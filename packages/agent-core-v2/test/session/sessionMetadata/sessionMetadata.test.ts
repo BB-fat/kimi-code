@@ -331,6 +331,63 @@ describe('SessionMetadata', () => {
     });
   });
 
+  it.each([
+    // [document title fields, expected titleKind] — the mixed-version matrix.
+    [{ isCustomTitle: true, titleKind: 'generated' as const }, 'custom'],
+    [{ isCustomTitle: true, titleKind: 'replaceable' as const }, 'custom'],
+    [{ isCustomTitle: true }, 'custom'],
+    [{ isCustomTitle: false, titleKind: 'custom' as const }, 'custom'],
+    [{ isCustomTitle: false, titleKind: 'generated' as const }, 'generated'],
+    [{ isCustomTitle: false }, 'replaceable'],
+    [{ titleKind: 'generated' as const }, 'generated'],
+    [{ customTitle: 'legacy title' }, 'custom'],
+    [{}, 'replaceable'],
+  ])('normalizes title state %j to titleKind %s', async (fields, expectedKind) => {
+    const store = ix.get(IAtomicDocumentStore);
+    const title = 'customTitle' in fields ? undefined : 'some title';
+    await store.set(META_SCOPE, 'state.json', {
+      id: 's1',
+      version: 2,
+      createdAt: 1700000000000,
+      updatedAt: 1700000000000,
+      archived: false,
+      ...(title === undefined ? {} : { title }),
+      ...fields,
+      agents: {},
+      custom: {},
+    });
+
+    const meta = ix.get(ISessionMetadata);
+    expect((await meta.read()).titleKind).toBe(expectedKind);
+  });
+
+  it('migrates the title state once, not on every load', async () => {
+    const store = ix.get(IAtomicDocumentStore);
+    await store.set(META_SCOPE, 'state.json', {
+      id: 's1',
+      version: 2,
+      createdAt: 1700000000000,
+      updatedAt: 1700000000000,
+      archived: false,
+      title: '用户手工标题',
+      titleKind: 'replaceable',
+      isCustomTitle: true,
+      agents: {},
+      custom: {},
+    });
+
+    const first = ix.get(ISessionMetadata);
+    await first.ready;
+    const setSpy = vi.spyOn(store, 'set');
+    const fresh = createFreshMetadata(ix);
+    await fresh.ready;
+
+    // The first load already healed the document; the second load sees a
+    // consistent pair and must not write again.
+    expect(setSpy).not.toHaveBeenCalled();
+    expect((await fresh.read()).titleKind).toBe('custom');
+  });
+
   it('keeps a queued custom title when a generated title is enqueued afterward', async () => {
     const meta = ix.get(ISessionMetadata);
     await meta.ready;
@@ -367,6 +424,46 @@ describe('SessionMetadata', () => {
       title: 'user title',
       titleKind: 'custom',
     });
+  });
+
+  it('vetoes a queued generated title when the gate flips before the write runs', async () => {
+    // The lifetime-abort window behind `allowWhen`: the generated-title
+    // update sits in the metadata queue behind a blocked write, the
+    // session's close fires before the update executes, and the queued
+    // write must be dropped rather than land after the abort.
+    const meta = ix.get(ISessionMetadata);
+    await meta.ready;
+    const store = ix.get(IAtomicDocumentStore);
+    const set = store.set.bind(store);
+    let releaseWrite: (() => void) | undefined;
+    let markWriteStarted: (() => void) | undefined;
+    const writeStarted = new Promise<void>((resolve) => {
+      markWriteStarted = resolve;
+    });
+    const writeReleased = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    let shouldBlock = true;
+    vi.spyOn(store, 'set').mockImplementation(async (scope, key, value) => {
+      if (shouldBlock) {
+        shouldBlock = false;
+        markWriteStarted?.();
+        await writeReleased;
+      }
+      await set(scope, key, value);
+    });
+
+    const priorWrite = meta.update({ lastPrompt: 'hello' });
+    await writeStarted;
+    let allowed = true;
+    const generated = meta.setGeneratedTitleIfUncustomized('generated title', () => allowed);
+    allowed = false;
+    releaseWrite?.();
+
+    await priorWrite;
+    await expect(generated).resolves.toBe(false);
+    expect((await meta.read()).title).toBeUndefined();
+    expect((await meta.read()).titleKind).toBeUndefined();
   });
 
   it('leaves existing agents/custom maps untouched', async () => {

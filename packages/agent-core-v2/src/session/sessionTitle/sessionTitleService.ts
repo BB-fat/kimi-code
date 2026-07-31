@@ -9,11 +9,13 @@
  * (the kap-server route), gated by a managed Kimi Code OAuth login; any
  * failure degrades to keeping the current title, and a custom title set by
  * the user is never overwritten. An already-generated title is not
- * regenerated unless forced, and the write-back is dropped once this
- * scope's `sessionLifetime` signal fires — the in-flight request carries
- * the signal, and a close drains the pending generation through the
- * `sessionLifecycleHooks` `onWillCloseSession` slot before the scope is
- * disposed. Provider config comes
+ * regenerated unless forced. The whole `generateTitle()` call is the
+ * coalesced unit the `sessionLifecycleHooks` `onWillCloseSession` slot
+ * drains before the scope is disposed, and the write-back is dropped once
+ * this scope's `sessionLifetime` signal fires — the in-flight request
+ * carries the signal, and the metadata update re-checks it inside the
+ * serialized write so an abort landing while the update sits queued still
+ * vetoes the write. Provider config comes
  * from `provider`, the bearer token from `auth`, host identity headers from
  * `model`, prompt history from `agentLifecycle`/`sessionTitle`, and logs
  * through `log`. Bound at Session scope.
@@ -72,9 +74,6 @@ export class SessionTitleService implements ISessionTitleService {
     @IHostRequestHeaders private readonly hostHeaders: IHostRequestHeaders,
     @ILogService private readonly log: ILogService,
   ) {
-    // A close aborts the lifetime signal first, so the in-flight generation
-    // settles fast; draining it here keeps its metadata write ordered before
-    // the scope's disposal (and any later resume re-reading the document).
     lifecycleHooks.onWillCloseSession.register('sessionTitle', async (_event, next) => {
       await this._generation?.catch(() => undefined);
       await next();
@@ -83,6 +82,18 @@ export class SessionTitleService implements ISessionTitleService {
 
   async generateTitle(options?: { readonly force?: boolean }): Promise<string | undefined> {
     if (this.lifetime.signal.aborted) return undefined;
+    const inFlight = this._generation;
+    if (inFlight !== undefined) return inFlight;
+    const settled = this.generateTitleOnce(options).finally(() => {
+      if (this._generation === settled) this._generation = undefined;
+    });
+    this._generation = settled;
+    return settled;
+  }
+
+  private async generateTitleOnce(options?: {
+    readonly force?: boolean;
+  }): Promise<string | undefined> {
     const current = await this.metadata.read();
     if (current.titleKind === 'custom') return undefined;
     if (current.titleKind === 'generated' && options?.force !== true) return undefined;
@@ -97,16 +108,6 @@ export class SessionTitleService implements ISessionTitleService {
   }
 
   private async generateAndApply(chatContent: string): Promise<string | undefined> {
-    const inFlight = this._generation;
-    if (inFlight !== undefined) return inFlight;
-    const settled = this.generateAndApplyOnce(chatContent).finally(() => {
-      if (this._generation === settled) this._generation = undefined;
-    });
-    this._generation = settled;
-    return settled;
-  }
-
-  private async generateAndApplyOnce(chatContent: string): Promise<string | undefined> {
     const current = await this.metadata.read();
     if (current.titleKind === 'custom') return undefined;
     const provider = this.providers.get(KIMI_CODE_PROVIDER_NAME);
@@ -160,7 +161,10 @@ export class SessionTitleService implements ISessionTitleService {
     }
     if (this.lifetime.signal.aborted) return undefined;
     const title = result.title.slice(0, MAX_GENERATED_TITLE_LENGTH);
-    const applied = await this.metadata.setGeneratedTitleIfUncustomized(title);
+    const applied = await this.metadata.setGeneratedTitleIfUncustomized(
+      title,
+      () => !this.lifetime.signal.aborted,
+    );
     if (!applied) return undefined;
     this.eventService.publish({
       type: 'session.meta.updated',
