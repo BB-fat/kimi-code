@@ -44,6 +44,15 @@ export interface CreateAgentOptions {
 export interface ForkAgentOptions {
   readonly agentId?: string;
   readonly binding?: Partial<BindAgentInput>;
+  /**
+   * When true, trim the trailing assistant message that carries tool calls from
+   * the copied context history before appending it to the forked agent. This
+   * removes the in-flight tool-call carrier (e.g. `spine_spawn`) so the child
+   * agent does not inherit an unfinished parent action as part of its context.
+   * Only the last message is considered; if it has no tool calls it is left in
+   * place. Default behavior (undefined/false) copies the history verbatim.
+   */
+  readonly trimTrailingToolCallBatch?: boolean;
 }
 
 export interface AgentListFilter {

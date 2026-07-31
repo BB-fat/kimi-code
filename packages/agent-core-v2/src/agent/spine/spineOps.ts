@@ -13,6 +13,10 @@
  * open-node stack (its top is the cursor), and the current root-epoch
  * boundary, with `openedAt`/`closedAt` indexing the stored history. Consumed
  * by the Agent-scope `spineService` and the `spineFold` projection.
+ *
+ * `SpineNode.spawn` is an optional evidence field produced only by the
+ * derivation for nodes synthesized from a `spine_spawn` receipt. The legacy
+ * op reducers below never create it and always leave it undefined.
  */
 
 import { z } from 'zod';
@@ -25,6 +29,12 @@ import {
   SPINE_VOID_OPENED_AT,
 } from './spineTree';
 
+export interface SpineSpawnEvidence {
+  readonly summary: string;
+  readonly outcome: 'completed' | 'errored' | 'aborted';
+  readonly diagnostic?: string;
+}
+
 export interface SpineNode {
   readonly id: string;
   readonly summary: string;
@@ -34,6 +44,7 @@ export interface SpineNode {
   readonly archivePath?: string;
   readonly baselineTokens?: number;
   readonly finalTokens?: number;
+  readonly spawn?: SpineSpawnEvidence;
   readonly children: readonly string[];
 }
 

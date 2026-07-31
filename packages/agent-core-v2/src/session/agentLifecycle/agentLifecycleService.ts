@@ -54,6 +54,7 @@ import { IAgentToolSelectAnnouncementsService } from '#/agent/toolSelect/toolSel
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import { IAgentPermissionGate } from '#/agent/permissionGate/permissionGate';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
+import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
 import { IAgentFullCompactionService } from '#/agent/fullCompaction/fullCompaction';
 import { IAgentGoalService } from '#/agent/goal/goal';
@@ -309,7 +310,11 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
 
     const sourceMessages = source.accessor.get(IAgentContextMemoryService)?.get();
     if (sourceMessages !== undefined && sourceMessages.length > 0) {
-      child.accessor.get(IAgentContextMemoryService)?.append(...sourceMessages);
+      const messagesToCopy =
+        opts?.trimTrailingToolCallBatch === true
+          ? trimTrailingToolCallBatch(sourceMessages)
+          : sourceMessages;
+      child.accessor.get(IAgentContextMemoryService)?.append(...messagesToCopy);
     }
     return child;
   }
@@ -351,6 +356,20 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
     handle.dispose();
     this.onDidDisposeEmitter.fire(agentId);
   }
+}
+
+/**
+ * Returns a shallow copy of `messages` with the last assistant message that
+ * carries tool calls removed, if such a message is the final message in the
+ * array. If the last message is not an assistant message or has no tool calls,
+ * the array is returned unchanged (the caller already has a fresh reference to
+ * the source messages, so a shallow copy is defensive enough).
+ */
+function trimTrailingToolCallBatch(messages: readonly ContextMessage[]): readonly ContextMessage[] {
+  const last = messages.at(-1);
+  if (last === undefined || last.role !== 'assistant') return messages;
+  if (last.toolCalls.length === 0) return messages;
+  return messages.slice(0, -1);
 }
 
 registerScopedService(

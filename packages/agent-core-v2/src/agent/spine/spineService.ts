@@ -31,8 +31,13 @@
  * so a restore re-derives them and the first post-restore sweep rewrites any
  * archive a crash lost. Persistence failures are never swallowed: a failed
  * archive write is reported through `onUnexpectedError`, and the node's memory
- * carries the failure note in the projection from then on. Renders the
- * read-only `spine_tree` view across every root epoch (current first by
+ * carries the failure note in the projection from then on. It also owns the
+ * tool-response trim projection (gated on `KIMI_CODE_SPINE_TRIM`): the same
+ * stream derives the oversized-result tags and replays the accepted
+ * `spine_trim` receipts (`deriveSpineTrimProjection`), the fold renders them,
+ * and `acceptTrim` validates calls against that same derivation — one
+ * eligibility source for rendering and validation. Renders the read-only
+ * `spine_tree` view across every root epoch (current first by
  * numeric order), so a superseded epoch's closed-node archives stay
  * discoverable after a root compaction. Registers its history fold into
  * `contextProjector` and its `<spine_view>` prompt block into `llmRequester`
@@ -63,14 +68,17 @@ import { IEventBus } from '#/app/event/eventBus';
 import { IFlagService } from '#/app/flag/flag';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
+import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import { ISessionSubagentService } from '#/session/subagent/subagent';
 import { IWireService } from '#/wire/wire';
 
-import { SPINE_FLAG_ID } from './flag';
+import { SPINE_FLAG_ID, SPINE_SPAWN_FLAG_ID, SPINE_TRIM_FLAG_ID } from './flag';
 import { appendSpineView, loadSpineViewOverride } from './instructions';
 import {
   IAgentSpineService,
   SPINE_TOOL_OPEN,
+  type SpineSpawnTaskInput,
   type SpineTransitionResult,
 } from './spine';
 import {
@@ -81,6 +89,11 @@ import {
   type SpineEpochArchiveInput,
 } from './spineArchive';
 import { deriveSpineState } from './spineDerive';
+import {
+  deriveSpineTrimProjection,
+  type SpineTrimOp,
+  type SpineTrimProjection,
+} from './spineTrimDerive';
 import { foldSpine, type SpineFoldStatus } from './spineFold';
 import { type SpineNode, type SpineState } from './spineOps';
 import {
@@ -93,6 +106,13 @@ import {
   spineNodeViewFromState,
   type SpineTreeViewInput,
 } from './spineTree';
+import {
+  executeSpawnBranches,
+  maxSpawnBranchCount,
+  resolveMaxThreads,
+  SPINE_SPAWN_MAX_THREADS_ENV,
+  type SpawnBranchResult,
+} from './spineSpawn';
 
 const REJECT_DISABLED: SpineTransitionResult = {
   accepted: false,
@@ -111,6 +131,16 @@ const REJECT_ROOT_EPOCH: SpineTransitionResult = {
     'Root-epoch nodes cannot be closed. Use open to start a child node under the current scope.',
 };
 
+const REJECT_TRIM_DISABLED: SpineTransitionResult = {
+  accepted: false,
+  reason: 'Spine trim is disabled. Set KIMI_CODE_SPINE_TRIM=1 to enable it.',
+};
+
+const REJECT_SPAWN_DISABLED: SpineTransitionResult = {
+  accepted: false,
+  reason: 'Spine spawn is disabled. Set KIMI_CODE_SPINE_SPAWN=1 to enable it.',
+};
+
 const ARCHIVE_FAILURE_NOTE =
   '[spine: the trajectory archive for this node could not be written; its detailed history was not persisted.]';
 
@@ -121,6 +151,8 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
   private transitionThisStep = false;
   private cachedMessages: readonly ContextMessage[] | undefined;
   private cachedState: SpineState | undefined;
+  private cachedTrimMessages: readonly ContextMessage[] | undefined;
+  private cachedTrimProjection: SpineTrimProjection | undefined;
   /**
    * Ephemeral per-node token gauges, recorded at accept time. Token baselines
    * are not in the message stream, so pure derivation cannot recover them —
@@ -147,6 +179,11 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
   private readonly failedArchiveIds = new Set<string>();
   private spineViewOverride: string | undefined;
   private spineViewReady: Promise<void> = Promise.resolve();
+  /**
+   * Number of child agents currently running as part of an in-flight
+   * `spine_spawn` fission. Ephemeral: reset at step bounds and on restore.
+   */
+  private activeSpawnBranches = 0;
 
   constructor(
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
@@ -160,6 +197,8 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     @IAgentScopeContext private readonly agentScope: IAgentScopeContext,
     @IWireService private readonly wire: IWireService,
     @IEventBus private readonly eventBus: IEventBus,
+    @IAgentLifecycleService private readonly lifecycle: IAgentLifecycleService,
+    @ISessionSubagentService private readonly subagentService: ISessionSubagentService,
     @IAgentLoopService loop: IAgentLoopService,
     @IAgentContextProjectorService projector: IAgentContextProjectorService,
     @IAgentLLMRequesterService llmRequester: IAgentLLMRequesterService,
@@ -213,10 +252,13 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
         // close and its sweep self-heals.
         this.cachedMessages = undefined;
         this.cachedState = undefined;
+        this.cachedTrimMessages = undefined;
+        this.cachedTrimProjection = undefined;
         this.baselines.clear();
         this.finals.clear();
         this.archivedIds.clear();
         this.failedArchiveIds.clear();
+        this.activeSpawnBranches = 0;
         await next();
       }),
     );
@@ -240,6 +282,75 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
 
   get enabled(): boolean {
     return this.flags.enabled(SPINE_FLAG_ID);
+  }
+
+  get trimEnabled(): boolean {
+    return this.flags.enabled(SPINE_TRIM_FLAG_ID);
+  }
+
+  get spawnEnabled(): boolean {
+    return this.flags.enabled(SPINE_SPAWN_FLAG_ID);
+  }
+
+  executeSpawn(
+    tasks: readonly SpineSpawnTaskInput[],
+    signal: AbortSignal,
+  ): Promise<SpineTransitionResult & { readonly receipt?: string }> {
+    return this.doExecuteSpawn(tasks, signal);
+  }
+
+  private async doExecuteSpawn(
+    tasks: readonly SpineSpawnTaskInput[],
+    signal: AbortSignal,
+  ): Promise<SpineTransitionResult & { readonly receipt?: string }> {
+    if (!this.enabled) return REJECT_DISABLED;
+    if (!this.spawnEnabled) return REJECT_SPAWN_DISABLED;
+
+    const maxThreads = resolveMaxThreads(process.env[SPINE_SPAWN_MAX_THREADS_ENV]);
+    const maxBranches = maxSpawnBranchCount(maxThreads);
+
+    if (tasks.length < 2) {
+      return reject('spine_spawn requires at least 2 tasks.');
+    }
+    if (tasks.length > maxBranches) {
+      return reject(
+        `spine_spawn accepts at most ${String(maxBranches)} tasks under the configured limit of ${String(maxThreads)} threads.`,
+      );
+    }
+
+    // Aggregate capacity admission is checked before the per-step gate so that
+    // an overlapping fission that cannot fit is rejected with the all-or-nothing
+    // reason even while another transition is still in flight.
+    if (this.activeSpawnBranches + tasks.length > maxBranches) {
+      return {
+        accepted: false,
+        reason:
+          `aggregate admission requested ${String(tasks.length)} child agents, but shared capacity was unavailable under the configured limit of ${String(maxBranches)} concurrent child agents. ` +
+          `Admission is all-or-nothing. Retry spine_spawn with fewer tasks after capacity is available, or increase ${SPINE_SPAWN_MAX_THREADS_ENV}.`,
+      };
+    }
+
+    if (this.transitionThisStep) return REJECT_CONFLICT;
+
+    for (const task of tasks) {
+      if (task.summary.trim().length === 0 || task.prompt.trim().length === 0) {
+        return reject('spine_spawn task summary and prompt must not be empty.');
+      }
+    }
+
+    this.transitionThisStep = true;
+    this.activeSpawnBranches += tasks.length;
+    try {
+      const branches = await executeSpawnBranches(
+        { lifecycle: this.lifecycle, subagentService: this.subagentService },
+        tasks,
+        signal,
+      );
+      const receipt = buildSpawnReceipt(branches);
+      return { accepted: true, receipt };
+    } finally {
+      this.activeSpawnBranches -= tasks.length;
+    }
   }
 
   acceptOpen(summary: string): SpineTransitionResult {
@@ -293,6 +404,31 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     return { accepted: true };
   }
 
+  acceptTrim(trimId: string, op: SpineTrimOp): SpineTransitionResult {
+    if (!this.enabled) return REJECT_DISABLED;
+    if (!this.trimEnabled) return REJECT_TRIM_DISABLED;
+    const projection = this.trimProjection();
+    const index = projection.tagIndex.get(trimId);
+    if (index === undefined) {
+      return reject(`Unknown TRIM_ID "${trimId}"; it is not attached to a tool result. Do not retry it.`);
+    }
+    if (projection.consumed.has(trimId)) {
+      return reject(`TRIM_ID "${trimId}" was already trimmed. Do not retry it.`);
+    }
+    if (!projection.eligible.has(trimId)) {
+      return reject(
+        `TRIM_ID "${trimId}" is outside the immediately preceding tool-result batch. Do not retry it.`,
+      );
+    }
+    if (op.kind === 'slice' && op.shape.type === 'anchor') {
+      const target = this.context.get()[index];
+      if (target === undefined || !messageText(target).includes(op.shape.anchor)) {
+        return reject(`Anchor text not found in "${trimId}". Do not retry it.`);
+      }
+    }
+    return { accepted: true };
+  }
+
   renderTree(): string {
     const state = this.state();
     const input = this.treeViewInput();
@@ -308,7 +444,8 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     const state = this.state();
     const epochSummaryMessage =
       state.epochMemoryAt === undefined ? undefined : messages[state.epochMemoryAt];
-    return foldSpine(messages, { state, status: this.buildStatus(), epochSummaryMessage });
+    const trim = this.trimEnabled ? this.trimProjection() : undefined;
+    return foldSpine(messages, { state, status: this.buildStatus(), epochSummaryMessage, trim });
   }
 
   currentState(): SpineState {
@@ -380,6 +517,22 @@ export class AgentSpineService extends Disposable implements IAgentSpineService 
     this.cachedMessages = messages;
     this.cachedState = state;
     return state;
+  }
+
+  /**
+   * The trim projection over the same stream, cached with the same
+   * reference-equality guard. This is the single eligibility source: the fold
+   * renders it and `acceptTrim` validates against it.
+   */
+  private trimProjection(): SpineTrimProjection {
+    const messages = this.context.get();
+    if (this.cachedTrimProjection !== undefined && this.cachedTrimMessages === messages) {
+      return this.cachedTrimProjection;
+    }
+    const projection = deriveSpineTrimProjection(messages);
+    this.cachedTrimMessages = messages;
+    this.cachedTrimProjection = projection;
+    return projection;
   }
 
   private cursorId(): string {
@@ -530,6 +683,29 @@ function stripCompactionSummaryPrefix(text: string): string {
 
 function reject(reason: string): SpineTransitionResult {
   return { accepted: false, reason };
+}
+
+interface SpawnReceiptJson {
+  readonly schema: 'spine.spawn.result.v1';
+  readonly results: readonly SpawnReceiptResultJson[];
+}
+
+interface SpawnReceiptResultJson {
+  readonly ordinal: number;
+  readonly outcome: 'completed' | 'errored' | 'aborted';
+  readonly memory_body: string;
+  readonly diagnostic?: string;
+}
+
+function buildSpawnReceipt(branches: readonly SpawnBranchResult[]): string {
+  const results: SpawnReceiptResultJson[] = branches.map((branch, ordinal) => ({
+    ordinal,
+    outcome: branch.outcome,
+    memory_body: branch.memoryBody,
+    diagnostic: branch.diagnostic,
+  }));
+  const receipt: SpawnReceiptJson = { schema: 'spine.spawn.result.v1', results };
+  return JSON.stringify(receipt);
 }
 
 registerScopedService(

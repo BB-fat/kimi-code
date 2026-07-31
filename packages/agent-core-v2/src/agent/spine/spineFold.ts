@@ -14,31 +14,42 @@
  *   inside its span survive in place with their original message identity
  *   (text AND media parts preserved), each nested closed node contributes its
  *   own `<spine_memory node_id="...">` slot, and the node's own memory lands
- *   last — the same slot layout the upstream `assemble_memory` produces.
+ *   last — the same slot layout the upstream `assemble_memory` produces. Nodes
+ *   synthesized from a `spine_spawn` receipt additionally render an evidence
+ *   line `<spine_spawn_evidence node_id="..." summary="..." outcome="..." />`
+ *   before their memory slot; the receipt tool message is absorbed by the
+ *   point span and never reaches the projection.
  *
  * Real user requests carry stable `[U#]` anchors: every request in the stored
  * history consumes its ordinal even when an epoch boundary folds it away, so a
  * surviving request keeps the same anchor across projections and across the
- * close that folds its span. A synthetic `<spine_status>` orientation line
- * closes the view. The stored history is never mutated; token numbers for the
- * status line are precomputed by the `spine` service and passed in. Consumed
- * by `spineService.fold`.
+ * close that folds its span. Tool messages in live ranges additionally pass
+ * the trim projection (when given): oversized results keep their full body
+ * behind a byte-stable `[TRIM_ID: trim_N]` label, and accepted trims render
+ * as the cleared placeholder or a kept slice. A synthetic `<spine_status>`
+ * orientation line closes the view. The stored history is never mutated;
+ * token numbers for the status line are precomputed by the `spine` service
+ * and passed in. Consumed by `spineService.fold`.
  *
  * Span invariants (mirroring the upstream reducer): a closed span ends BEFORE
  * the assistant message carrying the close/next call, so the carrier, its
  * receipt, and any slower batched tool results stay visible and paired in the
  * parent context; a `spine.next` sibling opens at the carrier's index, so
- * next-chain spans are disjoint and contiguous. A span closed entirely before
- * the current epoch is owned by the epoch summary and skipped silently — left
- * queued, it would pin the level walk and keep every post-epoch span raw
- * forever. The synthetic root-epoch node and truncation-voided nodes
- * (`openedAt < 0`) never produce landmarks or spans.
+ * next-chain spans are disjoint and contiguous. `spine_spawn` siblings share a
+ * point span at the receipt message, so the first sibling absorbs the receipt
+ * into its closed range and the carrier stays visible in the parent context.
+ * A span closed entirely before the current epoch is owned by the epoch
+ * summary and skipped silently — left queued, it would pin the level walk and
+ * keep every post-epoch span raw forever. The synthetic root-epoch node and
+ * truncation-voided nodes (`openedAt < 0`) never produce landmarks or spans.
  */
 
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import type { ContentPart } from '#/kosong/contract/message';
 
-import type { SpineNode, SpineState } from './spineOps';
+import type { SpineNode, SpineSpawnEvidence, SpineState } from './spineOps';
+import type { SpineTrimProjection } from './spineTrimDerive';
+import { applySpineTrim } from './spineTrimFold';
 
 export interface SpineFoldStatus {
   readonly cursorId: string;
@@ -62,6 +73,8 @@ export interface SpineFoldInput {
   readonly state: SpineState;
   readonly epochSummaryMessage?: ContextMessage;
   readonly status?: SpineFoldStatus;
+  /** Derived trim projection applied to tool messages in live ranges. */
+  readonly trim?: SpineTrimProjection;
 }
 
 export function foldSpine(
@@ -74,6 +87,7 @@ export function foldSpine(
     state,
     anchors: userRequestAnchors(messages),
     epochStartAt: state.epochStartAt,
+    trim: input.trim,
   };
   const out: ContextMessage[] = [];
 
@@ -104,6 +118,7 @@ interface FoldContext {
   /** `[U#]` ordinal per message index (0 = not a real user request). */
   readonly anchors: readonly number[];
   readonly epochStartAt: number;
+  readonly trim: SpineTrimProjection | undefined;
 }
 
 type SpanSink = (ctx: FoldContext, index: number, out: ContextMessage[]) => void;
@@ -154,7 +169,11 @@ function renderNode(
   }
   // A closed node folds: real user requests inside the span survive in place
   // (media included), nested closed nodes render their own slots, and the
-  // node's own memory lands last.
+  // node's own memory lands last. Spawned nodes prefix their memory with an
+  // evidence line.
+  if (node.spawn !== undefined) {
+    out.push(spineSpawnEvidenceMessage(node, node.spawn));
+  }
   walkChildren(ctx, node.children, lo, hi, out, pushSurvivingUserRequest);
   const memoryMessage = spineMemoryMessage(node);
   if (memoryMessage !== undefined) out.push(memoryMessage);
@@ -165,7 +184,8 @@ function pushRaw(ctx: FoldContext, index: number, out: ContextMessage[]): void {
   const message = ctx.messages[index];
   if (message === undefined) return;
   const anchor = ctx.anchors[index] ?? 0;
-  out.push(anchor > 0 ? annotateUserRequest(message, anchor) : message);
+  const surviving = anchor > 0 ? annotateUserRequest(message, anchor) : message;
+  out.push(ctx.trim === undefined ? surviving : applySpineTrim(ctx.trim, index, surviving));
 }
 
 /** Folded-range sink: only real user requests survive, tagged and original. */
@@ -181,7 +201,7 @@ export function isUserRequest(message: ContextMessage): boolean {
 }
 
 function userRequestAnchors(messages: readonly ContextMessage[]): readonly number[] {
-  const anchors: number[] = new Array<number>(messages.length).fill(0);
+  const anchors: number[] = Array.from({ length: messages.length }, () => 0);
   let anchor = 0;
   for (let i = 0; i < messages.length; i++) {
     const message = messages[i];
@@ -217,6 +237,23 @@ function spineMemoryMessage(node: SpineNode): ContextMessage | undefined {
     content: [{ type: 'text', text: `<spine_memory node_id="${node.id}">\n${memory}\n</spine_memory>` }],
     toolCalls: [],
     origin: { kind: 'injection', variant: 'spine_memory' },
+  };
+}
+
+function spineSpawnEvidenceMessage(
+  node: SpineNode,
+  spawn: SpineSpawnEvidence,
+): ContextMessage {
+  const diagnostic =
+    spawn.diagnostic === undefined ? '' : ` diagnostic="${escapeAttr(spawn.diagnostic)}"`;
+  const text = `<spine_spawn_evidence node_id="${node.id}" summary="${escapeAttr(
+    spawn.summary,
+  )}" outcome="${spawn.outcome}"${diagnostic} />`;
+  return {
+    role: 'user',
+    content: [{ type: 'text', text }],
+    toolCalls: [],
+    origin: { kind: 'injection', variant: 'spine_spawn_evidence' },
   };
 }
 

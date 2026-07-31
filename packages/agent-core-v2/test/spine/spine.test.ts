@@ -11,11 +11,14 @@ import { SPINE_FLAG_ID } from '#/agent/spine/flag';
 import { SpineCloseTool } from '#/agent/spine/tools/spine-close';
 import { SpineNextTool } from '#/agent/spine/tools/spine-next';
 import { SpineOpenTool } from '#/agent/spine/tools/spine-open';
+import { SpineSpawnTool } from '#/agent/spine/tools/spine-spawn';
 import { SpineTreeTool } from '#/agent/spine/tools/spine-tree';
+import { SpineTrimTool } from '#/agent/spine/tools/spine-trim';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IFlagService } from '#/app/flag/flag';
 import { getToolContributions } from '#/agent/toolRegistry/toolContribution';
 import type { ServicesAccessor } from '#/_base/di/instantiation';
+import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import {
   IAgentSpineService,
@@ -33,6 +36,7 @@ import type { Message } from '#/kosong/contract/message';
 import {
   createCommandRunner,
   execEnvServices,
+  sessionService,
   testAgent,
   type TestAgentContext,
   type TestAgentOptions,
@@ -259,13 +263,35 @@ describe('Spine control tools', () => {
     vi.unstubAllEnvs();
   });
 
-  it('registers the four spine tools when enabled', () => {
+  it('registers the four core spine tools when enabled', () => {
     const ctx = testAgent();
     const names = spineToolNames(ctx);
     expect(names).toEqual(
       expect.arrayContaining(['spine_open', 'spine_close', 'spine_next', 'spine_tree']),
     );
     expect(names).toHaveLength(4);
+  });
+
+  it('registers spine_spawn when the spawn flag is also on', () => {
+    vi.stubEnv('KIMI_CODE_SPINE_SPAWN', '1');
+    const ctx = testAgent();
+    expect(spineToolNames(ctx)).toContain('spine_spawn');
+  });
+
+  it('does not register spine_spawn without the spawn flag', () => {
+    const ctx = testAgent();
+    expect(spineToolNames(ctx)).not.toContain('spine_spawn');
+  });
+
+  it('registers spine_trim when the trim flag is also on', () => {
+    vi.stubEnv('KIMI_CODE_SPINE_TRIM', '1');
+    const ctx = testAgent();
+    expect(spineToolNames(ctx)).toContain('spine_trim');
+  });
+
+  it('does not register spine_trim without the trim flag', () => {
+    const ctx = testAgent();
+    expect(spineToolNames(ctx)).not.toContain('spine_trim');
   });
 
   it('default agent profile whitelists the spine tools', () => {
@@ -276,14 +302,14 @@ describe('Spine control tools', () => {
     const ctx = testAgent();
     const profile = ctx.get(IAgentProfileCatalogService).getDefault();
     expect(profile.tools).toEqual(
-      expect.arrayContaining(['spine_open', 'spine_close', 'spine_next', 'spine_tree']),
+      expect.arrayContaining(['spine_open', 'spine_close', 'spine_next', 'spine_tree', 'spine_trim', 'spine_spawn']),
     );
   });
 
   it('keeps spine tools active under a whitelist that lists them', () => {
     const ctx = testAgent();
     ctx.configure({
-      tools: ['Read', 'spine_open', 'spine_close', 'spine_next', 'spine_tree'],
+      tools: ['Read', 'spine_open', 'spine_close', 'spine_next', 'spine_tree', 'spine_trim', 'spine_spawn'],
     });
     const spine = ctx.toolsData().filter((tool) => tool.name.startsWith('spine_'));
     expect(spine).toHaveLength(4);
@@ -771,34 +797,51 @@ describe('spine control tool main-agent gating', () => {
     ['spine_close', SpineCloseTool],
     ['spine_next', SpineNextTool],
     ['spine_tree', SpineTreeTool],
+    ['spine_trim', SpineTrimTool],
+    ['spine_spawn', SpineSpawnTool],
   ] as const;
 
-  function accessorFor(agentId: string, spineEnabled: boolean): ServicesAccessor {
+  function accessorFor(agentId: string, flags: { spine: boolean; trim: boolean; spawn: boolean }): ServicesAccessor {
     const scopeContext: IAgentScopeContext = {
       _serviceBrand: undefined,
       agentId,
       scope: () => '',
     };
-    const flags = {
-      enabled: (id: string) => id === SPINE_FLAG_ID && spineEnabled,
+    const flagService = {
+      enabled: (id: string) => {
+        if (id === SPINE_FLAG_ID) return flags.spine;
+        if (id === 'spine_trim') return flags.trim;
+        if (id === 'spine_spawn') return flags.spawn;
+        return false;
+      },
     } as unknown as IFlagService;
     return {
       get: (id: unknown) => {
         if (id === IAgentScopeContext) return scopeContext;
-        if (id === IFlagService) return flags;
+        if (id === IFlagService) return flagService;
         throw new Error(`unexpected service identifier: ${String(id)}`);
       },
     } as unknown as ServicesAccessor;
   }
 
-  it.each(gatedTools)('%s registers only on the main agent with the flag on', (name, ctor) => {
+  it.each(gatedTools)('%s registers only on the main agent with the required flags', (name, ctor) => {
     const contribution = getToolContributions().find((c) => c.ctor === ctor);
     expect(contribution, `${name} contribution`).toBeDefined();
     const when = contribution?.options.when;
-    expect(when, `${name} must gate on flag + main-agent identity`).toBeDefined();
-    expect(when?.(accessorFor('main', true))).toBe(true);
-    expect(when?.(accessorFor('sub-1', true))).toBe(false);
-    expect(when?.(accessorFor('main', false))).toBe(false);
+    expect(when, `${name} must gate on flags + main-agent identity`).toBeDefined();
+    const needsSpawn = name === 'spine_spawn';
+    const needsTrim = name === 'spine_trim';
+    expect(when?.(accessorFor('main', { spine: true, trim: needsTrim, spawn: needsSpawn }))).toBe(true);
+    expect(when?.(accessorFor('sub-1', { spine: true, trim: needsTrim, spawn: needsSpawn }))).toBe(false);
+    expect(when?.(accessorFor('main', { spine: false, trim: needsTrim, spawn: needsSpawn }))).toBe(false);
+  });
+
+  it('spine_spawn requires capacity for at least two branches', () => {
+    vi.stubEnv('KIMI_CODE_SPINE_SPAWN_MAX_THREADS', '2');
+    const contribution = getToolContributions().find((c) => c.ctor === SpineSpawnTool);
+    const when = contribution?.options.when;
+    expect(when?.(accessorFor('main', { spine: true, trim: false, spawn: true }))).toBe(false);
+    vi.unstubAllEnvs();
   });
 });
 
@@ -900,3 +943,250 @@ function spineReceipt(toolCallId: string): ContextMessage {
     toolCallId,
   };
 }
+import { IAgentLoopService } from '#/agent/loop/loop';
+import { ISessionSubagentService } from '#/session/subagent/subagent';
+import type { AgentRunHandle } from '#/session/subagent/subagent';
+import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
+import type { IAgentScopeHandle } from '#/_base/di/scope';
+
+/**
+ * Minimal working `IAgentLifecycleService.fork` for spawn tests: mints
+ * `agent-N` ids in order so the paired `mockSubagentService` summaries line
+ * up. The run side is faked separately, so no context copying is needed.
+ */
+function mockLifecycleService(): IAgentLifecycleService {
+  let minted = 0;
+  const handles = new Map<string, IAgentScopeHandle>();
+  return {
+    _serviceBrand: undefined,
+    onDidCreate: () => ({ dispose: () => undefined }),
+    onDidDispose: () => ({ dispose: () => undefined }),
+    create: () => Promise.reject(new Error('create is not used in spawn tests')),
+    fork: (sourceAgentId: string, _opts?: unknown) => {
+      if (sourceAgentId !== 'main') return Promise.reject(new Error(`unknown source ${sourceAgentId}`));
+      const id = `agent-${String(minted++)}`;
+      const handle = { id } as unknown as IAgentScopeHandle;
+      handles.set(id, handle);
+      return Promise.resolve(handle);
+    },
+    get: (agentId: string) => handles.get(agentId),
+    list: () => [...handles.values()],
+    broadcastPermissionMode: () => undefined,
+    remove: (agentId: string) => {
+      handles.delete(agentId);
+      return Promise.resolve();
+    },
+  } as unknown as IAgentLifecycleService;
+}
+
+function mockSubagentService(
+  summaries: Record<string, string>,
+): ISessionSubagentService {
+  return {
+    _serviceBrand: undefined,
+    hooks: { onWillStartAgentTask: { register: () => ({ dispose: () => undefined }) } },
+    onDidStopAgentTask: () => ({ dispose: () => undefined }),
+    run: async (agentId: string) => {
+      const summary = summaries[agentId] ?? '';
+      const controller = new AbortController();
+      const handle: AgentRunHandle = {
+        agentId,
+        turn: {
+          id: 1,
+          signal: controller.signal,
+          cancel: () => {
+            controller.abort();
+            return true;
+          },
+          ready: Promise.resolve(),
+          result: Promise.resolve({ type: 'completed', steps: 0 } as never),
+        },
+        completion: Promise.resolve({ summary }),
+      };
+      return handle;
+    },
+    notifyAgentTaskStopped: () => undefined,
+  } as unknown as ISessionSubagentService;
+}
+
+function buildCompletionController() {
+  let resolve!: (value: { summary: string }) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<{ summary: string }>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+describe('spine_spawn service', () => {
+  beforeEach(() => {
+    vi.stubEnv(MASTER_ENV, '0');
+    vi.stubEnv(SPINE_ENV, '1');
+    vi.stubEnv('KIMI_CODE_SPINE_SPAWN', '1');
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('rejects spawn when it conflicts with another transition in the same step', async () => {
+    const ctx = testAgent();
+    const spine = ctx.get(IAgentSpineService);
+    spine.acceptOpen('task A');
+    const result = await spine.executeSpawn(
+      [
+        { summary: 'branch A', prompt: 'do A' },
+        { summary: 'branch B', prompt: 'do B' },
+      ],
+      new AbortController().signal,
+    );
+    expect(result.accepted).toBe(false);
+    if (!result.accepted) {
+      expect(result.reason).toContain('at most one Spine transition');
+    }
+  });
+
+  it('rejects a second spawn in the same step', async () => {
+    const ctx = testAgent(
+      sessionService(IAgentLifecycleService, mockLifecycleService()),
+      sessionService(ISessionSubagentService, mockSubagentService({})),
+    );
+    const spine = ctx.get(IAgentSpineService);
+    const first = await spine.executeSpawn(
+      [
+        { summary: 'branch A', prompt: 'do A' },
+        { summary: 'branch B', prompt: 'do B' },
+      ],
+      new AbortController().signal,
+    );
+    expect(first.accepted).toBe(true);
+    const second = await spine.executeSpawn(
+      [
+        { summary: 'branch C', prompt: 'do C' },
+        { summary: 'branch D', prompt: 'do D' },
+      ],
+      new AbortController().signal,
+    );
+    expect(second.accepted).toBe(false);
+    if (!second.accepted) {
+      expect(second.reason).toContain('at most one Spine transition');
+    }
+  });
+
+  it('rejects all-or-nothing when capacity is unavailable', async () => {
+    vi.stubEnv('KIMI_CODE_SPINE_SPAWN_MAX_THREADS', '3');
+    const completions: ReturnType<typeof buildCompletionController>[] = [];
+    const hangingSubagent: ISessionSubagentService = {
+      _serviceBrand: undefined,
+      hooks: { onWillStartAgentTask: { register: () => ({ dispose: () => undefined }) } },
+      onDidStopAgentTask: () => ({ dispose: () => undefined }),
+      run: async (agentId: string) => {
+        const controller = new AbortController();
+        const completion = buildCompletionController();
+        completions.push(completion);
+        return {
+          agentId,
+          turn: {
+            id: 1,
+            signal: controller.signal,
+            cancel: () => {
+              controller.abort();
+              return true;
+            },
+            ready: Promise.resolve(),
+            result: Promise.resolve({ type: 'completed', steps: 0 } as never),
+          },
+          completion: completion.promise,
+        } as AgentRunHandle;
+      },
+      notifyAgentTaskStopped: () => undefined,
+    } as unknown as ISessionSubagentService;
+
+    const ctx = testAgent(
+      sessionService(IAgentLifecycleService, mockLifecycleService()),
+      sessionService(ISessionSubagentService, hangingSubagent),
+    );
+    const spine = ctx.get(IAgentSpineService);
+
+    // Start the first batch but do not let it complete so activeSpawnBranches stays at 2.
+    const firstPromise = spine.executeSpawn(
+      [
+        { summary: 'branch A', prompt: 'do A' },
+        { summary: 'branch B', prompt: 'do B' },
+      ],
+      new AbortController().signal,
+    );
+    await Promise.resolve();
+
+    // A second overlapping batch of two cannot fit under the limit of 2.
+    const second = await spine.executeSpawn(
+      [
+        { summary: 'branch C', prompt: 'do C' },
+        { summary: 'branch D', prompt: 'do D' },
+      ],
+      new AbortController().signal,
+    );
+    expect(second.accepted).toBe(false);
+    if (!second.accepted) {
+      expect(second.reason).toContain('aggregate admission requested 2 child agents');
+      expect(second.reason).toContain('all-or-nothing');
+      expect(second.reason).toContain('KIMI_CODE_SPINE_SPAWN_MAX_THREADS');
+    }
+
+    // Unblock the first batch and drain it.
+    completions.forEach((c) => c.resolve({ summary: 'done' }));
+    await firstPromise;
+  });
+
+  it('produces a receipt that derive accepts and synthesizes closed nodes', async () => {
+    const ctx = testAgent(
+      sessionService(IAgentLifecycleService, mockLifecycleService()),
+      sessionService(
+        ISessionSubagentService,
+        mockSubagentService({
+          'agent-0': 'memory A',
+          'agent-1': 'memory B',
+        }),
+      ),
+    );
+    const spine = ctx.get(IAgentSpineService);
+    const result = await spine.executeSpawn(
+      [
+        { summary: 'branch A', prompt: 'do A' },
+        { summary: 'branch B', prompt: 'do B' },
+      ],
+      new AbortController().signal,
+    );
+    expect(result.accepted).toBe(true);
+    expect(result.receipt).toBeDefined();
+    const receipt = JSON.parse(result.receipt!);
+    expect(receipt.schema).toBe('spine.spawn.result.v1');
+    expect(receipt.results).toHaveLength(2);
+    expect(receipt.results[0]).toMatchObject({ ordinal: 0, outcome: 'completed', memory_body: 'memory A' });
+    expect(receipt.results[1]).toMatchObject({ ordinal: 1, outcome: 'completed', memory_body: 'memory B' });
+
+    // Simulate the receipt landing in contextMemory and assert derive picks it up.
+    ctx.get(IAgentContextMemoryService).append(
+      assistantSpineCall('call_spawn', 'spine_spawn', {
+        tasks: [
+          { summary: 'branch A', prompt: 'do A' },
+          { summary: 'branch B', prompt: 'do B' },
+        ],
+      }),
+      {
+        role: 'tool',
+        content: [{ type: 'text', text: result.receipt! }],
+        toolCallId: 'call_spawn',
+        isError: false,
+      } as ContextMessage,
+    );
+
+    const state = readSpine(ctx);
+    expect(state.nodes['1.1.1']?.summary).toBe('branch A');
+    expect(state.nodes['1.1.1']?.memory).toBe('memory A');
+    expect(state.nodes['1.1.1']?.closedAt).toBeDefined();
+    expect(state.nodes['1.1.2']?.summary).toBe('branch B');
+    expect(state.nodes['1.1.2']?.memory).toBe('memory B');
+    expect(state.nodes['1.1.2']?.closedAt).toBeDefined();
+  });
+});

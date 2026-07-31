@@ -8,6 +8,10 @@ import type { ContextMessage } from '#/agent/contextMemory/types';
 import { MASTER_ENV } from '#/app/flag/flagService';
 import {
   ACCEPTED_OUTPUT,
+  normalizeTrimOp,
+  SPINE_TRIM_SNIPPED_PLACEHOLDER,
+  SPINE_TRIM_THRESHOLD_BYTES,
+  TRIM_ACCEPTED_OUTPUT,
   WIRE_PROTOCOL_VERSION,
   appendSpineView,
   deriveSpineState,
@@ -886,6 +890,283 @@ describe('Spine derivation from the message stream', () => {
   });
 });
 
+describe('Spine spawn projection', () => {
+  beforeEach(() => {
+    vi.stubEnv(MASTER_ENV, '0');
+    vi.stubEnv(SPINE_ENV, '1');
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('synthesizes N closed siblings from a valid spine_spawn receipt', () => {
+    const state = deriveSpineState([
+      userMessage('start'),
+      spawnCall('s1', [
+        { summary: 'task A', prompt: 'do A' },
+        { summary: 'task B', prompt: 'do B' },
+      ]),
+      spawnReceipt('s1', [
+        spawnResult(0, 'completed', 'memory A'),
+        spawnResult(1, 'completed', 'memory B'),
+      ]),
+    ]);
+
+    expect(state.openStack).toEqual(['1', '1.1']);
+    expect(state.nodes['1.1']?.children).toEqual(['1.1.1', '1.1.2']);
+    const a = state.nodes['1.1.1'];
+    const b = state.nodes['1.1.2'];
+    expect(a).toMatchObject({
+      summary: 'task A',
+      openedAt: 2,
+      closedAt: 2,
+      memory: 'memory A',
+    });
+    expect(b).toMatchObject({
+      summary: 'task B',
+      openedAt: 2,
+      closedAt: 2,
+      memory: 'memory B',
+    });
+    expect(a?.spawn).toEqual({ summary: 'task A', outcome: 'completed' });
+    expect(b?.spawn).toEqual({ summary: 'task B', outcome: 'completed' });
+  });
+
+  it('orders spawned nodes by input ordinal, not receipt order', () => {
+    const state = deriveSpineState([
+      userMessage('start'),
+      spawnCall('s1', [
+        { summary: 'A', prompt: 'a' },
+        { summary: 'B', prompt: 'b' },
+        { summary: 'C', prompt: 'c' },
+      ]),
+      spawnReceipt('s1', [
+        spawnResult(2, 'completed', 'mem C'),
+        spawnResult(0, 'completed', 'mem A'),
+        spawnResult(1, 'completed', 'mem B'),
+      ]),
+    ]);
+
+    expect(state.nodes['1.1']?.children).toEqual(['1.1.1', '1.1.2', '1.1.3']);
+    expect(state.nodes['1.1.1']?.summary).toBe('A');
+    expect(state.nodes['1.1.2']?.summary).toBe('B');
+    expect(state.nodes['1.1.3']?.summary).toBe('C');
+    expect(state.nodes['1.1.1']?.memory).toBe('mem A');
+    expect(state.nodes['1.1.2']?.memory).toBe('mem B');
+    expect(state.nodes['1.1.3']?.memory).toBe('mem C');
+  });
+
+  it('records errored/aborted outcomes and diagnostics on spawned nodes', () => {
+    const state = deriveSpineState([
+      userMessage('start'),
+      spawnCall('s1', [
+        { summary: 'ok', prompt: 'x' },
+        { summary: 'bad', prompt: 'y' },
+      ]),
+      spawnReceipt('s1', [
+        spawnResult(0, 'completed', 'done'),
+        spawnResult(1, 'errored', 'failed', 'disk full'),
+      ]),
+    ]);
+
+    expect(state.nodes['1.1']?.children).toEqual(['1.1.1', '1.1.2']);
+    expect(state.nodes['1.1.1']?.spawn).toEqual({ summary: 'ok', outcome: 'completed' });
+    expect(state.nodes['1.1.2']?.spawn).toEqual({
+      summary: 'bad',
+      outcome: 'errored',
+      diagnostic: 'disk full',
+    });
+  });
+
+  it('rejects malformed spawn receipts all-or-nothing', () => {
+    const tasks = [
+      { summary: 'A', prompt: 'a' },
+      { summary: 'B', prompt: 'b' },
+    ];
+
+    const badSchema = deriveSpineState([
+      userMessage('start'),
+      spawnCall('s1', tasks),
+      rawSpawnReceipt('s1', {
+        schema: 'spine.spawn.result.v0',
+        results: [spawnResult(0, 'completed', 'a'), spawnResult(1, 'completed', 'b')],
+      }),
+    ]);
+    expect(badSchema.nodes['1.1']?.children).toEqual([]);
+
+    const gapOrdinal = deriveSpineState([
+      userMessage('start'),
+      spawnCall('s1', tasks),
+      spawnReceipt('s1', [spawnResult(0, 'completed', 'a')]),
+    ]);
+    expect(gapOrdinal.nodes['1.1']?.children).toEqual([]);
+
+    const emptyMemory = deriveSpineState([
+      userMessage('start'),
+      spawnCall('s1', tasks),
+      spawnReceipt('s1', [
+        spawnResult(0, 'completed', 'a'),
+        spawnResult(1, 'completed', ''),
+      ]),
+    ]);
+    expect(emptyMemory.nodes['1.1']?.children).toEqual([]);
+
+    const mismatchCount = deriveSpineState([
+      userMessage('start'),
+      spawnCall('s1', tasks),
+      spawnReceipt('s1', [
+        spawnResult(0, 'completed', 'a'),
+        spawnResult(1, 'completed', 'b'),
+        spawnResult(2, 'completed', 'c'),
+      ]),
+    ]);
+    expect(mismatchCount.nodes['1.1']?.children).toEqual([]);
+
+    const missingDiagnostic = deriveSpineState([
+      userMessage('start'),
+      spawnCall('s1', tasks),
+      spawnReceipt('s1', [
+        spawnResult(0, 'completed', 'a'),
+        spawnResult(1, 'errored', 'b'),
+      ]),
+    ]);
+    expect(missingDiagnostic.nodes['1.1']?.children).toEqual([]);
+  });
+
+  it('keeps child indices contiguous when spawn is mixed with open/close/next', () => {
+    const ctx = testAgent();
+    append(ctx, userMessage('start'));
+    append(ctx, assistantToolCall('o1', 'spine_open', JSON.stringify({ summary: 'task A' })));
+    append(ctx, spineAcceptedReceipt('o1'));
+    append(ctx, assistantToolCall('c1', 'spine_close', JSON.stringify({ memory: 'did A' })));
+    append(ctx, spineAcceptedReceipt('c1'));
+    append(
+      ctx,
+      spawnCall('s1', [
+        { summary: 'spawn 1', prompt: 'p1' },
+        { summary: 'spawn 2', prompt: 'p2' },
+      ]),
+    );
+    append(
+      ctx,
+      spawnReceipt('s1', [
+        spawnResult(0, 'completed', 'mem 1'),
+        spawnResult(1, 'completed', 'mem 2'),
+      ]),
+    );
+    append(ctx, assistantToolCall('o2', 'spine_open', JSON.stringify({ summary: 'task B' })));
+    append(ctx, spineAcceptedReceipt('o2'));
+
+    const state = deriveSpineState(ctx.context.get());
+    expect(state.nodes['1.1']?.children).toEqual(['1.1.1', '1.1.2', '1.1.3', '1.1.4']);
+    expect(state.nodes['1.1.1']?.summary).toBe('task A');
+    expect(state.nodes['1.1.2']?.summary).toBe('spawn 1');
+    expect(state.nodes['1.1.3']?.summary).toBe('spawn 2');
+    expect(state.nodes['1.1.4']?.summary).toBe('task B');
+  });
+
+  it('renders spawn evidence followed by memory and keeps the carrier visible', () => {
+    const ctx = testAgent();
+    append(ctx, userMessage('start'));
+    append(
+      ctx,
+      spawnCall('s1', [
+        { summary: 'task A', prompt: 'p1' },
+        { summary: 'task B', prompt: 'p2' },
+      ]),
+    );
+    append(
+      ctx,
+      spawnReceipt('s1', [
+        spawnResult(0, 'completed', 'mem A'),
+        spawnResult(1, 'errored', 'mem B', 'disk full'),
+      ]),
+    );
+    append(ctx, userMessage('after'));
+
+    const folded = fold(ctx);
+    const texts = folded.map(textOf);
+    expect(texts).toContain('<spine_node id="1.1" summary="startup" status="live" />');
+    expect(texts).toContain('[U1] start');
+    expect(texts).toContain('calling spine_spawn');
+    expect(texts).not.toContain('spine.spawn.result.v1');
+    expect(texts).toContain('[U2] after');
+
+    const evidenceA = texts.find((t) => t.includes('<spine_spawn_evidence node_id="1.1.1"'));
+    const evidenceB = texts.find((t) => t.includes('<spine_spawn_evidence node_id="1.1.2"'));
+    expect(evidenceA).toBe(
+      '<spine_spawn_evidence node_id="1.1.1" summary="task A" outcome="completed" />',
+    );
+    expect(evidenceB).toBe(
+      '<spine_spawn_evidence node_id="1.1.2" summary="task B" outcome="errored" diagnostic="disk full" />',
+    );
+
+    const memoryA = texts.find((t) => t.includes('<spine_memory node_id="1.1.1"'));
+    const memoryB = texts.find((t) => t.includes('<spine_memory node_id="1.1.2"'));
+    expect(memoryA).toBe('<spine_memory node_id="1.1.1">\nmem A\n</spine_memory>');
+    expect(memoryB).toBe('<spine_memory node_id="1.1.2">\nmem B\n</spine_memory>');
+  });
+
+  it('spawns nodes under the current cursor, including nested open nodes', () => {
+    const ctx = testAgent();
+    append(ctx, userMessage('start'));
+    append(ctx, assistantToolCall('o1', 'spine_open', JSON.stringify({ summary: 'parent' })));
+    append(ctx, spineAcceptedReceipt('o1'));
+    append(
+      ctx,
+      spawnCall('s1', [
+        { summary: 'child A', prompt: 'a' },
+        { summary: 'child B', prompt: 'b' },
+      ]),
+    );
+    append(
+      ctx,
+      spawnReceipt('s1', [
+        spawnResult(0, 'completed', 'mem A'),
+        spawnResult(1, 'completed', 'mem B'),
+      ]),
+    );
+
+    const state = deriveSpineState(ctx.context.get());
+    expect(state.openStack).toEqual(['1', '1.1', '1.1.1']);
+    expect(state.nodes['1.1.1']?.children).toEqual(['1.1.1.1', '1.1.1.2']);
+    expect(state.nodes['1.1.1.1']?.summary).toBe('child A');
+    expect(state.nodes['1.1.1.2']?.summary).toBe('child B');
+  });
+
+  it('spawns nodes under the root epoch when the startup node is closed', () => {
+    const ctx = testAgent();
+    append(ctx, userMessage('start'));
+    append(
+      ctx,
+      assistantToolCall('c1', 'spine_close', JSON.stringify({ memory: 'startup done' })),
+    );
+    append(ctx, spineAcceptedReceipt('c1'));
+    append(
+      ctx,
+      spawnCall('s1', [
+        { summary: 'branch A', prompt: 'a' },
+        { summary: 'branch B', prompt: 'b' },
+      ]),
+    );
+    append(
+      ctx,
+      spawnReceipt('s1', [
+        spawnResult(0, 'completed', 'mem A'),
+        spawnResult(1, 'completed', 'mem B'),
+      ]),
+    );
+
+    const state = deriveSpineState(ctx.context.get());
+    expect(state.openStack).toEqual(['1']);
+    expect(state.nodes['1']?.children).toEqual(['1.1', '1.2', '1.3']);
+    expect(state.nodes['1.2']?.summary).toBe('branch A');
+    expect(state.nodes['1.3']?.summary).toBe('branch B');
+    expect(state.nodes['1.2']?.closedAt).toBe(4);
+    expect(state.nodes['1.3']?.closedAt).toBe(4);
+  });
+});
+
 describe('Spine legacy-op restore compat', () => {
   beforeEach(() => {
     vi.stubEnv(MASTER_ENV, '0');
@@ -1097,6 +1378,49 @@ function spineRejectedReceipt(toolCallId: string): ContextMessage {
     toolCallId,
     isError: true,
   };
+}
+
+function spawnCall(
+  id: string,
+  tasks: readonly { summary: string; prompt: string }[],
+): ContextMessage {
+  return assistantToolCall(id, 'spine_spawn', JSON.stringify({ tasks }));
+}
+
+type SpawnOutcome = 'completed' | 'errored' | 'aborted';
+
+interface SpawnResultInput {
+  readonly ordinal: number;
+  readonly outcome: SpawnOutcome;
+  readonly memory_body: string;
+  readonly diagnostic?: string;
+}
+
+function spawnReceipt(toolCallId: string, results: readonly SpawnResultInput[]): ContextMessage {
+  return rawSpawnReceipt(toolCallId, { schema: 'spine.spawn.result.v1', results });
+}
+
+function rawSpawnReceipt(
+  toolCallId: string,
+  payload: Record<string, unknown>,
+): ContextMessage {
+  return {
+    role: 'tool',
+    content: [{ type: 'text', text: JSON.stringify(payload) }],
+    toolCalls: [],
+    toolCallId,
+  };
+}
+
+function spawnResult(
+  ordinal: number,
+  outcome: SpawnOutcome,
+  memory_body: string,
+  diagnostic?: string,
+): SpawnResultInput {
+  return diagnostic === undefined
+    ? { ordinal, outcome, memory_body }
+    : { ordinal, outcome, memory_body, diagnostic };
 }
 
 /**
@@ -1311,4 +1635,301 @@ function normalizeTokenGauges(text: string): string {
     /(cursor_context|context_left|raw_context|projected_context)="~?[\d.]+K?"/g,
     '$1="~N"',
   );
+}
+
+describe('Spine trim projection', () => {
+  const TRIM_ENV = 'KIMI_CODE_SPINE_TRIM';
+
+  beforeEach(() => {
+    vi.stubEnv(MASTER_ENV, '0');
+    vi.stubEnv(SPINE_ENV, '1');
+    vi.stubEnv(TRIM_ENV, '1');
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('tags an oversized tool result with a byte-stable TRIM_ID prefix', () => {
+    const ctx = testAgent();
+    append(ctx, userMessage('start'));
+    append(ctx, assistantToolCall('c_big', 'Bash'));
+    append(ctx, bigToolResult('c_big', oversized('BIG-BODY')));
+    append(ctx, assistantToolCall('c_small', 'Read'));
+    append(ctx, toolResult('c_small'));
+    append(ctx, assistantText('done'));
+
+    const folded = fold(ctx);
+    expect(textOf(folded.find((m) => m.toolCallId === 'c_big'))).toBe(
+      `[TRIM_ID: trim_1]\n${oversized('BIG-BODY')}`,
+    );
+    expect(textOf(folded.find((m) => m.toolCallId === 'c_small'))).not.toContain('TRIM_ID');
+    // The stored history is never rewritten.
+    expect(textOf(ctx.context.get().find((m) => m.toolCallId === 'c_big'))).toBe(
+      oversized('BIG-BODY'),
+    );
+  });
+
+  it('numbers tags in stream order across batches', () => {
+    const ctx = testAgent();
+    append(ctx, userMessage('start'));
+    append(ctx, assistantToolCall('c_a', 'Bash'));
+    append(ctx, bigToolResult('c_a', oversized('A')));
+    append(ctx, assistantToolCall('c_b', 'Bash'));
+    append(ctx, bigToolResult('c_b', oversized('B')));
+
+    const folded = fold(ctx);
+    expect(textOf(folded.find((m) => m.toolCallId === 'c_a'))).toContain('[TRIM_ID: trim_1]');
+    expect(textOf(folded.find((m) => m.toolCallId === 'c_b'))).toContain('[TRIM_ID: trim_2]');
+  });
+
+  it('renders a snipped result as the cleared placeholder and drops the label', () => {
+    const ctx = testAgent();
+    append(ctx, userMessage('start'));
+    append(ctx, assistantToolCall('c_big', 'Bash'));
+    append(ctx, bigToolResult('c_big', oversized('BIG-BODY')));
+    append(ctx, trimCall('t1', { TRIM_ID: 'trim_1', op: 'snip' }));
+    append(ctx, trimAcceptedReceipt('t1'));
+    append(ctx, assistantText('done'));
+
+    const folded = fold(ctx);
+    expect(textOf(folded.find((m) => m.toolCallId === 'c_big'))).toBe(
+      SPINE_TRIM_SNIPPED_PLACEHOLDER,
+    );
+    // The trim receipt itself is a control result and stays untagged.
+    expect(textOf(folded.find((m) => m.toolCallId === 't1'))).toBe(TRIM_ACCEPTED_OUTPUT);
+  });
+
+  it('renders head and tail slices by characters', () => {
+    const ctx = testAgent();
+    const body = `BEGIN-${'x'.repeat(SPINE_TRIM_THRESHOLD_BYTES)}-END`;
+    append(ctx, userMessage('start'));
+    append(
+      ctx,
+      assistantBatchToolCalls([
+        { id: 'c_head', name: 'Bash' },
+        { id: 'c_tail', name: 'Bash' },
+      ]),
+    );
+    append(ctx, bigToolResult('c_head', body));
+    append(ctx, bigToolResult('c_tail', body));
+    append(
+      ctx,
+      assistantBatchToolCalls([
+        {
+          id: 't_head',
+          name: 'spine_trim',
+          args: JSON.stringify({ TRIM_ID: 'trim_1', op: 'slice', head: 6 }),
+        },
+        {
+          id: 't_tail',
+          name: 'spine_trim',
+          args: JSON.stringify({ TRIM_ID: 'trim_2', op: 'slice', tail: 4 }),
+        },
+      ]),
+    );
+    append(ctx, trimAcceptedReceipt('t_head'));
+    append(ctx, trimAcceptedReceipt('t_tail'));
+
+    const folded = fold(ctx);
+    expect(textOf(folded.find((m) => m.toolCallId === 'c_head'))).toBe('BEGIN-');
+    expect(textOf(folded.find((m) => m.toolCallId === 'c_tail'))).toBe('-END');
+  });
+
+  it('renders an anchor slice as complete lines around the anchor line', () => {
+    const ctx = testAgent();
+    const noise = 'n'.repeat(SPINE_TRIM_THRESHOLD_BYTES);
+    const body = `${noise}\nFAILED test X\nstack line\ntrailing noise`;
+    append(ctx, userMessage('start'));
+    append(ctx, assistantToolCall('c_big', 'Bash'));
+    append(ctx, bigToolResult('c_big', body));
+    append(
+      ctx,
+      trimCall('t1', { TRIM_ID: 'trim_1', op: 'slice', anchor: 'FAILED test X', following: 1 }),
+    );
+    append(ctx, trimAcceptedReceipt('t1'));
+
+    const folded = fold(ctx);
+    expect(textOf(folded.find((m) => m.toolCallId === 'c_big'))).toBe(
+      'FAILED test X\nstack line',
+    );
+  });
+
+  it('never tags spine control receipts or media results', () => {
+    const ctx = testAgent();
+    append(ctx, userMessage('start'));
+    append(ctx, assistantToolCall('c_tree', 'spine_tree'));
+    append(ctx, bigToolResult('c_tree', oversized('TREE')));
+    append(ctx, assistantToolCall('c_img', 'Read'));
+    append(ctx, mediaToolResult('c_img', oversized('IMG')));
+
+    const folded = fold(ctx);
+    expect(textOf(folded.find((m) => m.toolCallId === 'c_tree'))).not.toContain('TRIM_ID');
+    expect(textOf(folded.find((m) => m.toolCallId === 'c_img'))).not.toContain('TRIM_ID');
+  });
+
+  it('leaves the result tagged and whole when the trim receipt is an error', () => {
+    const ctx = testAgent();
+    append(ctx, userMessage('start'));
+    append(ctx, assistantToolCall('c_big', 'Bash'));
+    append(ctx, bigToolResult('c_big', oversized('BIG-BODY')));
+    append(ctx, trimCall('t1', { TRIM_ID: 'trim_1', op: 'snip' }));
+    append(ctx, trimRejectedReceipt('t1'));
+
+    const folded = fold(ctx);
+    expect(textOf(folded.find((m) => m.toolCallId === 'c_big'))).toBe(
+      `[TRIM_ID: trim_1]\n${oversized('BIG-BODY')}`,
+    );
+  });
+
+  it('accepts a trim inside the window and rejects a repeat (one-shot)', () => {
+    const ctx = testAgent();
+    append(ctx, userMessage('start'));
+    append(ctx, assistantToolCall('c_big', 'Bash'));
+    append(ctx, bigToolResult('c_big', oversized('BIG-BODY')));
+
+    const spine = ctx.get(IAgentSpineService);
+    expect(spine.acceptTrim('trim_1', { kind: 'snip' })).toEqual({ accepted: true });
+
+    append(ctx, trimCall('t1', { TRIM_ID: 'trim_1', op: 'snip' }));
+    append(ctx, trimAcceptedReceipt('t1'));
+
+    const repeat = spine.acceptTrim('trim_1', { kind: 'snip' });
+    expect(repeat.accepted).toBe(false);
+    if (repeat.accepted) return;
+    expect(repeat.reason).toContain('already trimmed');
+    expect(repeat.reason).toContain('Do not retry');
+  });
+
+  it('expires ids once a newer batch completes, but not on interleaved assistant text', () => {
+    const ctx = testAgent();
+    append(ctx, userMessage('start'));
+    append(ctx, assistantToolCall('c_a', 'Bash'));
+    append(ctx, bigToolResult('c_a', oversized('A')));
+    append(ctx, assistantText('thinking out loud'));
+
+    const spine = ctx.get(IAgentSpineService);
+    // Interleaved assistant text does not expire the window — and the accept
+    // itself records nothing (receipt-only, no side effect).
+    expect(spine.acceptTrim('trim_1', { kind: 'snip' })).toEqual({ accepted: true });
+
+    append(ctx, assistantToolCall('c_b', 'Bash'));
+    append(ctx, bigToolResult('c_b', oversized('B')));
+
+    const expired = spine.acceptTrim('trim_1', { kind: 'snip' });
+    expect(expired.accepted).toBe(false);
+    if (expired.accepted) return;
+    expect(expired.reason).toContain('immediately preceding');
+    expect(expired.reason).toContain('Do not retry');
+  });
+
+  it('rejects unknown ids and missing anchors with do-not-retry reasons', () => {
+    const ctx = testAgent();
+    append(ctx, userMessage('start'));
+    append(ctx, assistantToolCall('c_big', 'Bash'));
+    append(ctx, bigToolResult('c_big', oversized('body with a NEEDLE inside')));
+
+    const spine = ctx.get(IAgentSpineService);
+    const unknown = spine.acceptTrim('trim_99', { kind: 'snip' });
+    expect(unknown.accepted).toBe(false);
+    if (unknown.accepted) return;
+    expect(unknown.reason).toContain('Unknown TRIM_ID');
+    expect(unknown.reason).toContain('Do not retry');
+
+    const missing = spine.acceptTrim('trim_1', {
+      kind: 'slice',
+      shape: { type: 'anchor', anchor: 'NO_SUCH_TEXT', preceding: 0, following: 0 },
+    });
+    expect(missing.accepted).toBe(false);
+    if (missing.accepted) return;
+    expect(missing.reason).toContain('Anchor text not found');
+    expect(missing.reason).toContain('Do not retry');
+
+    expect(
+      spine.acceptTrim('trim_1', {
+        kind: 'slice',
+        shape: { type: 'anchor', anchor: 'NEEDLE', preceding: 0, following: 0 },
+      }),
+    ).toEqual({ accepted: true });
+  });
+
+  it('normalizes flat trim arguments into ops', () => {
+    expect(normalizeTrimOp('snip', {})).toEqual({ kind: 'snip' });
+    expect(normalizeTrimOp('slice', { head: 5 })).toEqual({
+      kind: 'slice',
+      shape: { type: 'head', chars: 5 },
+    });
+    expect(normalizeTrimOp('slice', { tail: 5 })).toEqual({
+      kind: 'slice',
+      shape: { type: 'tail', chars: 5 },
+    });
+    expect(normalizeTrimOp('slice', { anchor: 'a', preceding: 1 })).toEqual({
+      kind: 'slice',
+      shape: { type: 'anchor', anchor: 'a', preceding: 1, following: 0 },
+    });
+    expect(normalizeTrimOp('slice', {})).toBeUndefined();
+    expect(normalizeTrimOp('slice', { head: 5, tail: 5 })).toBeUndefined();
+  });
+});
+
+function bigToolResult(toolCallId: string, text: string): ContextMessage {
+  return {
+    role: 'tool',
+    content: [{ type: 'text', text }],
+    toolCalls: [],
+    toolCallId,
+  };
+}
+
+function mediaToolResult(toolCallId: string, text: string): ContextMessage {
+  return {
+    role: 'tool',
+    content: [
+      { type: 'image_url', imageUrl: { url: 'https://example.com/pixel.png' } },
+      { type: 'text', text },
+    ],
+    toolCalls: [],
+    toolCallId,
+  };
+}
+
+function assistantBatchToolCalls(
+  calls: readonly { id: string; name: string; args?: string }[],
+): ContextMessage {
+  return {
+    role: 'assistant',
+    content: [{ type: 'text', text: 'batch' }],
+    toolCalls: calls.map((call) => ({
+      type: 'function' as const,
+      id: call.id,
+      name: call.name,
+      arguments: call.args ?? '{}',
+    })),
+  };
+}
+
+function trimCall(id: string, args: Record<string, unknown>): ContextMessage {
+  return assistantToolCall(id, 'spine_trim', JSON.stringify(args));
+}
+
+function trimAcceptedReceipt(toolCallId: string): ContextMessage {
+  return {
+    role: 'tool',
+    content: [{ type: 'text', text: TRIM_ACCEPTED_OUTPUT }],
+    toolCalls: [],
+    toolCallId,
+  };
+}
+
+function trimRejectedReceipt(toolCallId: string): ContextMessage {
+  return {
+    role: 'tool',
+    content: [{ type: 'text', text: 'rejected: do not retry' }],
+    toolCalls: [],
+    toolCallId,
+    isError: true,
+  };
+}
+
+function oversized(body: string): string {
+  return body + 'x'.repeat(SPINE_TRIM_THRESHOLD_BYTES);
 }

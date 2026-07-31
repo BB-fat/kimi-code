@@ -12,15 +12,20 @@
  * sessions; persisted metadata can degrade, so the match is textual and a
  * near-miss does not count — and replays the transitions under the same
  * guards the legacy ops enforced (cursor position, non-empty bodies, root
- * epochs never close). Root-epoch boundaries come from the compaction summary
- * message itself (`origin.kind === 'compaction_summary'`, with the summary
- * prefix text as the fallback carrier when the origin metadata is absent). A
- * closing node's memory is the model-written body verbatim: the projection
- * fold re-materializes the span's surviving user requests and each closed
- * child's own `<spine_memory node_id="...">` slot from the surviving stream,
- * so an undo that rewrites the span rewrites the folded view with it — the
- * memory itself never needs patching. Consumed by `spineService`; the fold
- * projection and archive rendering read this state.
+ * epochs never close). A `spine_spawn` call whose structured JSON receipt lands
+ * in history synthesizes N closed sibling nodes under the current cursor in
+ * input order; every sibling shares the receipt message as a point span
+ * (`openedAt === closedAt === receipt index`), so the first sibling's span
+ * absorbs the receipt tool message and the carrier stays visible in the parent
+ * context. Root-epoch boundaries come from the compaction summary message
+ * itself (`origin.kind === 'compaction_summary'`, with the summary prefix text
+ * as the fallback carrier when the origin metadata is absent). A closing node's
+ * memory is the model-written body verbatim: the projection fold re-materializes
+ * the span's surviving user requests and each closed child's own
+ * `<spine_memory node_id="...">` slot from the surviving stream, so an undo
+ * that rewrites the span rewrites the folded view with it — the memory itself
+ * never needs patching. Consumed by `spineService`; the fold projection and
+ * archive rendering read this state.
  *
  * Silence is the design, not an oversight: a call whose accepted receipt never
  * landed, a receipt whose call is missing, or a transition the guards reject
@@ -28,7 +33,9 @@
  * no lost-commit audit and no repair op. The stream is the whole truth, so a
  * transition the stream does not fully witness is not a transition — the
  * legacy op world needed `reportLostCommits` precisely because it kept a
- * second record that could disagree with the receipts.
+ * second record that could disagree with the receipts. `spine_spawn` receipts
+ * are all-or-nothing in the same spirit: a malformed or partially-invalid
+ * receipt is ignored entirely, synthesizing zero nodes.
  */
 
 import {
@@ -38,7 +45,7 @@ import {
 import type { ContextMessage } from '#/agent/contextMemory/types';
 
 import { SPINE_TOOL_CLOSE, SPINE_TOOL_NEXT, SPINE_TOOL_OPEN } from './spine';
-import type { SpineNode, SpineState } from './spineOps';
+import type { SpineNode, SpineSpawnEvidence, SpineState } from './spineOps';
 import {
   childNodeId,
   epochStartupNodeId,
@@ -52,8 +59,12 @@ import { ACCEPTED_OUTPUT } from './tools/controlResult';
 /** Receipt left by sessions predating the delayed-commit receipt wording. */
 const LEGACY_ACCEPTED_RECEIPT = 'accepted';
 
+/** Tool name for the parallel-branch spawn control call. */
+const SPINE_TOOL_SPAWN = 'spine_spawn';
+
 export function deriveSpineState(messages: readonly ContextMessage[]): SpineState {
   const accepted = collectAcceptedCallIds(messages);
+  const spawnReceipts = collectSpawnReceipts(messages);
   const nodes: Record<string, SpineNode> = {};
   let openStack: readonly string[] = [];
   let rootEpoch = 0;
@@ -137,6 +148,38 @@ export function deriveSpineState(messages: readonly ContextMessage[]): SpineStat
     openStack = [...openStack.slice(0, -1), openedId];
   }
 
+  function spawnNodes(parentId: string, spawn: SpawnReceiptInfo): void {
+    const parent = nodes[parentId];
+    if (parent === undefined || parent.closedAt !== undefined) return;
+    const receiptAt = spawn.receiptAt;
+    let childIndex = nextChildIndex(parent.children);
+    const newChildren: string[] = [];
+    const newNodes: Record<string, SpineNode> = {};
+    for (const result of spawn.results) {
+      const id = childNodeId(parentId, childIndex);
+      const spawnEvidence: SpineSpawnEvidence = {
+        summary: result.summary,
+        outcome: result.outcome,
+      };
+      newNodes[id] = {
+        id,
+        summary: result.summary,
+        openedAt: receiptAt,
+        closedAt: receiptAt,
+        memory: result.memoryBody,
+        spawn:
+          result.diagnostic === undefined
+            ? spawnEvidence
+            : { ...spawnEvidence, diagnostic: result.diagnostic },
+        children: [],
+      };
+      newChildren.push(id);
+      childIndex += 1;
+    }
+    nodes[parentId] = { ...parent, children: [...parent.children, ...newChildren] };
+    Object.assign(nodes, newNodes);
+  }
+
   openEpoch(1, 0);
   for (let i = 0; i < messages.length; i++) {
     const message = messages[i];
@@ -149,6 +192,14 @@ export function deriveSpineState(messages: readonly ContextMessage[]): SpineStat
     }
     if (message.role !== 'assistant') continue;
     for (const call of message.toolCalls) {
+      if (call.name === SPINE_TOOL_SPAWN) {
+        const spawn = spawnReceipts.get(call.id);
+        if (spawn !== undefined) {
+          const parentId = openStack.at(-1);
+          if (parentId !== undefined) spawnNodes(parentId, spawn);
+        }
+        continue;
+      }
       if (!accepted.has(call.id)) continue;
       const args = parseTransitionArgs(call.arguments);
       if (args === undefined) continue;
@@ -210,6 +261,129 @@ function collectAcceptedCallIds(messages: readonly ContextMessage[]): ReadonlySe
 
 function isSpineTransitionTool(name: string): boolean {
   return name === SPINE_TOOL_OPEN || name === SPINE_TOOL_CLOSE || name === SPINE_TOOL_NEXT;
+}
+
+interface SpawnTask {
+  readonly summary: string;
+  readonly prompt: string;
+}
+
+interface SpawnCallInfo {
+  readonly carrierAt: number;
+  readonly tasks: readonly SpawnTask[];
+}
+
+interface SpawnResult {
+  readonly summary: string;
+  readonly outcome: 'completed' | 'errored' | 'aborted';
+  readonly memoryBody: string;
+  readonly diagnostic?: string;
+}
+
+interface SpawnReceiptInfo {
+  readonly receiptAt: number;
+  readonly results: readonly SpawnResult[];
+}
+
+function parseSpawnArgs(raw: string | null | undefined): readonly SpawnTask[] | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return undefined;
+  const record = parsed as Record<string, unknown>;
+  const tasksRaw = record['tasks'];
+  if (!Array.isArray(tasksRaw) || tasksRaw.length < 2) return undefined;
+  const tasks: SpawnTask[] = [];
+  for (const item of tasksRaw) {
+    if (typeof item !== 'object' || item === null) return undefined;
+    const itemRecord = item as Record<string, unknown>;
+    const summary = itemRecord['summary'];
+    const prompt = itemRecord['prompt'];
+    if (typeof summary !== 'string' || typeof prompt !== 'string') return undefined;
+    tasks.push({ summary, prompt });
+  }
+  return tasks;
+}
+
+function collectSpawnReceipts(
+  messages: readonly ContextMessage[],
+): ReadonlyMap<string, SpawnReceiptInfo> {
+  const calls = new Map<string, SpawnCallInfo>();
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+    if (message === undefined || message.role !== 'assistant') continue;
+    for (const call of message.toolCalls) {
+      if (call.name !== SPINE_TOOL_SPAWN) continue;
+      const tasks = parseSpawnArgs(call.arguments);
+      if (tasks !== undefined) calls.set(call.id, { carrierAt: i, tasks });
+    }
+  }
+  const receipts = new Map<string, SpawnReceiptInfo>();
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+    if (message === undefined || message.role !== 'tool') continue;
+    const callId = message.toolCallId;
+    if (callId === undefined) continue;
+    const call = calls.get(callId);
+    if (call === undefined) continue;
+    if (message.isError === true) continue;
+    const validated = validateSpawnReceipt(call.tasks, messageText(message), i);
+    if (validated !== undefined) receipts.set(callId, validated);
+  }
+  return receipts;
+}
+
+function validateSpawnReceipt(
+  tasks: readonly SpawnTask[],
+  receiptText: string,
+  receiptAt: number,
+): SpawnReceiptInfo | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(receiptText);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return undefined;
+  const record = parsed as Record<string, unknown>;
+  if (record['schema'] !== 'spine.spawn.result.v1') return undefined;
+  const resultsRaw = record['results'];
+  if (!Array.isArray(resultsRaw) || resultsRaw.length < 2 || resultsRaw.length !== tasks.length) {
+    return undefined;
+  }
+  const results: SpawnResult[] = [];
+  const seenOrdinals = new Set<number>();
+  for (const item of resultsRaw) {
+    if (typeof item !== 'object' || item === null) return undefined;
+    const itemRecord = item as Record<string, unknown>;
+    const ordinal = itemRecord['ordinal'];
+    if (typeof ordinal !== 'number' || !Number.isInteger(ordinal)) return undefined;
+    if (ordinal < 0 || ordinal >= tasks.length || seenOrdinals.has(ordinal)) return undefined;
+    seenOrdinals.add(ordinal);
+    const outcome = itemRecord['outcome'];
+    if (outcome !== 'completed' && outcome !== 'errored' && outcome !== 'aborted') return undefined;
+    const memoryBody = itemRecord['memory_body'];
+    if (typeof memoryBody !== 'string' || memoryBody.length === 0) return undefined;
+    const diagnostic = itemRecord['diagnostic'];
+    if (diagnostic !== undefined && (typeof diagnostic !== 'string' || diagnostic.length === 0)) {
+      return undefined;
+    }
+    if (outcome !== 'completed' && diagnostic === undefined) return undefined;
+    const task = tasks[ordinal];
+    if (task === undefined || task.summary.trim().length === 0) return undefined;
+    results[ordinal] = {
+      summary: task.summary,
+      outcome,
+      memoryBody,
+      diagnostic,
+    };
+  }
+  if (seenOrdinals.size !== tasks.length) return undefined;
+  return { receiptAt, results };
 }
 
 function isEpochBoundary(message: ContextMessage): boolean {
