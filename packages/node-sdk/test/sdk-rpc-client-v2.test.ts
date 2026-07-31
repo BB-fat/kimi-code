@@ -395,6 +395,28 @@ key = "${titleOAuthRef.key}"
     }
   });
 
+  it('does not coalesce resumes with different options onto one facade', async () => {
+    const { harness } = await makeHarness();
+    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-work-'));
+    tempDirs.push(workDir);
+
+    try {
+      const session = await harness.createSession({ id: 'ses_no_coalesce', workDir });
+      await session.close();
+
+      const [plain, withReplay] = await Promise.all([
+        harness.resumeSession({ id: 'ses_no_coalesce' }),
+        harness.resumeSession({ id: 'ses_no_coalesce', replayTurnLimit: 3 }),
+      ]);
+
+      // Different options must not be silently dropped onto the first
+      // caller's facade — each gets its own resume.
+      expect(plain).not.toBe(withReplay);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('reports the title state in listSessions as well as in the resumed summary', async () => {
     const { harness } = await makeHarness();
     const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-work-'));

@@ -153,18 +153,21 @@ export class KimiHarness {
       return active;
     }
 
-    // Coalesce concurrent resumes of the same id onto one facade; without
-    // this, parallel callers each build their own Session over the shared
-    // engine handle, and one facade's close kills the engine handle under
-    // the other.
-    const inflight = this.resumeInflight.get(id);
+    // Coalesce concurrent resumes of the same id onto one facade, keyed by
+    // the full input so a caller with different options (dirs, replay,
+    // profile, kaos) never has them silently dropped; without this,
+    // parallel identical callers each build their own Session over the
+    // shared engine handle, and one facade's close kills the engine handle
+    // under the other.
+    const key = resumeCoalesceKey(id, input);
+    const inflight = this.resumeInflight.get(key);
     if (inflight !== undefined) return inflight;
     const run = this.doResumeSession(input, id);
-    this.resumeInflight.set(id, run);
+    this.resumeInflight.set(key, run);
     try {
       return await run;
     } finally {
-      if (this.resumeInflight.get(id) === run) this.resumeInflight.delete(id);
+      if (this.resumeInflight.get(key) === run) this.resumeInflight.delete(key);
     }
   }
 
@@ -403,6 +406,16 @@ export class KimiHarness {
 }
 
 const DEFAULT_SESSION_STARTED_UI_MODE = 'shell';
+
+function resumeCoalesceKey(id: string, input: ResumeSessionInput): string {
+  const { kaos, persistenceKaos, ...rest } = input;
+  return JSON.stringify({
+    ...rest,
+    id,
+    kaos: kaos !== undefined,
+    persistenceKaos: persistenceKaos !== undefined,
+  });
+}
 
 function normalizeSessionId(value: string): string {
   if (typeof value !== 'string') {
