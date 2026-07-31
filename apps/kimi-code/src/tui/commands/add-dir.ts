@@ -6,7 +6,7 @@ type AddDirChoice = 'session' | 'remember' | 'cancel';
 
 export async function handleAddDirCommand(host: SlashCommandHost, args: string): Promise<void> {
   const input = args.trim();
-  const session = host.session;
+  let session = host.session;
 
   if (input.length === 0 || input.toLowerCase() === 'list') {
     const additionalDirs = session?.summary?.additionalDirs ?? [];
@@ -19,8 +19,14 @@ export async function handleAddDirCommand(host: SlashCommandHost, args: string):
   }
 
   if (session === undefined) {
-    host.showError(NO_ACTIVE_SESSION_MESSAGE);
-    return;
+    if (!host.engineV2) {
+      host.showError(NO_ACTIVE_SESSION_MESSAGE);
+      return;
+    }
+    // The path-adding form needs a live session; lazy-create it on first use
+    // (the read-only `list`/bare forms above tolerate a missing session).
+    session = await host.ensureSession();
+    if (session === undefined) return;
   }
 
   host.mountEditorReplacement(

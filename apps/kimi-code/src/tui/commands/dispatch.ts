@@ -310,7 +310,6 @@ async function ensureSessionForCommand(host: SlashCommandHost): Promise<Session 
 
 /** Builtin commands that need an active session; lazy-created on the v2 engine. */
 const SESSION_REQUIRING_COMMANDS: ReadonlySet<BuiltinSlashCommandName> = new Set([
-  'add-dir',
   'auto',
   'btw',
   'compact',

@@ -762,6 +762,39 @@ describe('KimiTUI message flow', () => {
     expect(driver.state.appState.sessionId).toBe('');
   });
 
+  it('lists additional directories without creating a session (v2 engine)', async () => {
+    const session = makeSession({ id: 'ses-lazy' });
+    const startupInput: KimiTUIStartupInput = {
+      ...makeStartupInput(),
+      engineV2: true,
+      // No model configured: the read-only form must still work.
+      cliOptions: { ...makeStartupInput().cliOptions },
+    };
+    const { driver, harness } = await makeDriver(session, {}, startupInput);
+
+    driver.handleUserInput('/add-dir list');
+
+    expect(harness.createSession).not.toHaveBeenCalled();
+    expect(driver.state.appState.sessionId).toBe('');
+  });
+
+  it('lazily creates the session when adding a directory (v2 engine)', async () => {
+    const session = makeSession({ id: 'ses-lazy' });
+    const startupInput: KimiTUIStartupInput = {
+      ...makeStartupInput(),
+      engineV2: true,
+      cliOptions: { ...makeStartupInput().cliOptions, model: 'k2' },
+    };
+    const { driver, harness } = await makeDriver(session, {}, startupInput);
+
+    driver.handleUserInput('/add-dir /tmp/extra');
+
+    await vi.waitFor(() => {
+      expect(driver.getCurrentSessionId()).toBe('ses-lazy');
+    });
+    expect(harness.createSession).toHaveBeenCalledTimes(1);
+  });
+
   it('tracks /clear as the clear alias for /new', async () => {
     const { driver, harness } = await makeDriver(makeSession({ id: 'ses-1' }));
     const nextSession = makeSession({ id: 'ses-2' });
