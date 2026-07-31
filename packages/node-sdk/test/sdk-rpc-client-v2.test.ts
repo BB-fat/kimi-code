@@ -417,7 +417,7 @@ key = "${titleOAuthRef.key}"
     }
   });
 
-  it('reports the title state in listSessions as well as in the resumed summary', async () => {
+  it('reports the title state in the resumed summary', async () => {
     const { harness } = await makeHarness();
     const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-work-'));
     tempDirs.push(workDir);
@@ -426,10 +426,9 @@ key = "${titleOAuthRef.key}"
       const session = await harness.createSession({ id: 'ses_title_kind', workDir });
       await harness.renameSession({ id: session.id, title: '我的标题' });
 
-      // The list path (index → klient contract → mapper) must project the
-      // same canonical title state the resume path serves.
-      const listed = await harness.listSessions({ workDir });
-      expect(listed.find((item) => item.id === session.id)?.titleKind).toBe('custom');
+      // The resumed summary is read off the live metadata document, so it
+      // carries the canonical title state; the list path (index projection)
+      // intentionally does not.
       await session.close();
       const resumed = await harness.resumeSession({ id: session.id });
       expect(resumed.summary?.titleKind).toBe('custom');

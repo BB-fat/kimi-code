@@ -5,12 +5,6 @@
  * query facade over the set of persisted sessions (open or closed). It
  * enumerates sessions and derives session identity (`workspaceId`), returning
  * data (`SessionSummary`) or counts — never filesystem paths or live handles.
- * The summary mirrors `sessionMetadata`'s title state (`title` / `titleKind`);
- * the kind union is re-declared inline because this L2 contract cannot
- * import the L6 metadata domain that canonically owns it. Entries cached in
- * the derived read model carry `READ_MODEL_SUMMARY_VERSION`; older-stamped
- * (or un-stamped) entries are treated as cold misses and backfilled from
- * disk, so upgraded readers never serve a stale-shape summary.
  * Writes (create / archive) live in `workspaceHandler` / `session`; the index
  * is a read model. Backends are deployment-specific (local filesystem today;
  * database / query store on a server).
@@ -18,8 +12,6 @@
 
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';
 import type { Page } from '#/persistence/interface/queryStore';
-
-export const READ_MODEL_SUMMARY_VERSION = 2;
 
 export const PARENT_SESSION_ID_KEY = 'parent_session_id';
 
@@ -32,7 +24,6 @@ export interface SessionSummary {
   readonly workspaceId: string;
   readonly cwd?: string;
   readonly title?: string;
-  readonly titleKind?: 'replaceable' | 'generated' | 'custom';
   readonly lastPrompt?: string;
   readonly createdAt: number;
   readonly updatedAt: number;

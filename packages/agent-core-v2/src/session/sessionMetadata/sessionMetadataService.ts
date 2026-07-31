@@ -42,7 +42,6 @@ import { Emitter, type Event } from '#/_base/event';
 import { ILogService } from '#/_base/log/log';
 import { defineState } from '#/_base/state/stateRegistry';
 import { IFlagService } from '#/app/flag/flag';
-import { READ_MODEL_SUMMARY_VERSION } from '#/app/sessionIndex/sessionIndex';
 import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
 import { IQueryStore } from '#/persistence/interface/queryStore';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
@@ -164,7 +163,6 @@ export class SessionMetadata extends Disposable implements ISessionMetadata {
         workspaceId: this.ctx.workspaceId,
         cwd: this.ctx.cwd,
         title: this.data.title,
-        titleKind: this.data.titleKind,
         lastPrompt: this.data.lastPrompt,
         createdAt: this.data.createdAt,
         updatedAt: this.data.updatedAt,
@@ -174,7 +172,6 @@ export class SessionMetadata extends Disposable implements ISessionMetadata {
         // poison the cache entry and fail contract validation on reads.
         archived: this.data.archived === true,
         custom: this.data.custom,
-        v: READ_MODEL_SUMMARY_VERSION,
       });
     } catch (error) {
       this.log.warn('failed to mirror session metadata to read model', {

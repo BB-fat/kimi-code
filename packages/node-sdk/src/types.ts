@@ -267,7 +267,9 @@ export interface SessionStatus {
  * The engine's canonical title state: `replaceable` (a prompt-derived easy
  * title auto generation may overwrite), `generated` (an auto-generated title
  * already landed), `custom` (a user-set title that is never overwritten).
- * Only populated by the v2 engine; v1 backends leave it undefined.
+ * Only populated by the v2 engine on live / resumed sessions (read off the
+ * metadata document); v1 backends leave it undefined, and the v2 list path
+ * does not project it.
  */
 export type SessionTitleKind = 'replaceable' | 'generated' | 'custom';
 
