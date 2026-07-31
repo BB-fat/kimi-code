@@ -20,7 +20,7 @@ import { createServices, type TestInstantiationService } from '#/_base/di/test';
 import { Emitter } from '#/_base/event';
 import { IOAuthService } from '#/app/auth/auth';
 import { type DomainEvent, IEventService } from '#/app/event/event';
-import { HostRequestHeaders, IHostRequestHeaders } from '#/kosong/model/hostRequestHeaders';
+import { IHostRequestHeaders } from '#/kosong/model/hostRequestHeaders';
 import {
   IProviderService,
   type OAuthRef,
@@ -212,7 +212,7 @@ describe('SessionTitleService', () => {
             };
           },
         });
-        reg.defineInstance(IHostRequestHeaders, new HostRequestHeaders({ 'User-Agent': 'test' }));
+        reg.defineInstance(IHostRequestHeaders, { headers: { 'User-Agent': 'test' } });
         reg.define(ISessionTitleService, SessionTitleService);
       },
     });

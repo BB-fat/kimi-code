@@ -23,9 +23,9 @@ import {
   ErrorCodes,
   KimiError,
   KimiHarness,
-  type Event,
   removeProviderFromConfig,
   SDKRpcClientV2,
+  type Event,
   type KimiConfig,
 } from '#/index';
 import { foldAgentWireReplay } from '#/v2/resume-replay';
