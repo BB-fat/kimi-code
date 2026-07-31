@@ -5,6 +5,9 @@
  * query facade over the set of persisted sessions (open or closed). It
  * enumerates sessions and derives session identity (`workspaceId`), returning
  * data (`SessionSummary`) or counts — never filesystem paths or live handles.
+ * The summary mirrors `sessionMetadata`'s title state (`title` / `titleKind`);
+ * the kind union is re-declared inline because this L2 contract cannot
+ * import the L6 metadata domain that canonically owns it.
  * Writes (create / archive) live in `workspaceHandler` / `session`; the index
  * is a read model. Backends are deployment-specific (local filesystem today;
  * database / query store on a server).
@@ -24,6 +27,7 @@ export interface SessionSummary {
   readonly workspaceId: string;
   readonly cwd?: string;
   readonly title?: string;
+  readonly titleKind?: 'replaceable' | 'generated' | 'custom';
   readonly lastPrompt?: string;
   readonly createdAt: number;
   readonly updatedAt: number;

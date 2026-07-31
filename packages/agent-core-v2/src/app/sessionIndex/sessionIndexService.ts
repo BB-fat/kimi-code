@@ -71,6 +71,12 @@ function parseTime(value: unknown): number {
   return 0;
 }
 
+function toTitleKind(value: unknown): SessionSummary['titleKind'] {
+  return value === 'replaceable' || value === 'generated' || value === 'custom'
+    ? value
+    : undefined;
+}
+
 function recoverCwd(meta: Record<string, unknown>): string | undefined {
   if (typeof meta['cwd'] === 'string' && meta['cwd'].length > 0) return meta['cwd'];
   if (typeof meta['workDir'] === 'string' && meta['workDir'].length > 0) {
@@ -334,6 +340,7 @@ export class FileSessionIndex implements ISessionIndex {
       workspaceId,
       cwd: recoverCwd(meta),
       title: typeof meta['title'] === 'string' ? meta['title'] : undefined,
+      titleKind: toTitleKind(meta['titleKind']),
       lastPrompt: typeof meta['lastPrompt'] === 'string' ? meta['lastPrompt'] : undefined,
       createdAt: parseTime(meta['createdAt']),
       updatedAt: parseTime(meta['updatedAt']),

@@ -48,6 +48,7 @@ export function v2SummaryToSessionSummary(
   return {
     id: summary.id,
     title: summary.title,
+    titleKind: summary.titleKind,
     lastPrompt: summary.lastPrompt,
     workDir: facts.workDir,
     sessionDir: facts.sessionDir,
