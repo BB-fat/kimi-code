@@ -554,6 +554,59 @@ describe('KimiTUI message flow', () => {
     expect(driver.getCurrentSessionId()).toBe('ses-lazy');
   });
 
+  it('serializes concurrent lazy session creation (v2 engine)', async () => {
+    const session = makeSession({ id: 'ses-lazy' });
+    const startupInput: KimiTUIStartupInput = {
+      ...makeStartupInput(),
+      engineV2: true,
+      cliOptions: { ...makeStartupInput().cliOptions, model: 'k2' },
+    };
+    const { driver, harness } = await makeDriver(session, {}, startupInput);
+
+    // Hold the first createSession open so both triggers land inside the
+    // in-flight window.
+    let resolveCreate!: (s: ReturnType<typeof makeSession>) => void;
+    harness.createSession.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveCreate = resolve; }),
+    );
+
+    const ensure = (driver as unknown as { ensureSession(): Promise<unknown> }).ensureSession;
+    const first = ensure.call(driver);
+    const second = ensure.call(driver);
+    resolveCreate(session);
+    await Promise.all([first, second]);
+
+    expect(harness.createSession).toHaveBeenCalledTimes(1);
+    expect(driver.getCurrentSessionId()).toBe('ses-lazy');
+  });
+
+  it('carries a session-only thinking choice into the lazy-created session (v2 engine)', async () => {
+    const session = makeSession({ id: 'ses-lazy' });
+    const startupInput: KimiTUIStartupInput = {
+      ...makeStartupInput(),
+      engineV2: true,
+      cliOptions: { ...makeStartupInput().cliOptions, model: 'k2' },
+    };
+    const { driver, harness } = await makeDriver(session, {}, startupInput);
+
+    // Alt+S session-only thinking before any session exists.
+    await (
+      driver as unknown as {
+        authFlow: { activateModelAfterLogin(model: string, effort?: string): Promise<void> };
+      }
+    ).authFlow.activateModelAfterLogin('k2', 'high');
+
+    driver.handleUserInput('hello');
+
+    await vi.waitFor(() => {
+      expect(session.prompt).toHaveBeenCalledWith('hello');
+    });
+    expect(harness.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ model: 'k2', thinking: 'high' }),
+    );
+    expect(driver.state.appState.lazySessionThinking).toBeUndefined();
+  });
+
   it('tracks /clear as the clear alias for /new', async () => {
     const { driver, harness } = await makeDriver(makeSession({ id: 'ses-1' }));
     const nextSession = makeSession({ id: 'ses-2' });

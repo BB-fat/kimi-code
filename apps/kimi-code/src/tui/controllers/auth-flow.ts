@@ -83,10 +83,13 @@ export class AuthFlowController {
 
     if (host.engineV2) {
       // Lazy session creation (v2 engine): configure the model only; the
-      // session is created on the first message.
+      // session is created on the first message. The effort is carried as the
+      // first session's thinking override so a session-only choice (Alt+S)
+      // made before any session exists is applied on creation.
       const patch: Partial<AppState> = { model };
       if (effort !== undefined) {
         patch.thinkingEffort = effort as ThinkingEffort;
+        patch.lazySessionThinking = effort as ThinkingEffort;
       }
       host.setAppState(patch);
       return;

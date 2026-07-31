@@ -43,6 +43,13 @@ export interface AppState {
    * mirrors the runtime. The single source of truth for the thinking state in
    * the TUI. */
   thinkingEffort: ThinkingEffort;
+  /**
+   * Session-only thinking effort chosen (e.g. via the model picker's Alt+S)
+   * while no session exists yet on the v2 engine. Applied to the first
+   * lazy-created session and cleared once it exists; the engine's config
+   * default is used instead when unset.
+   */
+  lazySessionThinking?: ThinkingEffort;
   contextUsage: number;
   contextTokens: number;
   maxContextTokens: number;

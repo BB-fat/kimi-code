@@ -308,6 +308,8 @@ export class KimiTUI {
   readonly options: KimiTUIOptions;
   session: Session | undefined;
   state: TUIState;
+  /** In-flight lazy session creation (v2 engine), shared by concurrent first-use triggers. */
+  private ensureSessionPromise: Promise<Session | undefined> | null = null;
   private readonly approvalController = new ApprovalController();
   private readonly questionController = new QuestionController();
   private readonly reverseRpcDisposers: Array<() => void> = [];
@@ -1647,7 +1649,15 @@ export class KimiTUI {
     const options: MutableCreateSessionOptions = {
       workDir: this.state.appState.workDir,
       model,
-      thinking: this.session === undefined ? undefined : this.state.appState.thinkingEffort,
+      // With an active session, carry the live effort. Session-less (lazy
+      // creation / `/new` before the first session), carry the session-only
+      // thinking override chosen via Alt+S if any — never the initial 'off'
+      // default, which would force thinking off where the engine's config or
+      // model default would apply.
+      thinking:
+        this.session === undefined
+          ? this.state.appState.lazySessionThinking
+          : this.state.appState.thinkingEffort,
       permission: this.state.appState.permissionMode,
       planMode: this.state.appState.planMode ? true : undefined,
     };
@@ -1673,9 +1683,22 @@ export class KimiTUI {
    * runs the same assembly `createNewSession` performs. Returns undefined and
    * shows the error when creation fails; callers must still guard on
    * `appState.model`.
+   *
+   * Concurrent first-use triggers (a double Enter, or a slash command right
+   * after a prompt) both observe `session === undefined`, so the first caller
+   * owns the creation and the rest share the in-flight promise — otherwise
+   * two sessions would be created and the later `setSession` would close the
+   * first one mid-dispatch.
    */
   async ensureSession(): Promise<Session | undefined> {
     if (this.session !== undefined) return this.session;
+    this.ensureSessionPromise ??= this.lazyCreateSession().finally(() => {
+      this.ensureSessionPromise = null;
+    });
+    return this.ensureSessionPromise;
+  }
+
+  private async lazyCreateSession(): Promise<Session | undefined> {
     let session: Session;
     try {
       session = await this.createSessionFromCurrentState(true);
@@ -1704,6 +1727,11 @@ export class KimiTUI {
     }
     this.sessionEventHandler.startSubscription();
     void this.showSessionWarnings(session);
+    // The session-only thinking override was consumed by this session; the
+    // runtime status now owns the displayed effort.
+    if (this.state.appState.lazySessionThinking !== undefined) {
+      this.setAppState({ lazySessionThinking: undefined });
+    }
     return session;
   }
 
