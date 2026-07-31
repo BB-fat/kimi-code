@@ -660,6 +660,49 @@ describe('KimiTUI message flow', () => {
     );
   });
 
+  it('queues a bash command submitted while the lazy session is being created (v2 engine)', async () => {
+    const runShellCommand = vi.fn(async () => ({ stdout: '', stderr: '', isError: false }));
+    const session = makeSession({ id: 'ses-lazy', runShellCommand });
+    const startupInput: KimiTUIStartupInput = {
+      ...makeStartupInput(),
+      engineV2: true,
+      cliOptions: { ...makeStartupInput().cliOptions, model: 'k2' },
+    };
+    const { driver } = await makeDriver(session, {}, startupInput);
+
+    // A prompt and a bash command both trigger the same in-flight creation.
+    driver.handleUserInput('hello');
+    driver.state.appState.inputMode = 'bash';
+    driver.state.editor.inputMode = 'bash';
+    driver.handleUserInput('ls');
+
+    await vi.waitFor(() => {
+      expect(session.prompt).toHaveBeenCalledWith('hello');
+    });
+    // The shell command must be queued, not run concurrently with the prompt.
+    expect(runShellCommand).not.toHaveBeenCalled();
+    expect(driver.state.queuedMessages).toEqual([
+      { text: 'ls', agentId: 'main', mode: 'bash' },
+    ]);
+  });
+
+  it('opens /settings without creating a session (v2 engine)', async () => {
+    const session = makeSession({ id: 'ses-lazy' });
+    const startupInput: KimiTUIStartupInput = {
+      ...makeStartupInput(),
+      engineV2: true,
+      // No model configured: /settings must still open so the user can fix
+      // local editor/theme/update settings before picking a model.
+      cliOptions: { ...makeStartupInput().cliOptions },
+    };
+    const { driver, harness } = await makeDriver(session, {}, startupInput);
+
+    driver.handleUserInput('/settings');
+
+    expect(harness.createSession).not.toHaveBeenCalled();
+    expect(driver.state.appState.sessionId).toBe('');
+  });
+
   it('tracks /clear as the clear alias for /new', async () => {
     const { driver, harness } = await makeDriver(makeSession({ id: 'ses-1' }));
     const nextSession = makeSession({ id: 'ses-2' });

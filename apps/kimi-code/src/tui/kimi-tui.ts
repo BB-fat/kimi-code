@@ -1128,6 +1128,16 @@ export class KimiTUI {
       }
       session = await this.ensureSession();
       if (session === undefined) return;
+      // A concurrent first message may have started a prompt while this lazy
+      // creation was in flight (both inputs share the same creation promise);
+      // honor the busy gate here, like handleUserInput does before the await,
+      // instead of running the shell command concurrently with an agent turn.
+      if (this.state.appState.streamingPhase !== 'idle') {
+        this.enqueueMessage(command, undefined, 'bash');
+        this.updateQueueDisplay();
+        this.state.ui.requestRender();
+        return;
+      }
     }
     // Echo the command locally (bash-input) with a `$` prompt. The agent also
     // records it for resume; this is the live view.

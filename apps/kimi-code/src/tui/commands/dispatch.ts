@@ -294,7 +294,6 @@ const SESSION_REQUIRING_COMMANDS: ReadonlySet<BuiltinSlashCommandName> = new Set
   'permission',
   'plan',
   'plugins',
-  'settings',
   'status',
   'swarm',
   'title',
