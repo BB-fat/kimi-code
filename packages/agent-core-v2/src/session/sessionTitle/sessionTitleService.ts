@@ -11,13 +11,12 @@
  * the user is never overwritten. An already-generated title is not
  * regenerated unless forced. Plain calls coalesce onto one shared
  * in-flight generation while a forced regeneration always runs on its
- * own; every active generation is drained through the
- * `sessionLifecycleHooks` `onWillCloseSession` slot before the scope is
- * disposed, and the write-back is dropped once
- * this scope's `sessionLifetime` signal fires — the in-flight request
- * carries the signal, and the metadata update re-checks it inside the
- * serialized write so an abort landing while the update sits queued still
- * vetoes the write. Provider config comes
+ * own; the newest request always wins the write-back, which the
+ * serialized metadata update drops once the scope's `sessionLifetime`
+ * signal fires or a newer request supersedes it. Every active generation
+ * is drained through the `sessionLifecycleHooks` `onWillCloseSession`
+ * slot before the scope is disposed.
+ * Provider config comes
  * from `provider`, the bearer token from `auth`, host identity headers from
  * `model`, prompt history from `agentLifecycle`/`sessionTitle`, and logs
  * through `log`. Bound at Session scope.
@@ -63,6 +62,7 @@ export class SessionTitleService implements ISessionTitleService {
 
   private _shared: Promise<string | undefined> | undefined;
   private readonly _active = new Set<Promise<string | undefined>>();
+  private _generationSeq = 0;
 
   constructor(
     @ISessionContext private readonly ctx: ISessionContext,
@@ -85,9 +85,6 @@ export class SessionTitleService implements ISessionTitleService {
 
   async generateTitle(options?: { readonly force?: boolean }): Promise<string | undefined> {
     if (this.lifetime.signal.aborted) return undefined;
-    // Plain calls coalesce onto the shared in-flight slot; a forced
-    // regeneration always runs on its own so it is neither swallowed by a
-    // plain call's early exit nor shares its result with one.
     if (options?.force !== true && this._shared !== undefined) return this._shared;
     const tracked = this.generateTitleOnce(options).finally(() => {
       this._active.delete(tracked);
@@ -111,10 +108,11 @@ export class SessionTitleService implements ISessionTitleService {
         : await main.accessor.get(IAgentTitlePromptSource).firstUserPrompts(MAX_TITLE_PROMPTS);
     const input = titleInputFromPrompts(prompts);
     if (input === undefined) return undefined;
-    return this.generateAndApply(input);
+    const seq = ++this._generationSeq;
+    return this.generateAndApply(input, seq);
   }
 
-  private async generateAndApply(chatContent: string): Promise<string | undefined> {
+  private async generateAndApply(chatContent: string, seq: number): Promise<string | undefined> {
     const current = await this.metadata.read();
     if (current.titleKind === 'custom') return undefined;
     const provider = this.providers.get(KIMI_CODE_PROVIDER_NAME);
@@ -170,7 +168,7 @@ export class SessionTitleService implements ISessionTitleService {
     const title = result.title.slice(0, MAX_GENERATED_TITLE_LENGTH);
     const applied = await this.metadata.setGeneratedTitleIfUncustomized(
       title,
-      () => !this.lifetime.signal.aborted,
+      () => seq === this._generationSeq && !this.lifetime.signal.aborted,
     );
     if (!applied) return undefined;
     this.eventService.publish({

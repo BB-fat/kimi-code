@@ -583,7 +583,7 @@ describe('SessionTitleService', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('runs a forced regeneration independently of a plain in-flight call', async () => {
+  it('lets the later forced request win over a slower plain call', async () => {
     const pendingFetch = createPendingFetch();
     fetchMock.mockImplementationOnce(pendingFetch.fetch);
     titlePrompts = ['hello'];
@@ -600,8 +600,32 @@ describe('SessionTitleService', () => {
         headers: { 'Content-Type': 'application/json' },
       }),
     );
-    await expect(plain).resolves.toBe('普通标题');
+    // The plain call started earlier, so its slower response is superseded:
+    // its write-back is vetoed and the forced title stays.
+    await expect(plain).resolves.toBeUndefined();
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(metadata.meta.title).toBe('生成的标题');
+    expect(metadata.meta.titleKind).toBe('generated');
+  });
+
+  it('lets the later plain request win over a slower forced call', async () => {
+    const pendingFetch = createPendingFetch();
+    fetchMock.mockImplementationOnce(pendingFetch.fetch);
+    titlePrompts = ['hello'];
+
+    const forced = ix.get(ISessionTitleService).generateTitle({ force: true });
+    await pendingFetch.started;
+    const plain = ix.get(ISessionTitleService).generateTitle();
+    await expect(plain).resolves.toBe('生成的标题');
+
+    pendingFetch.resolve(
+      new Response(JSON.stringify({ title: '强制标题' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    await expect(forced).resolves.toBeUndefined();
+    expect(metadata.meta.title).toBe('生成的标题');
   });
 
   it('does not share a forced in-flight result with a plain call', async () => {
