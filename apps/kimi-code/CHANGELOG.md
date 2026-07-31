@@ -1,5 +1,13 @@
 # @moonshot-ai/kimi-code
 
+## 0.31.2
+
+### Patch Changes
+
+- [#2416](https://github.com/MoonshotAI/kimi-code/pull/2416) [`eaab2b6`](https://github.com/MoonshotAI/kimi-code/commit/eaab2b6f28c0b958edf8ab5ae5e78a4c0426af26) Thanks [@mangeshraut712](https://github.com/mangeshraut712)! - Fall back to the built-in models.dev catalog snapshot when the public catalog is unreachable, so Known third-party provider import still works offline or in blocked networks.
+
+- [#2083](https://github.com/MoonshotAI/kimi-code/pull/2083) [`bfa0080`](https://github.com/MoonshotAI/kimi-code/commit/bfa00807c975fdc5b84dda32d47b16b09e8d42c1) Thanks [@StaR4y](https://github.com/StaR4y)! - web: Fix dark-mode monochrome controls and align the chat composer corner radius with the design system.
+
 ## 0.31.1
 
 ### Patch Changes
