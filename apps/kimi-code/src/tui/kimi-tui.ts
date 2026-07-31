@@ -1646,6 +1646,16 @@ export class KimiTUI {
     if (model.length === 0) {
       throw new Error(LLM_NOT_SET_MESSAGE);
     }
+    // With an active session, carry the live plan state. Session-less (lazy
+    // creation / `/new` before the first session) on v2, pass only the
+    // explicit CLI --plan intent: the engine applies `defaultPlanMode` itself
+    // at create time (sessionLifecycleService), so passing the config default
+    // here too would enter plan mode twice and throw. On v1 (which never
+    // pre-fills plan mode from config), keep the historical appState value.
+    const explicitPlanMode =
+      this.session !== undefined || !this.engineV2
+        ? this.state.appState.planMode
+        : this.options.startup.plan;
     const options: MutableCreateSessionOptions = {
       workDir: this.state.appState.workDir,
       model,
@@ -1659,7 +1669,7 @@ export class KimiTUI {
           ? this.state.appState.lazySessionThinking
           : this.state.appState.thinkingEffort,
       permission: this.state.appState.permissionMode,
-      planMode: this.state.appState.planMode ? true : undefined,
+      planMode: explicitPlanMode ? true : undefined,
     };
     if (this.state.appState.additionalDirs.length > 0) {
       options.additionalDirs = [...this.state.appState.additionalDirs];

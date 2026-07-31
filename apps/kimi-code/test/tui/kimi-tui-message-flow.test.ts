@@ -607,6 +607,59 @@ describe('KimiTUI message flow', () => {
     expect(driver.state.appState.lazySessionThinking).toBeUndefined();
   });
 
+  it('does not pass the config default plan mode into the lazy-created session (v2 engine)', async () => {
+    const session = makeSession({ id: 'ses-lazy' });
+    const startupInput: KimiTUIStartupInput = {
+      ...makeStartupInput(),
+      engineV2: true,
+      cliOptions: { ...makeStartupInput().cliOptions, model: 'k2' },
+    };
+    const { driver, harness } = await makeDriver(
+      session,
+      {
+        getConfig: vi.fn(async () => ({
+          models: { k2: { model: 'moonshot-v1', maxContextSize: 100 } },
+          defaultModel: 'k2',
+          defaultPlanMode: true,
+        })),
+      },
+      startupInput,
+    );
+
+    // The footer shows the config default…
+    expect(driver.state.appState.planMode).toBe(true);
+
+    // …but the create call must not repeat it: the v2 engine applies
+    // defaultPlanMode at create time, and re-entering plan mode throws.
+    driver.handleUserInput('hello');
+
+    await vi.waitFor(() => {
+      expect(session.prompt).toHaveBeenCalledWith('hello');
+    });
+    expect(harness.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ planMode: undefined }),
+    );
+  });
+
+  it('passes the explicit --plan flag into the lazy-created session (v2 engine)', async () => {
+    const session = makeSession({ id: 'ses-lazy' });
+    const startupInput: KimiTUIStartupInput = {
+      ...makeStartupInput(),
+      engineV2: true,
+      cliOptions: { ...makeStartupInput().cliOptions, model: 'k2', plan: true },
+    };
+    const { driver, harness } = await makeDriver(session, {}, startupInput);
+
+    driver.handleUserInput('hello');
+
+    await vi.waitFor(() => {
+      expect(session.prompt).toHaveBeenCalledWith('hello');
+    });
+    expect(harness.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ planMode: true }),
+    );
+  });
+
   it('tracks /clear as the clear alias for /new', async () => {
     const { driver, harness } = await makeDriver(makeSession({ id: 'ses-1' }));
     const nextSession = makeSession({ id: 'ses-2' });
