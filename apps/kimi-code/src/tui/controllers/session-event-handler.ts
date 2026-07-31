@@ -166,7 +166,6 @@ export class SessionEventHandler {
   private queuedGoalPromotionInFlight = false;
   private queuedGoalPromotionTimer: ReturnType<typeof setTimeout> | undefined;
   private titleGenerationDisabled = false;
-  private titleGenerationEpoch = 0;
 
   resetRuntimeState(): void {
     this.backgroundTasks.clear();
@@ -185,7 +184,6 @@ export class SessionEventHandler {
     this.queuedGoalPromotionPending = false;
     this.queuedGoalPromotionInFlight = false;
     this.clearQueuedGoalPromotionTimer();
-    this.titleGenerationEpoch += 1;
     this.titleGenerationDisabled = false;
     this.stopAllMcpServerStatusSpinners();
   }
@@ -391,15 +389,14 @@ export class SessionEventHandler {
       }
     }
     this.pluginMcpToolsUsedInTurn.clear();
-    this.requestSessionTitleGeneration();
     this.scheduleQueuedGoalPromotion();
   }
 
   /**
    * Seeds the title-generation gate from the persisted title state (read off
    * the resumed session's summary): a session whose title was already
-   * generated or customized has nothing left to ask for, so later turns skip
-   * the internally no-op generation call. Only ever closes the gate —
+   * generated or customized has nothing left to ask for, so the one-shot
+   * request is skipped. Only ever closes the gate —
    * reopening stays with `resetRuntimeState` on a session switch.
    */
   syncTitleGenerationGate(titleKind: SessionTitleKind | undefined): void {
@@ -409,34 +406,21 @@ export class SessionEventHandler {
   }
 
   /**
-   * Best-effort auto title: right after a prompt is accepted by the engine
-   * (and again after each completed turn), ask the engine to generate a
-   * title from the first prompts until one lands. The engine
-   * overwrites the prompt-derived easy title but never a custom title
-   * (enforced server-side), and dedupes in-flight requests. A resolved string
-   * means a title was applied — stop asking so later turns don't regenerate
-   * over it; a resolved `undefined` (no managed login / no prompt yet / a
-   * custom title) just retries on the next turn; a rejection (v1 engine,
-   * dead RPC) disables further attempts for this session. The generated
-   * title lands through the regular `session.meta.updated` event.
+   * Best-effort auto title: right after a prompt is accepted by the engine,
+   * ask it once to generate a title from the first prompts. One shot per
+   * session attach — the prompt-derived easy title is an acceptable
+   * fallback, so the outcome is not acted on and failures (no managed login,
+   * v1 engine, dead RPC) are not retried. The engine overwrites the
+   * prompt-derived easy title but never a custom title (enforced
+   * server-side), and a generated title lands through the regular
+   * `session.meta.updated` event.
    */
   requestSessionTitleGeneration(): void {
     if (this.titleGenerationDisabled) return;
     const { sessionId } = this.host.state.appState;
     if (sessionId.length === 0) return;
-    const epoch = this.titleGenerationEpoch;
-    const isCurrentGeneration = () =>
-      epoch === this.titleGenerationEpoch && sessionId === this.host.state.appState.sessionId;
-    void this.host.harness.generateSessionTitle({ id: sessionId }).then(
-      (title) => {
-        if (!isCurrentGeneration()) return;
-        if (title !== undefined) this.titleGenerationDisabled = true;
-      },
-      () => {
-        if (!isCurrentGeneration()) return;
-        this.titleGenerationDisabled = true;
-      },
-    );
+    this.titleGenerationDisabled = true;
+    void this.host.harness.generateSessionTitle({ id: sessionId }).catch(() => undefined);
   }
 
   private handleStepBegin(event: TurnStepStartedEvent): void {

@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { SessionEventHandler } from '#/tui/controllers/session-event-handler';
 import { getBuiltInPalette } from '#/tui/theme';
 
-function makeHost(options: { sessionTitle?: string | null; generateTitle?: () => Promise<string | undefined> } = {}) {
+function makeHost(options: { generateTitle?: () => Promise<string | undefined> } = {}) {
   const harness = {
     generateSessionTitle: vi.fn(options.generateTitle ?? (async () => undefined)),
   };
@@ -11,7 +11,7 @@ function makeHost(options: { sessionTitle?: string | null; generateTitle?: () =>
     state: {
       appState: {
         sessionId: 's1',
-        sessionTitle: options.sessionTitle ?? null,
+        sessionTitle: null,
         workDir: '/tmp/work',
         streamingPhase: 'waiting',
         model: 'kimi-model',
@@ -75,123 +75,68 @@ async function flushMicrotasks() {
 }
 
 describe('session auto title generation', () => {
-  it('requests a title after a turn ends while the session has none', () => {
-    const { host, harness } = makeHost();
-    const handler = new SessionEventHandler(host);
-
-    handler.handleEvent(turnEndedEvent(), vi.fn());
-
-    expect(harness.generateSessionTitle).toHaveBeenCalledWith({ id: 's1' });
-  });
-
-  it('requests a title after a turn ends even when an easy title exists', () => {
-    const { host, harness } = makeHost({ sessionTitle: '首条 prompt 的截断标题' });
-    const handler = new SessionEventHandler(host);
-
-    handler.handleEvent(turnEndedEvent(), vi.fn());
-
-    expect(harness.generateSessionTitle).toHaveBeenCalledWith({ id: 's1' });
-  });
-
-  it('stops requesting after a title was generated', async () => {
-    const { host, harness } = makeHost({ generateTitle: async () => '生成的标题' });
-    const handler = new SessionEventHandler(host);
-
-    handler.handleEvent(turnEndedEvent(), vi.fn());
-    await flushMicrotasks();
-    handler.handleEvent(turnEndedEvent(), vi.fn());
-
-    expect(harness.generateSessionTitle).toHaveBeenCalledTimes(1);
-  });
-
-  it('keeps requesting after an unavailable (undefined) result', async () => {
-    const { host, harness } = makeHost();
-    const handler = new SessionEventHandler(host);
-
-    handler.handleEvent(turnEndedEvent(), vi.fn());
-    await flushMicrotasks();
-    handler.handleEvent(turnEndedEvent(), vi.fn());
-
-    expect(harness.generateSessionTitle).toHaveBeenCalledTimes(2);
-  });
-
-  it('stops requesting after the harness rejects, and resetRuntimeState re-enables', async () => {
-    const { host, harness } = makeHost({
-      generateTitle: async () => {
-        throw new Error('not implemented');
+  it.each([
+    ['unavailable', async (): Promise<string | undefined> => undefined],
+    ['applied', async (): Promise<string | undefined> => '生成的标题'],
+    [
+      'rejected',
+      async (): Promise<string | undefined> => {
+        throw new Error('core rpc unavailable');
       },
-    });
+    ],
+  ] as const)('requests only once per runtime when the attempt is %s', async (_outcome, generateTitle) => {
+    const { host, harness } = makeHost({ generateTitle });
     const handler = new SessionEventHandler(host);
 
-    handler.handleEvent(turnEndedEvent(), vi.fn());
+    handler.requestSessionTitleGeneration();
     await flushMicrotasks();
-    handler.handleEvent(turnEndedEvent(), vi.fn());
+    handler.requestSessionTitleGeneration();
+
     expect(harness.generateSessionTitle).toHaveBeenCalledTimes(1);
-
-    handler.resetRuntimeState();
-    handler.handleEvent(turnEndedEvent(), vi.fn());
-    expect(harness.generateSessionTitle).toHaveBeenCalledTimes(2);
+    expect(harness.generateSessionTitle).toHaveBeenCalledWith({ id: 's1' });
   });
 
-  it('ignores a generated title from the previous session after runtime reset', async () => {
-    let resolveTitle: ((title: string | undefined) => void) | undefined;
-    const pendingTitle = new Promise<string | undefined>((resolve) => {
-      resolveTitle = resolve;
-    });
+  it('does not request a title when a turn ends', () => {
     const { host, harness } = makeHost();
-    harness.generateSessionTitle.mockReturnValueOnce(pendingTitle);
-    const handler = new SessionEventHandler(host);
-
-    handler.handleEvent(turnEndedEvent('s1'), vi.fn());
-    host.state.appState.sessionId = 's2';
-    handler.resetRuntimeState();
-    resolveTitle?.('s1 generated title');
-    await flushMicrotasks();
-    handler.handleEvent(turnEndedEvent('s2'), vi.fn());
-
-    expect(harness.generateSessionTitle).toHaveBeenCalledTimes(2);
-    expect(harness.generateSessionTitle).toHaveBeenLastCalledWith({ id: 's2' });
-  });
-
-  it('ignores a rejection from the previous runtime after same-session reset', async () => {
-    let rejectTitle: ((error: Error) => void) | undefined;
-    const pendingTitle = new Promise<string | undefined>((_resolve, reject) => {
-      rejectTitle = reject;
-    });
-    const { host, harness } = makeHost();
-    harness.generateSessionTitle.mockReturnValueOnce(pendingTitle);
     const handler = new SessionEventHandler(host);
 
     handler.handleEvent(turnEndedEvent(), vi.fn());
+
+    expect(harness.generateSessionTitle).not.toHaveBeenCalled();
+  });
+
+  it('grants a fresh attempt on runtime reset', () => {
+    const { host, harness } = makeHost();
+    const handler = new SessionEventHandler(host);
+
+    handler.requestSessionTitleGeneration();
     handler.resetRuntimeState();
-    rejectTitle?.(new Error('stale request failed'));
-    await flushMicrotasks();
-    handler.handleEvent(turnEndedEvent(), vi.fn());
+    handler.requestSessionTitleGeneration();
 
     expect(harness.generateSessionTitle).toHaveBeenCalledTimes(2);
   });
 
   it.each(['generated', 'custom'] as const)(
-    'stops requesting when the resumed session already has a %s title',
+    'skips the request when the resumed session already has a %s title',
     (titleKind) => {
       const { host, harness } = makeHost();
       const handler = new SessionEventHandler(host);
 
       handler.syncTitleGenerationGate(titleKind);
-      handler.handleEvent(turnEndedEvent(), vi.fn());
+      handler.requestSessionTitleGeneration();
 
       expect(harness.generateSessionTitle).not.toHaveBeenCalled();
     },
   );
 
   it.each(['replaceable', undefined] as const)(
-    'keeps requesting when the resumed title state is %s',
+    'requests when the resumed title state is %s',
     (titleKind) => {
       const { host, harness } = makeHost();
       const handler = new SessionEventHandler(host);
 
       handler.syncTitleGenerationGate(titleKind);
-      handler.handleEvent(turnEndedEvent(), vi.fn());
+      handler.requestSessionTitleGeneration();
 
       expect(harness.generateSessionTitle).toHaveBeenCalledWith({ id: 's1' });
     },
@@ -203,7 +148,7 @@ describe('session auto title generation', () => {
 
     handler.syncTitleGenerationGate('generated');
     handler.resetRuntimeState();
-    handler.handleEvent(turnEndedEvent(), vi.fn());
+    handler.requestSessionTitleGeneration();
 
     expect(harness.generateSessionTitle).toHaveBeenCalledWith({ id: 's1' });
   });
@@ -222,7 +167,7 @@ describe('session auto title generation', () => {
       } as const,
       vi.fn(),
     );
-    handler.handleEvent(turnEndedEvent(), vi.fn());
+    handler.requestSessionTitleGeneration();
 
     expect(harness.generateSessionTitle).not.toHaveBeenCalled();
   });
