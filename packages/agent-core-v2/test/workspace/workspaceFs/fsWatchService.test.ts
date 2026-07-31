@@ -1,5 +1,5 @@
 /**
- * `workspaceFs` fs-watch (L3) — verifies the shared os watcher fan-out:
+ * `workspaceFs` fs-watch — verifies the shared os watcher fan-out:
  * confinement to each subscription's declared subtree, workspace-relative
  * path mapping (including events reported against the canonical target of a
  * symlinked handler root), per-subscription debounce coalescing and window

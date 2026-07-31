@@ -53,8 +53,6 @@ export type ContextInjectionDisclosure =
 export interface ShellCommandOrigin {
   readonly kind: 'shell_command';
   readonly phase: 'input' | 'output';
-  /** Only present on `phase: 'output'` — whether the command failed, so replay
-   *  can colour stderr red only for actual failures (not warnings). */
   readonly isError?: boolean;
 }
 
