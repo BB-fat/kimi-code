@@ -153,7 +153,6 @@ import {
   ISessionLifecycleHooks,
   type SessionLifecycleHookSlots,
 } from '#/session/sessionLifecycleHooks/sessionLifecycleHooks';
-import { ISessionLifetime } from '#/session/sessionLifetime/sessionLifetime';
 import { IEventBus } from '#/app/event/eventBus';
 import { IWireService } from '#/wire/wire';
 import { WireService } from '#/wire/wireService';
@@ -1178,10 +1177,6 @@ export class AgentTestContext {
                 'onWillCloseSession',
               ]),
             );
-            reg.defineInstance(ISessionLifetime, {
-              _serviceBrand: undefined,
-              signal: new AbortController().signal,
-            });
             reg.defineInstance(ISessionInteractionService, this.createInteractionService());
             reg.defineInstance(ISessionApprovalService, this.createApprovalService());
             reg.defineInstance(ISessionQuestionService, this.createQuestionService());

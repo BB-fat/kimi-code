@@ -366,7 +366,6 @@ export * from '#/workspace/workspaceHandler/workspaceHandler';
 export * from '#/workspace/workspaceHandler/workspaceHandlerService';
 export * from '#/workspace/workspaceHandler/addressing';
 export * from '#/session/sessionLifecycleHooks/sessionLifecycleHooks';
-export * from '#/session/sessionLifetime/sessionLifetime';
 export * from '#/session/externalHooks/externalHooks';
 export * from '#/session/externalHooks/externalHooksService';
 import '#/app/sessionExport/errors';

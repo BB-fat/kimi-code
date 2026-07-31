@@ -4,11 +4,9 @@
  * Owns the registry of THIS handler's open Session child scopes, creating
  * them through the DI scope tree (children of the handler's Workspace
  * scope) and seeding each with its identity, storage addressing derived
- * from the handler's `workspaceContext.persistenceScope`, a per-session
- * `sessionLifecycleHooks` slots instance it runs around create/close, and
- * a per-session `sessionLifetime` abort signal it fires synchronously when
- * a close/archive begins — before any async close hook — so in-flight
- * session work can cancel itself and drop its write-back. A close/archive
+ * from the handler's `workspaceContext.persistenceScope`, and a
+ * per-session `sessionLifecycleHooks` slots instance it runs around
+ * create/close. A close/archive
  * is tracked in a closing registry from that first synchronous step until
  * the scope is disposed: `get`/`list` hide the session while it is
  * closing, `resume` waits the close out and re-materializes instead of
@@ -122,7 +120,6 @@ import {
   sessionLifecycleHooksSeed,
   type SessionLifecycleHookSlots,
 } from '#/session/sessionLifecycleHooks/sessionLifecycleHooks';
-import { sessionLifetimeSeed } from '#/session/sessionLifetime/sessionLifetime';
 import { ISessionMetadata, type SessionMeta } from '#/session/sessionMetadata/sessionMetadata';
 import { ISessionProcessRunner } from '#/session/process/processRunner';
 import { sessionSkillCatalogDataSeed } from '#/session/sessionSkillCatalog/skillCatalogData';
@@ -188,7 +185,6 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
   readonly onDidForkSession: Event<SessionForkedEvent> = this._onDidForkSession.event;
   private readonly resuming = new Map<string, Promise<ISessionScopeHandle | undefined>>();
   private readonly closing = new Map<string, ClosingEntry>();
-  private readonly sessionLifetimes = new Map<string, AbortController>();
   private readonly reservedTargets = new Set<string>();
   private readonly pendingArchive = new Set<string>();
 
@@ -275,7 +271,6 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
       const sessionDir = handle.accessor.get(ISessionContext).sessionDir;
       if (this.sessions.get(sessionId) === handle) {
         this.sessions.delete(sessionId);
-        this.invalidateSessionLifetime(sessionId);
       }
       await this.drainAgents(handle).catch(() => {});
       handle.dispose();
@@ -313,8 +308,6 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
       'onDidCreateSession',
       'onWillCloseSession',
     ]);
-    const lifetime = new AbortController();
-    this.sessionLifetimes.set(opts.sessionId, lifetime);
     await this.hostEnv.ready;
     const handle = createScopedChildHandle(
       this.instantiation,
@@ -324,7 +317,6 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
         extra: [
           ...sessionContextSeed(ctx),
           ...sessionLifecycleHooksSeed(hooks),
-          ...sessionLifetimeSeed({ _serviceBrand: undefined, signal: lifetime.signal }),
           [ITelemetryService, this.telemetry.withContext({ sessionId: opts.sessionId })],
           // Workspace resource seeds (the §3.5 injection contracts): the
           // handler's shared skill / agent-profile catalogs, AGENTS.md
@@ -359,7 +351,6 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
       ]);
       await this.mcp.ready;
     } catch (error) {
-      this.invalidateSessionLifetime(opts.sessionId);
       handle.dispose();
       // Re-arm the explicit agent-profile loader after a fatal rejection:
       // its `ready` tracks the latest load pass, so without a reload the
@@ -473,7 +464,6 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
   }
 
   private async doClose(sessionId: string, handle: ISessionScopeHandle): Promise<void> {
-    this.invalidateSessionLifetime(sessionId);
     try {
       await this.announceWillClose({ sessionId, handle, reason: 'exit' });
     } finally {
@@ -525,7 +515,6 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
   }
 
   private async doArchive(sessionId: string, handle: ISessionScopeHandle): Promise<void> {
-    this.invalidateSessionLifetime(sessionId);
     const meta = handle.accessor.get(ISessionMetadata);
     await meta.setArchived(true);
     this.event.publish({
@@ -578,13 +567,6 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
     await event.handle.accessor
       .get(ISessionLifecycleHooks)
       .onWillCloseSession.run({ reason: event.reason });
-  }
-
-  private invalidateSessionLifetime(sessionId: string): void {
-    const lifetime = this.sessionLifetimes.get(sessionId);
-    if (lifetime === undefined) return;
-    this.sessionLifetimes.delete(sessionId);
-    lifetime.abort();
   }
 
   private async drainAgents(handle: ISessionScopeHandle): Promise<void> {
@@ -701,7 +683,6 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
         this.sessions.get(targetId) === target
       ) {
         this.sessions.delete(targetId);
-        this.invalidateSessionLifetime(targetId);
       }
       if (target !== undefined) {
         try {

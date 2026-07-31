@@ -20,7 +20,6 @@ import { createServices, type TestInstantiationService } from '#/_base/di/test';
 import { Emitter } from '#/_base/event';
 import { IOAuthService } from '#/app/auth/auth';
 import { type DomainEvent, IEventService } from '#/app/event/event';
-import { createHooks, type Hooks } from '#/hooks';
 import { HostRequestHeaders, IHostRequestHeaders } from '#/kosong/model/hostRequestHeaders';
 import {
   IProviderService,
@@ -32,11 +31,6 @@ import {
   IAgentLifecycleService,
   MAIN_AGENT_ID,
 } from '#/session/agentLifecycle/agentLifecycle';
-import {
-  ISessionLifecycleHooks,
-  type SessionLifecycleHookSlots,
-} from '#/session/sessionLifecycleHooks/sessionLifecycleHooks';
-import { ISessionLifetime } from '#/session/sessionLifetime/sessionLifetime';
 import {
   IAgentTitlePromptSource,
 } from '#/session/sessionTitle/agentTitlePromptSource';
@@ -153,8 +147,6 @@ describe('SessionTitleService', () => {
   let resolvedOAuthRefs: Array<OAuthRef | undefined>;
   let titlePrompts: readonly string[];
   let promptSourceImpl: (limit: number) => Promise<readonly string[]>;
-  let lifetimeController: AbortController;
-  let lifecycleHooks: Hooks<SessionLifecycleHookSlots>;
   let tokenCalls: boolean[];
 
   beforeEach(() => {
@@ -166,11 +158,6 @@ describe('SessionTitleService', () => {
     tokenCalls = [];
     providers = { 'managed:kimi-code': MANAGED_PROVIDER };
     metadata = new FakeSessionMetadata();
-    lifetimeController = new AbortController();
-    lifecycleHooks = createHooks<SessionLifecycleHookSlots, keyof SessionLifecycleHookSlots>([
-      'onDidCreateSession',
-      'onWillCloseSession',
-    ]);
     events = new FakeEventService();
     fetchMock = vi.fn<(url: string, init?: RequestInit) => Promise<Response>>(
       async () =>
@@ -210,11 +197,6 @@ describe('SessionTitleService', () => {
           get: () => mainAgent,
         });
         reg.defineInstance(IEventService, events);
-        reg.defineInstance(ISessionLifetime, {
-          _serviceBrand: undefined,
-          signal: lifetimeController.signal,
-        });
-        reg.defineInstance(ISessionLifecycleHooks, lifecycleHooks);
         reg.defineInstance(IProviderService, stubProviderService(providers));
         reg.definePartialInstance(IOAuthService, {
           resolveTokenProvider: (_provider, oauthRef) => {
@@ -359,113 +341,6 @@ describe('SessionTitleService', () => {
     ).resolves.toBeUndefined();
     expect(fetchMock).not.toHaveBeenCalled();
     expect(metadata.meta.title).toBe('user 取的标题');
-  });
-
-  it('drops the write-back when the lifetime signal aborts after the response arrived', async () => {
-    const pendingFetch = createPendingFetch();
-    fetchMock.mockImplementationOnce(pendingFetch.fetch);
-    const applySpy = vi.spyOn(metadata, 'setGeneratedTitleIfUncustomized');
-    titlePrompts = ['hello'];
-
-    const generation = ix.get(ISessionTitleService).generateTitle();
-    await pendingFetch.started;
-    lifetimeController.abort();
-    pendingFetch.resolve(
-      new Response(JSON.stringify({ title: '生成的标题' }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }),
-    );
-
-    await expect(generation).resolves.toBeUndefined();
-    expect(applySpy).not.toHaveBeenCalled();
-    expect(metadata.meta.title).toBeUndefined();
-  });
-
-  it('cancels the in-flight request when the lifetime signal aborts', async () => {
-    fetchMock.mockImplementationOnce(
-      async (_url, init) =>
-        new Promise<Response>((_resolve, reject) => {
-          init?.signal?.addEventListener('abort', () => {
-            reject(new DOMException('The operation was aborted.', 'AbortError'));
-          });
-        }),
-    );
-    const applySpy = vi.spyOn(metadata, 'setGeneratedTitleIfUncustomized');
-    titlePrompts = ['hello'];
-
-    const generation = ix.get(ISessionTitleService).generateTitle();
-    await vi.waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-    });
-    lifetimeController.abort();
-
-    await expect(generation).resolves.toBeUndefined();
-    expect(applySpy).not.toHaveBeenCalled();
-    expect(metadata.meta.title).toBeUndefined();
-  });
-
-  it('returns unavailable without fetching when the scope is already closing', async () => {
-    lifetimeController.abort();
-    titlePrompts = ['hello'];
-
-    await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it('drains an in-flight generation through onWillCloseSession', async () => {
-    const pendingFetch = createPendingFetch();
-    fetchMock.mockImplementationOnce(pendingFetch.fetch);
-    titlePrompts = ['hello'];
-
-    const generation = ix.get(ISessionTitleService).generateTitle();
-    await pendingFetch.started;
-
-    let reachedTerminal = false;
-    const closeRun = lifecycleHooks.onWillCloseSession
-      .run({ reason: 'exit' }, async () => {
-        reachedTerminal = true;
-      })
-      .then(() => reachedTerminal);
-    // The hook chain must be parked on the pending generation, microtask-
-    // deterministically: the terminal callback cannot run while the fetch
-    // is unresolved.
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(reachedTerminal).toBe(false);
-
-    pendingFetch.resolve(
-      new Response(JSON.stringify({ title: '生成的标题' }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }),
-    );
-    await expect(closeRun).resolves.toBe(true);
-    await expect(generation).resolves.toBe('生成的标题');
-    expect(metadata.meta.title).toBe('生成的标题');
-  });
-
-  it('drains a generation that is still collecting prompts through onWillCloseSession', async () => {
-    let resolvePrompts!: (prompts: readonly string[]) => void;
-    promptSourceImpl = async (limit) =>
-      new Promise<readonly string[]>((resolve) => {
-        resolvePrompts = (prompts) => resolve(prompts.slice(0, limit));
-      });
-
-    const generation = ix.get(ISessionTitleService).generateTitle();
-    let reachedTerminal = false;
-    const closeRun = lifecycleHooks.onWillCloseSession
-      .run({ reason: 'exit' }, async () => {
-        reachedTerminal = true;
-      })
-      .then(() => reachedTerminal);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(reachedTerminal).toBe(false);
-
-    resolvePrompts(['hello']);
-    await expect(closeRun).resolves.toBe(true);
-    await expect(generation).resolves.toBe('生成的标题');
   });
 
   it('keeps the current title when the backend request fails', async () => {

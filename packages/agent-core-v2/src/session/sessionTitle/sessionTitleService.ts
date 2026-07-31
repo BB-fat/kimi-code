@@ -11,11 +11,7 @@
  * the user is never overwritten. An already-generated title is not
  * regenerated unless forced. Plain calls coalesce onto one shared
  * in-flight generation while a forced regeneration always runs on its
- * own; the newest request always wins the write-back, which the
- * serialized metadata update drops once the scope's `sessionLifetime`
- * signal fires or a newer request supersedes it. Every active generation
- * is drained through the `sessionLifecycleHooks` `onWillCloseSession`
- * slot before the scope is disposed.
+ * own; the newest request always wins the write-back.
  * Provider config comes
  * from `provider`, the bearer token from `auth`, host identity headers from
  * `model`, prompt history from `agentLifecycle`/`sessionTitle`, and logs
@@ -35,17 +31,11 @@ import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/
 import { ILogService } from '#/_base/log/log';
 import { IOAuthService } from '#/app/auth/auth';
 import { IEventService } from '#/app/event/event';
-import type { Hooks } from '#/hooks';
 import { IAgentLifecycleService, MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
 import { IHostRequestHeaders } from '#/kosong/model/hostRequestHeaders';
 import { IProviderService } from '#/kosong/provider/provider';
 import { isOAuthCatalogVendor } from '#/kosong/provider/providerDefinition';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
-import {
-  ISessionLifecycleHooks,
-  type SessionLifecycleHookSlots,
-} from '#/session/sessionLifecycleHooks/sessionLifecycleHooks';
-import { ISessionLifetime } from '#/session/sessionLifetime/sessionLifetime';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 
 import { IAgentTitlePromptSource } from './agentTitlePromptSource';
@@ -61,36 +51,24 @@ export class SessionTitleService implements ISessionTitleService {
   declare readonly _serviceBrand: undefined;
 
   private _shared: Promise<string | undefined> | undefined;
-  private readonly _active = new Set<Promise<string | undefined>>();
   private _generationSeq = 0;
 
   constructor(
     @ISessionContext private readonly ctx: ISessionContext,
     @ISessionMetadata private readonly metadata: ISessionMetadata,
-    @ISessionLifetime private readonly lifetime: ISessionLifetime,
-    @ISessionLifecycleHooks
-    lifecycleHooks: Hooks<SessionLifecycleHookSlots>,
     @IAgentLifecycleService private readonly agentLifecycle: IAgentLifecycleService,
     @IEventService private readonly eventService: IEventService,
     @IProviderService private readonly providers: IProviderService,
     @IOAuthService private readonly oauth: IOAuthService,
     @IHostRequestHeaders private readonly hostHeaders: IHostRequestHeaders,
     @ILogService private readonly log: ILogService,
-  ) {
-    lifecycleHooks.onWillCloseSession.register('sessionTitle', async (_event, next) => {
-      await Promise.allSettled([...this._active]);
-      await next();
-    });
-  }
+  ) {}
 
   async generateTitle(options?: { readonly force?: boolean }): Promise<string | undefined> {
-    if (this.lifetime.signal.aborted) return undefined;
     if (options?.force !== true && this._shared !== undefined) return this._shared;
     const tracked = this.generateTitleOnce(options).finally(() => {
-      this._active.delete(tracked);
       if (this._shared === tracked) this._shared = undefined;
     });
-    this._active.add(tracked);
     if (options?.force !== true) this._shared = tracked;
     return tracked;
   }
@@ -147,10 +125,9 @@ export class SessionTitleService implements ISessionTitleService {
           ...this.hostHeaders.headers,
           ...provider.customHeaders,
         },
-        signal: this.lifetime.signal,
       });
     let result = await requestTitle(token);
-    if (result.kind === 'error' && result.status === 401 && !this.lifetime.signal.aborted) {
+    if (result.kind === 'error' && result.status === 401) {
       try {
         token = await tokenProvider.getAccessToken({ force: true });
       } catch (error) {
@@ -164,11 +141,10 @@ export class SessionTitleService implements ISessionTitleService {
       this.log.debug(`chat_title request failed: ${result.message}`);
       return undefined;
     }
-    if (this.lifetime.signal.aborted) return undefined;
     const title = result.title.slice(0, MAX_GENERATED_TITLE_LENGTH);
     const applied = await this.metadata.setGeneratedTitleIfUncustomized(
       title,
-      () => seq === this._generationSeq && !this.lifetime.signal.aborted,
+      () => seq === this._generationSeq,
     );
     if (!applied) return undefined;
     this.eventService.publish({
