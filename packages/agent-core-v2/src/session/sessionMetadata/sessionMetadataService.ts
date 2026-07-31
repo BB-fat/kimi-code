@@ -12,7 +12,11 @@
  * and persisted on load for documents written before the seeding existed
  * (without touching `updatedAt`, so a format heal never reorders session
  * listings) — keeping sessions on a shared `KIMI_CODE_HOME` resumable by
- * released v1 builds. Re-registering an agent whose metadata is unchanged is
+ * released v1 builds. The canonical title state is `titleKind`; every
+ * persist additionally double-writes the v1-readable `isCustomTitle`
+ * marker derived from it, and on load an explicit `isCustomTitle: true`
+ * outranks a stale `titleKind` (a v1 rename spreads the original document,
+ * so the two can disagree). Re-registering an agent whose metadata is unchanged is
  * a no-op (no write, no mirror, no event), so resuming a session — which
  * re-registers its agents as they materialize — never bumps `updatedAt` and
  * never reorders session listings. Bound at Session scope.
@@ -102,7 +106,7 @@ export class SessionMetadata extends Disposable implements ISessionMetadata {
   private async applyUpdate(patch: SessionMetaPatch): Promise<void> {
     await this.ready;
     this.data = { ...this.data, ...patch, updatedAt: Date.now() };
-    await this.store.set(this.scope, META_KEY, this.data);
+    await this.store.set(this.scope, META_KEY, encodeSessionMeta(this.data));
     await this.mirrorToReadModel();
     this._onDidChangeMetadata.fire({
       changed: Object.keys(patch) as (keyof SessionMeta)[],
@@ -185,7 +189,7 @@ export class SessionMetadata extends Disposable implements ISessionMetadata {
           agents: this.data.agents ?? {},
           custom: this.data.custom ?? {},
         };
-        await this.store.set(this.scope, META_KEY, this.data);
+        await this.store.set(this.scope, META_KEY, encodeSessionMeta(this.data));
       }
       return;
     }
@@ -200,7 +204,7 @@ export class SessionMetadata extends Disposable implements ISessionMetadata {
       agents: {},
       custom: {},
     };
-    await this.store.set(this.scope, META_KEY, this.data);
+    await this.store.set(this.scope, META_KEY, encodeSessionMeta(this.data));
     this.log.debug('session metadata created', { sessionId: this.ctx.sessionId });
   }
 }
@@ -266,11 +270,19 @@ function normalizeSessionTitle(
   raw: LegacySessionMeta,
 ): Pick<SessionMeta, 'title' | 'titleKind'> {
   const title = typeof raw.title === 'string' ? raw.title : undefined;
+  // A legacy writer's explicit custom marker outranks the `titleKind` it
+  // left behind: v1's rename spreads the original document, so a stale
+  // 'replaceable' / 'generated' travels along with `isCustomTitle: true`.
+  if (title !== undefined && raw.isCustomTitle === true) {
+    return { title, titleKind: 'custom' };
+  }
   if (title !== undefined && isSessionTitleKind(raw.titleKind)) {
     return { title, titleKind: raw.titleKind };
   }
-  if (title !== undefined && typeof raw.isCustomTitle === 'boolean') {
-    return { title, titleKind: raw.isCustomTitle ? 'custom' : 'replaceable' };
+  // The `false` marker only authors legacy documents without a titleKind —
+  // it never downgrades a modern generated/custom state (handled above).
+  if (title !== undefined && raw.isCustomTitle === false) {
+    return { title, titleKind: 'replaceable' };
   }
   if (typeof raw.customTitle === 'string') {
     return { title: raw.customTitle, titleKind: 'custom' };
@@ -282,13 +294,24 @@ function isSessionTitleKind(value: unknown): value is SessionTitleKind {
   return value === 'replaceable' || value === 'generated' || value === 'custom';
 }
 
+/**
+ * The persisted `state.json` shape: the canonical `titleKind` plus the
+ * v1-readable `isCustomTitle` marker derived from it, so released v1 builds
+ * keep honoring a custom title on sessions shared through one home.
+ */
+type PersistedSessionMeta = SessionMeta & { readonly isCustomTitle: boolean };
+
+function encodeSessionMeta(meta: SessionMeta): PersistedSessionMeta {
+  return { ...meta, isCustomTitle: meta.titleKind === 'custom' };
+}
+
 function sessionMetaTitleNeedsMigration(raw: SessionMeta, normalized: SessionMeta): boolean {
   const record = raw as unknown as Record<string, unknown>;
   return (
     raw.title !== normalized.title ||
     raw.titleKind !== normalized.titleKind ||
+    record['isCustomTitle'] !== (normalized.titleKind === 'custom') ||
     Object.hasOwn(record, 'titleSource') ||
-    Object.hasOwn(record, 'isCustomTitle') ||
     Object.hasOwn(record, 'customTitle')
   );
 }
