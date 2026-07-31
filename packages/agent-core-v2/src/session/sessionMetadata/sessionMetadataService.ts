@@ -1,5 +1,5 @@
 /**
- * `sessionMetadata` domain (L6) — `ISessionMetadata` implementation.
+ * `sessionMetadata` domain — `ISessionMetadata` implementation.
  *
  * Persists the session metadata document (`state.json`) through the `storage`
  * access-pattern store (`IAtomicDocumentStore`), rooted at the `metaScope`
@@ -29,11 +29,11 @@
  *
  * Read-model mirroring (flag `persistence_minidb_readmodel`): after a metadata
  * update is persisted, the fresh summary is mirrored into the `IQueryStore`
- * derived read model so `FileSessionIndex` can serve listings without
- * re-reading `state.json`. Mirroring is best-effort (a failure is logged, not
+ * derived read model so session listings can be served without re-reading
+ * `state.json`. Mirroring is best-effort (a failure is logged, not
  * thrown) and is a no-op when the flag is off. Initial creation in `load()` is
  * intentionally not mirrored — a not-yet-mirrored session is simply a cold
- * read-model miss that `FileSessionIndex` backfills on first read.
+ * read-model miss that is backfilled on first read.
  */
 
 import { Disposable } from '#/_base/di/lifecycle';
@@ -166,10 +166,6 @@ export class SessionMetadata extends Disposable implements ISessionMetadata {
         lastPrompt: this.data.lastPrompt,
         createdAt: this.data.createdAt,
         updatedAt: this.data.updatedAt,
-        // `data.archived` stays undefined for sessions whose state.json
-        // predates the field; the read-model contract requires a boolean
-        // (`readSummary` normalizes the same way), so an undefined here would
-        // poison the cache entry and fail contract validation on reads.
         archived: this.data.archived === true,
         custom: this.data.custom,
       });
