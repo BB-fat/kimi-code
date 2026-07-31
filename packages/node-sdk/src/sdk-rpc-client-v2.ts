@@ -402,14 +402,16 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    */
   private readonly sessionWirings = new Map<string, SessionEventWiring>();
   /**
-   * Sessions a public `resumeSession` handed to a caller and has not closed
-   * yet. The temporary resume→act→close paths (`generateSessionTitle`,
-   * `renameSession`) skip their cleanup close for these, even though their
-   * own resume merged into the same live handle — the residual
-   * sub-millisecond window (a public resume landing between the check and
-   * the close) is accepted deliberately.
+   * Per-session serialization for the operations that change a session's
+   * live ownership: the temporary resume→act→close paths (`renameSession`,
+   * `generateSessionTitle`) and the public `resumeSession` / `closeSession`
+   * / `reloadSession`. Chaining them through one queue per session id makes
+   * the handoff atomic — a public resume either lands first (the temporary
+   * path then reuses the live handle and leaves it open) or waits for the
+   * temporary close to finish and materializes a fresh scope, so a caller
+   * can never receive a handle whose close is already in flight.
    */
-  private readonly externallyHeldSessions = new Set<string>();
+  private readonly sessionAccessQueues = new Map<string, Promise<void>>();
   /** App-scope subscriptions (global event forwarding, lifecycle tracking), disposed in {@link close}. */
   private readonly appSubscriptions: IDisposable[] = [];
 
@@ -725,6 +727,49 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     return getLiveSessionById(this.engineAccessor, sessionId);
   }
 
+  /**
+   * Runs `work` after every previously queued operation on the same session
+   * settles; different sessions still run in parallel. The map entry drops
+   * itself once the queue drains.
+   */
+  private runSessionAccess<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
+    const previous = this.sessionAccessQueues.get(sessionId) ?? Promise.resolve();
+    const run = previous.then(work, work);
+    const tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.sessionAccessQueues.set(sessionId, tail);
+    void tail.then(() => {
+      if (this.sessionAccessQueues.get(sessionId) === tail) {
+        this.sessionAccessQueues.delete(sessionId);
+      }
+    });
+    return run;
+  }
+
+  /**
+   * Runs `action` against the session without changing its live footprint: a
+   * session that is already live (publicly resumed or created through this
+   * client) is used in place and left open, while a cold session is resumed
+   * for the duration of the action and closed again. Only safe inside
+   * {@link runSessionAccess} — the queue is what makes the resume/close pair
+   * atomic against the public lifecycle operations.
+   */
+  private async withTemporarySession<T>(
+    sessionId: string,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    if (this.liveSession(sessionId) !== undefined) return action();
+    const handle = await resumeSessionById(this.engineAccessor, sessionId);
+    if (handle === undefined) throw SDKRpcClientV2.sessionNotFound(sessionId);
+    try {
+      return await action();
+    } finally {
+      await closeSessionById(this.engineAccessor, sessionId);
+    }
+  }
+
   /** v1's `requireSession` / store lookup failure shape. */
   private static sessionNotFound(sessionId: string): KimiError {
     return new KimiError(ErrorCodes.SESSION_NOT_FOUND, `Session "${sessionId}" was not found`, {
@@ -770,6 +815,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     return {
       id: meta.id,
       title: meta.title,
+      titleKind: meta.titleKind,
       lastPrompt: meta.lastPrompt,
       workDir: ctx.cwd,
       sessionDir: ctx.sessionDir,
@@ -1012,19 +1058,9 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     if (title.length === 0) {
       throw new KimiError(ErrorCodes.SESSION_TITLE_EMPTY, 'Session title cannot be empty');
     }
-    if (this.liveSession(input.id) !== undefined) {
-      await this.klient.session(input.id).setTitle(title);
-      return;
-    }
-    const handle = await resumeSessionById(this.engineAccessor, input.id);
-    if (handle === undefined) throw SDKRpcClientV2.sessionNotFound(input.id);
-    try {
-      await this.klient.session(input.id).setTitle(title);
-    } finally {
-      if (!this.externallyHeldSessions.has(input.id)) {
-        await closeSessionById(this.engineAccessor, input.id);
-      }
-    }
+    await this.runSessionAccess(input.id, () =>
+      this.withTemporarySession(input.id, () => this.klient.session(input.id).setTitle(title)),
+    );
   }
 
   /**
@@ -1037,18 +1073,11 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   override async generateSessionTitle(
     input: GenerateSessionTitleInput,
   ): Promise<string | undefined> {
-    if (this.liveSession(input.id) !== undefined) {
-      return this.klient.session(input.id).generateTitle({ force: input.force });
-    }
-    const handle = await resumeSessionById(this.engineAccessor, input.id);
-    if (handle === undefined) throw SDKRpcClientV2.sessionNotFound(input.id);
-    try {
-      return await this.klient.session(input.id).generateTitle({ force: input.force });
-    } finally {
-      if (!this.externallyHeldSessions.has(input.id)) {
-        await closeSessionById(this.engineAccessor, input.id);
-      }
-    }
+    return this.runSessionAccess(input.id, () =>
+      this.withTemporarySession(input.id, () =>
+        this.klient.session(input.id).generateTitle({ force: input.force }),
+      ),
+    );
   }
 
   /**
@@ -1082,8 +1111,9 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   override async closeSession(input: SessionIdRpcInput): Promise<void> {
     // v1's print-steer counters die with the Session object; drop ours too.
     this.printSteerStates.delete(input.sessionId);
-    this.externallyHeldSessions.delete(input.sessionId);
-    await this.klient.session(input.sessionId).close();
+    await this.runSessionAccess(input.sessionId, () =>
+      this.klient.session(input.sessionId).close(),
+    );
   }
 
   /**
@@ -1102,15 +1132,16 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     // scope is materialized. Unlike v1, the v2
     // engine has no caller `mcpServers` channel on create/resume (caller
     // servers are an ACP-side concern to be designed separately).
-    const handle = await resumeSessionById(this.engineAccessor, input.id, {
-      additionalDirs: input.additionalDirs,
-    });
-    if (handle === undefined) throw SDKRpcClientV2.sessionNotFound(input.id);
-    this.wireSession(handle);
-    this.externallyHeldSessions.add(input.id);
-    return this.resumedSessionSummary(handle, {
-      includeSubagents: input.includeSubagents,
-      replayTurnLimit: input.replayTurnLimit,
+    return this.runSessionAccess(input.id, async () => {
+      const handle = await resumeSessionById(this.engineAccessor, input.id, {
+        additionalDirs: input.additionalDirs,
+      });
+      if (handle === undefined) throw SDKRpcClientV2.sessionNotFound(input.id);
+      this.wireSession(handle);
+      return this.resumedSessionSummary(handle, {
+        includeSubagents: input.includeSubagents,
+        replayTurnLimit: input.replayTurnLimit,
+      });
     });
   }
 
@@ -1124,33 +1155,35 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    */
   override async reloadSession(input: ReloadSessionRpcInput): Promise<ResumedSessionSummary> {
     const sessionId = input.sessionId;
-    const live = this.liveSession(sessionId);
-    if (live !== undefined) {
-      for (const agent of live.accessor.get(IAgentLifecycleService).list()) {
-        if (agent.accessor.get(IAgentActivityView).state().turn !== undefined) {
-          throw new KimiError(
-            ErrorCodes.TURN_AGENT_BUSY,
-            `Session "${sessionId}" cannot be reloaded while a turn is running`,
-            { details: { sessionId } },
-          );
+    return this.runSessionAccess(sessionId, async () => {
+      const live = this.liveSession(sessionId);
+      if (live !== undefined) {
+        for (const agent of live.accessor.get(IAgentLifecycleService).list()) {
+          if (agent.accessor.get(IAgentActivityView).state().turn !== undefined) {
+            throw new KimiError(
+              ErrorCodes.TURN_AGENT_BUSY,
+              `Session "${sessionId}" cannot be reloaded while a turn is running`,
+              { details: { sessionId } },
+            );
+          }
         }
+      } else if ((await this.engineAccessor.get(ISessionIndex).get(sessionId)) === undefined) {
+        throw SDKRpcClientV2.sessionNotFound(sessionId);
       }
-    } else if ((await this.engineAccessor.get(ISessionIndex).get(sessionId)) === undefined) {
-      throw SDKRpcClientV2.sessionNotFound(sessionId);
-    }
-    await this.configReady;
-    await this.klient.global.config.reload();
-    await this.klient.global.plugins.reload();
-    if (live !== undefined) {
-      await closeSessionById(this.engineAccessor, sessionId);
-    }
-    // Same print-steer reset as closeSession: v1's reload rebuilds the
-    // Session, and with it the counters.
-    this.printSteerStates.delete(sessionId);
-    const handle = await resumeSessionById(this.engineAccessor, sessionId);
-    if (handle === undefined) throw SDKRpcClientV2.sessionNotFound(sessionId);
-    this.wireSession(handle);
-    return this.resumedSessionSummary(handle);
+      await this.configReady;
+      await this.klient.global.config.reload();
+      await this.klient.global.plugins.reload();
+      if (live !== undefined) {
+        await closeSessionById(this.engineAccessor, sessionId);
+      }
+      // Same print-steer reset as closeSession: v1's reload rebuilds the
+      // Session, and with it the counters.
+      this.printSteerStates.delete(sessionId);
+      const handle = await resumeSessionById(this.engineAccessor, sessionId);
+      if (handle === undefined) throw SDKRpcClientV2.sessionNotFound(sessionId);
+      this.wireSession(handle);
+      return this.resumedSessionSummary(handle);
+    });
   }
 
   /**

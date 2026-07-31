@@ -170,4 +170,60 @@ describe('session auto title generation', () => {
 
     expect(harness.generateSessionTitle).toHaveBeenCalledTimes(2);
   });
+
+  it.each(['generated', 'custom'] as const)(
+    'stops requesting when the resumed session already has a %s title',
+    (titleKind) => {
+      const { host, harness } = makeHost();
+      const handler = new SessionEventHandler(host);
+
+      handler.syncTitleGenerationGate(titleKind);
+      handler.handleEvent(turnEndedEvent(), vi.fn());
+
+      expect(harness.generateSessionTitle).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['replaceable', undefined] as const)(
+    'keeps requesting when the resumed title state is %s',
+    (titleKind) => {
+      const { host, harness } = makeHost();
+      const handler = new SessionEventHandler(host);
+
+      handler.syncTitleGenerationGate(titleKind);
+      handler.handleEvent(turnEndedEvent(), vi.fn());
+
+      expect(harness.generateSessionTitle).toHaveBeenCalledWith({ id: 's1' });
+    },
+  );
+
+  it('re-opens the gate on runtime reset for a session seeded as settled', () => {
+    const { host, harness } = makeHost();
+    const handler = new SessionEventHandler(host);
+
+    handler.syncTitleGenerationGate('generated');
+    handler.resetRuntimeState();
+    handler.handleEvent(turnEndedEvent(), vi.fn());
+
+    expect(harness.generateSessionTitle).toHaveBeenCalledWith({ id: 's1' });
+  });
+
+  it('stops requesting after a custom rename event arrives', () => {
+    const { host, harness } = makeHost();
+    const handler = new SessionEventHandler(host);
+
+    handler.handleEvent(
+      {
+        type: 'session.meta.updated',
+        agentId: 'main',
+        sessionId: 's1',
+        title: '用户手工标题',
+        patch: { title: '用户手工标题', isCustomTitle: true },
+      } as const,
+      vi.fn(),
+    );
+    handler.handleEvent(turnEndedEvent(), vi.fn());
+
+    expect(harness.generateSessionTitle).not.toHaveBeenCalled();
+  });
 });

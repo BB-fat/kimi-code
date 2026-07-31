@@ -27,7 +27,12 @@ import {
   type Event,
 } from '#/index';
 import { foldAgentWireReplay } from '#/v2/resume-replay';
-import { IHostRequestHeaders } from '@moonshot-ai/agent-core-v2';
+import {
+  IHostRequestHeaders,
+  ISessionLifecycleHooks,
+  IWorkspaceHandlerService,
+  IWorkspaceLifecycleService,
+} from '@moonshot-ai/agent-core-v2';
 
 import { TEST_IDENTITY } from './test-identity';
 import { recordingTelemetry, type TelemetryRecord } from './telemetry';
@@ -182,6 +187,137 @@ key = "${titleOAuthRef.key}"
       ]);
     } finally {
       await harness.close();
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('serializes a temporary title-generation close against a public resume', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-'));
+    tempDirs.push(homeDir);
+    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-work-'));
+    tempDirs.push(workDir);
+    const titleBaseUrl = 'https://api.example.test/coding/v1';
+    const titleOAuthRef = resolveKimiCodeOAuthRef({ baseUrl: titleBaseUrl });
+    await new FileTokenStorage(join(homeDir, 'credentials')).save(
+      resolveKimiTokenStorageName({ oauthKey: titleOAuthRef.key }),
+      {
+        accessToken: 'test-access-token',
+        refreshToken: 'test-refresh-token',
+        expiresAt: Math.floor(Date.now() / 1000) + 3600,
+        scope: '',
+        tokenType: 'Bearer',
+        expiresIn: 3600,
+      },
+    );
+    await writeFile(
+      join(homeDir, 'config.toml'),
+      `
+default_model = "stub"
+
+[providers.stub]
+type = "openai"
+base_url = "https://model.example.test/v1"
+api_key = "stub"
+
+[models.stub]
+provider = "stub"
+model = "stub"
+max_context_size = 1000
+
+[providers."managed:kimi-code"]
+type = "kimi"
+base_url = "${titleBaseUrl}"
+
+[providers."managed:kimi-code".oauth]
+storage = "file"
+key = "${titleOAuthRef.key}"
+`,
+      'utf-8',
+    );
+    let markFetchStarted!: () => void;
+    let resolveFetch!: (response: Response) => void;
+    const fetchStarted = new Promise<void>((resolve) => {
+      markFetchStarted = resolve;
+    });
+    const fetchResponse = new Promise<Response>((resolve) => {
+      resolveFetch = resolve;
+    });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url === 'https://api.example.test/coding/v1/tools') {
+        markFetchStarted();
+        return fetchResponse;
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    const client = new SDKRpcClientV2({ homeDir, identity: TEST_IDENTITY });
+
+    try {
+      await client.createSession({ id: 'ses_title_race', workDir });
+      await client.importContext({
+        sessionId: 'ses_title_race',
+        content: 'Generate a concise title for this session',
+        source: "session 'source-session'",
+      });
+      await client.closeSession({ sessionId: 'ses_title_race' });
+
+      // The cold session is temporarily resumed for generation; block its
+      // cleanup close inside the will-close hooks so the public resume below
+      // lands while the close is still in flight.
+      const titlePromise = client.generateSessionTitle({ id: 'ses_title_race' });
+      await fetchStarted;
+      const handler = await client.engineAccessor
+        .get(IWorkspaceLifecycleService)
+        .handlerFor({ root: workDir });
+      const tempHandle = handler.accessor.get(IWorkspaceHandlerService).get('ses_title_race');
+      expect(tempHandle).toBeDefined();
+      let markCloseStarted!: () => void;
+      let openCloseGate!: () => void;
+      const closeStarted = new Promise<void>((resolve) => {
+        markCloseStarted = resolve;
+      });
+      const closeGate = new Promise<void>((resolve) => {
+        openCloseGate = resolve;
+      });
+      tempHandle!.accessor
+        .get(ISessionLifecycleHooks)
+        .onWillCloseSession.register('test-block', async (_event, next) => {
+          markCloseStarted();
+          await closeGate;
+          await next();
+        });
+
+      resolveFetch(
+        new Response(JSON.stringify({ title: 'Generated title' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+      await closeStarted;
+
+      // The resume must queue behind the in-flight close instead of merging
+      // into the handle that is being torn down.
+      const order: string[] = [];
+      const resumePromise = client.resumeSession({ id: 'ses_title_race' }).then((summary) => {
+        order.push('resumed');
+        return summary;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(order).toEqual([]);
+
+      openCloseGate();
+      await expect(titlePromise).resolves.toBe('Generated title');
+      const summary = await resumePromise;
+      expect(summary.id).toBe('ses_title_race');
+      expect(order).toEqual(['resumed']);
+
+      // The resumed session is a fresh, fully usable scope — not the handle
+      // the temporary path just tore down.
+      await client.renameSession({ id: 'ses_title_race', title: 'Resumed title' });
+      const sessions = await client.listSessions({ workDir });
+      expect(sessions.find((item) => item.id === 'ses_title_race')?.title).toBe('Resumed title');
+    } finally {
+      await client.close();
       fetchSpy.mockRestore();
     }
   });

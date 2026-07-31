@@ -17,6 +17,7 @@ import type {
   KimiHarness,
   Session,
   SessionMetaUpdatedEvent,
+  SessionTitleKind,
   SkillActivatedEvent,
   PluginCommandActivatedEvent,
   ThinkingDeltaEvent,
@@ -392,6 +393,19 @@ export class SessionEventHandler {
     this.pluginMcpToolsUsedInTurn.clear();
     this.requestSessionTitleGeneration();
     this.scheduleQueuedGoalPromotion();
+  }
+
+  /**
+   * Seeds the title-generation gate from the persisted title state (read off
+   * the resumed session's summary): a session whose title was already
+   * generated or customized has nothing left to ask for, so later turns skip
+   * the internally no-op generation call. Only ever closes the gate —
+   * reopening stays with `resetRuntimeState` on a session switch.
+   */
+  syncTitleGenerationGate(titleKind: SessionTitleKind | undefined): void {
+    if (titleKind === 'generated' || titleKind === 'custom') {
+      this.titleGenerationDisabled = true;
+    }
   }
 
   /**
@@ -927,6 +941,11 @@ export class SessionEventHandler {
     if (title !== undefined) {
       this.host.setAppState({ sessionTitle: title });
       this.host.updateTerminalTitle();
+    }
+    // A custom rename (here or by another client) settles title generation:
+    // the engine would only keep returning undefined for it.
+    if (event.patch?.['isCustomTitle'] === true) {
+      this.titleGenerationDisabled = true;
     }
   }
 

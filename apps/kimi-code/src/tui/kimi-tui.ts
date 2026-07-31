@@ -1591,6 +1591,7 @@ export class KimiTUI {
       sessionTitle: session.summary?.title ?? null,
       goal: goalResult.goal,
     });
+    this.sessionEventHandler.syncTitleGenerationGate(session.summary?.titleKind);
     this.syncAdditionalDirs(session);
   }
 
