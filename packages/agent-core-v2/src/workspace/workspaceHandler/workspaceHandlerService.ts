@@ -12,11 +12,16 @@
  * is tracked in a closing registry from that first synchronous step until
  * the scope is disposed: `get`/`list` hide the session while it is
  * closing, `resume` waits the close out and re-materializes instead of
- * returning the doomed handle, and a failing close hook never strands the
- * teardown. A duplicate close joins the in-flight one, while an archive
- * arriving during a plain close waits it out and then lands the archived
- * flag directly on the persisted document (it never rides the close to
- * success without archiving),
+ * returning the doomed handle (retrying the same way when the close
+ * itself failed), and the teardown always completes even when a close
+ * hook or the agent drain fails. An archive requested during a plain
+ * close is folded into it: the live metadata applies the archived flag
+ * before the teardown when reached in time, otherwise the flag lands
+ * directly on the persisted document (a cold archive takes that direct
+ * path as well), and the archived event is published either way. Create
+ * and fork reserve their target id synchronously with the existence
+ * check, so a loser of that race is rejected before it materializes and
+ * its rollback can only ever tear down its own scope,
  * tearing sessions down on close/archive — archiving flags the session's
  * `sessionMetadata`, removes its `agentLifecycle` agents, restoring clears
  * the archived flag, and broadcasts through `event`; session start and
@@ -185,6 +190,7 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
   private readonly closing = new Map<string, ClosingEntry>();
   private readonly sessionLifetimes = new Map<string, AbortController>();
   private readonly reservedTargets = new Set<string>();
+  private readonly pendingArchive = new Set<string>();
 
   constructor(
     @IInstantiationService private readonly instantiation: IInstantiationService,
@@ -267,8 +273,10 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
     } catch (error) {
       // Roll back ONLY the session directory — the handler stays live.
       const sessionDir = handle.accessor.get(ISessionContext).sessionDir;
-      this.sessions.delete(sessionId);
-      this.invalidateSessionLifetime(sessionId);
+      if (this.sessions.get(sessionId) === handle) {
+        this.sessions.delete(sessionId);
+        this.invalidateSessionLifetime(sessionId);
+      }
       await this.drainAgents(handle).catch(() => {});
       handle.dispose();
       await this.hostFs.remove(sessionDir).catch(() => {});
@@ -402,9 +410,10 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
     if (inflight !== undefined) return inflight;
     const closing = this.closing.get(sessionId);
     if (closing !== undefined) {
-      // A close is already in flight — wait it out and re-materialize
-      // instead of handing back the doomed handle.
-      return closing.run.then(() => this.resume(sessionId, opts));
+      return closing.run.then(
+        () => this.resume(sessionId, opts),
+        () => this.resume(sessionId, opts),
+      );
     }
     const live = this.sessions.get(sessionId);
     if (live !== undefined) return Promise.resolve(live);
@@ -468,10 +477,24 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
     try {
       await this.announceWillClose({ sessionId, handle, reason: 'exit' });
     } finally {
-      // A failing close hook must not strand the session half-open: the
-      // teardown always completes; the hook error still reaches the caller.
+      if (this.pendingArchive.has(sessionId)) {
+        const archived = await handle.accessor
+          .get(ISessionMetadata)
+          .setArchived(true)
+          .then(
+            () => true,
+            () => false,
+          );
+        if (archived) {
+          this.pendingArchive.delete(sessionId);
+          this.event.publish({
+            type: 'event.session.archived',
+            payload: { sessionId },
+          });
+        }
+      }
       this.sessions.delete(sessionId);
-      await this.drainAgents(handle);
+      await this.drainAgents(handle).catch(() => {});
       handle.dispose();
       this._onDidCloseSession.fire({ sessionId });
     }
@@ -481,26 +504,30 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
     const inflight = this.closing.get(sessionId);
     if (inflight !== undefined) {
       if (inflight.kind === 'archive') return inflight.run;
-      // A plain close is already tearing the session down — the archive
-      // must not ride it to success. Wait it out (tracked, so a resume
-      // queues behind the marker write), then land the archived flag
-      // directly on the persisted document of the now-closed session.
-      return this.trackClosing(
-        sessionId,
-        'archive',
-        inflight.run.then(() => this.markArchivedOnDisk(sessionId)),
+      this.pendingArchive.add(sessionId);
+      return inflight.run.then(
+        () => this.consumePendingArchive(sessionId),
+        () => this.consumePendingArchive(sessionId),
       );
     }
     const handle = this.sessions.get(sessionId);
-    if (handle === undefined) return;
+    if (handle === undefined) {
+      await this.markArchivedOnDisk(sessionId);
+      return;
+    }
     return this.trackClosing(sessionId, 'archive', this.doArchive(sessionId, handle));
+  }
+
+  private async consumePendingArchive(sessionId: string): Promise<void> {
+    if (this.pendingArchive.delete(sessionId)) {
+      await this.markArchivedOnDisk(sessionId);
+    }
   }
 
   private async doArchive(sessionId: string, handle: ISessionScopeHandle): Promise<void> {
     this.invalidateSessionLifetime(sessionId);
     const meta = handle.accessor.get(ISessionMetadata);
     await meta.setArchived(true);
-    await this.drainAgents(handle);
     this.event.publish({
       type: 'event.session.archived',
       payload: { sessionId },
@@ -509,6 +536,7 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
       await this.announceWillClose({ sessionId, handle, reason: 'exit' });
     } finally {
       this.sessions.delete(sessionId);
+      await this.drainAgents(handle).catch(() => {});
       handle.dispose();
       this._onDidArchiveSession.fire({ sessionId });
     }
@@ -519,6 +547,11 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
     const meta = await this.docs.get<SessionMeta>(scope, 'state.json');
     if (meta === undefined) return;
     await this.docs.set(scope, 'state.json', { ...meta, archived: true, updatedAt: Date.now() });
+    this.event.publish({
+      type: 'event.session.archived',
+      payload: { sessionId },
+    });
+    this._onDidArchiveSession.fire({ sessionId });
   }
 
   private async trackClosing(
@@ -564,9 +597,6 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
   async fork(opts: ForkSessionOptions): Promise<ISessionScopeHandle> {
     const sourceId = opts.sourceSessionId;
 
-    // Wait out an in-flight close of the source instead of capturing its
-    // doomed handle (a close starting mid-fork remains an accepted,
-    // pre-existing window — fork never quiesces the source).
     await this.closing.get(sourceId)?.run;
     const sourceHandle = this.sessions.get(sourceId);
     const indexSummary = await this.index.get(sourceId);
@@ -602,9 +632,6 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
           `Session "${targetId}" already exists`,
         );
       }
-      // The check and the reservation are one synchronous step: a concurrent
-      // create/fork of the same target id loses before either materializes,
-      // so the loser can never tear down the winner's scope or directory.
       this.reservedTargets.add(targetId);
       targetReserved = true;
       if ((await this.index.get(targetId)) !== undefined) {
@@ -668,7 +695,11 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
       await this.announceCreated({ sessionId: targetId, handle: target, source: 'fork' });
       return target;
     } catch (error) {
-      if (targetId !== undefined) {
+      if (
+        targetId !== undefined &&
+        target !== undefined &&
+        this.sessions.get(targetId) === target
+      ) {
         this.sessions.delete(targetId);
         this.invalidateSessionLifetime(targetId);
       }

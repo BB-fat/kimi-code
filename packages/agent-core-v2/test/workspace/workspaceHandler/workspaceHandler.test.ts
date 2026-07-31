@@ -648,24 +648,19 @@ describe('WorkspaceHandlerService', () => {
     expect(svc.get('s1')).toBe(fresh);
   });
 
-  it('archive during a plain close waits it out and lands the archived flag on disk', async () => {
-    const docs = new Map<string, unknown>();
-    const docStore = {
-      _serviceBrand: undefined,
-      get: (scope: string, key: string) => Promise.resolve(docs.get(`${scope}/${key}`)),
-      set: (scope: string, key: string, value: unknown) => {
-        docs.set(`${scope}/${key}`, value);
-        return Promise.resolve();
-      },
-      delete: () => Promise.resolve(),
-      list: () => Promise.resolve([]),
-      watch: () => (_listener: unknown) => ({ dispose: () => {} }),
-      acquire: () => ({ dispose: () => {} }),
-    } as unknown as IAtomicDocumentStore;
-    const svc = await build([stubPair(IAtomicDocumentStore, docStore)]);
+  it('archive during a plain close is folded into the close through the live metadata', async () => {
+    const setArchived = vi.fn(() => Promise.resolve());
+    const published: string[] = [];
+    const svc = await build([
+      stubPair(ISessionMetadata, { ...metadataStub(), setArchived }),
+      stubPair(IEventService, {
+        ...eventStub(),
+        publish: (event: { readonly type: string }) => {
+          published.push(event.type);
+        },
+      } as IEventService),
+    ]);
     const original = await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
-    const metaKey = `${original.accessor.get(ISessionContext).metaScope}/state.json`;
-    docs.set(metaKey, { id: 's1', version: 2, createdAt: 1, updatedAt: 1, archived: false });
 
     let releaseClose!: () => void;
     const closeGate = new Promise<void>((resolve) => {
@@ -685,9 +680,111 @@ describe('WorkspaceHandlerService', () => {
     await closing;
     await archived;
 
-    // The archive must not ride the close: the marker lands on the persisted
-    // document after the close completes.
+    // The archive rides the close's own teardown through the live metadata
+    // — it never becomes a detached on-disk write.
+    expect(setArchived).toHaveBeenCalledWith(true);
+    expect(published).toContain('event.session.archived');
+  });
+
+  it('archives a cold session by writing the persisted document and emitting the event', async () => {
+    const docs = new Map<string, unknown>();
+    const docStore = {
+      _serviceBrand: undefined,
+      get: (scope: string, key: string) => Promise.resolve(docs.get(`${scope}/${key}`)),
+      set: (scope: string, key: string, value: unknown) => {
+        docs.set(`${scope}/${key}`, value);
+        return Promise.resolve();
+      },
+      delete: () => Promise.resolve(),
+      list: () => Promise.resolve([]),
+      watch: () => (_listener: unknown) => ({ dispose: () => {} }),
+      acquire: () => ({ dispose: () => {} }),
+    } as unknown as IAtomicDocumentStore;
+    const published: string[] = [];
+    const svc = await build([
+      stubPair(IAtomicDocumentStore, docStore),
+      stubPair(IEventService, {
+        ...eventStub(),
+        publish: (event: { readonly type: string }) => {
+          published.push(event.type);
+        },
+      } as IEventService),
+    ]);
+    const original = await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
+    const metaKey = `${original.accessor.get(ISessionContext).metaScope}/state.json`;
+    docs.set(metaKey, { id: 's1', version: 2, createdAt: 1, updatedAt: 1, archived: false });
+    await svc.close('s1');
+
+    await svc.archive('s1');
+
     expect(docs.get(metaKey)).toMatchObject({ archived: true });
+    expect(published).toContain('event.session.archived');
+  });
+
+  it('resume retries and succeeds after a close whose hook failed', async () => {
+    const svc = await build([
+      stubPair(IWorkspaceService, persistentWorkspaceStub()),
+      stubPair(ISessionIndex, sessionIndexWithSummary('s1', '/tmp/proj')),
+      stubPair(IAgentLifecycleService, agentLifecycleWithMainStub()),
+    ]);
+    const original = await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
+
+    let releaseClose!: () => void;
+    const closeGate = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    original.accessor
+      .get(ISessionLifecycleHooks)
+      .onWillCloseSession.register('test-boom', async (_event, next) => {
+        await closeGate;
+        await next();
+        throw new Error('hook boom');
+      });
+
+    const closing = svc.close('s1');
+    const resumed = svc.resume('s1');
+    releaseClose();
+
+    await expect(closing).rejects.toThrow('hook boom');
+    // The resume waited on the failed close and retried into a cold restore.
+    await expect(resumed).resolves.toBeDefined();
+    expect(svc.get('s1')).toBe(await resumed);
+  });
+
+  it('completes the teardown even when the agent drain fails', async () => {
+    const stuckAgent = {
+      id: 'a1',
+      kind: LifecycleScope.Agent,
+      accessor: {
+        get: () => {
+          throw new Error('unexpected service access');
+        },
+      },
+      dispose: () => {},
+    } as unknown as IAgentScopeHandle;
+    const svc = await build([
+      stubPair(IAgentLifecycleService, {
+        ...agentLifecycleStub(),
+        list: () => [stuckAgent],
+        remove: () => Promise.reject(new Error('drain boom')),
+      }),
+    ]);
+    await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
+
+    await svc.close('s1');
+    expect(svc.get('s1')).toBeUndefined();
+  });
+
+  it('a rejected same-target fork leaves the earlier fork handle live', async () => {
+    const svc = await build();
+    await svc.create({ sessionId: 'src', workDir: '/tmp/proj' });
+    const first = await svc.fork({ sourceSessionId: 'src', newSessionId: 'dst' });
+
+    await expect(svc.fork({ sourceSessionId: 'src', newSessionId: 'dst' })).rejects.toMatchObject({
+      code: ErrorCodes.SESSION_ALREADY_EXISTS,
+    });
+
+    expect(svc.get('dst')).toBe(first);
   });
 
   it('still completes the teardown when a close hook fails', async () => {
