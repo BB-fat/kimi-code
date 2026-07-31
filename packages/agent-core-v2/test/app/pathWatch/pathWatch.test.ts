@@ -144,6 +144,71 @@ describe('path watch (shared handles and path state)', () => {
     ]);
   });
 
+  it('forwards descendant deletions without re-probing the watched root', async () => {
+    const directories = new Set(['/workspace', '/workspace/skills']);
+    const statCalls: string[] = [];
+    const hostFs = createFakeHostFs({
+      stat: async (path) => {
+        statCalls.push(path);
+        if (!directories.has(path)) throw new Error(`ENOENT: ${path}`);
+        return { isFile: false, isDirectory: true, size: 0 };
+      },
+      realpath: async (path) => path,
+    });
+    const raw = stubHostFsWatch();
+    const monitor = build(hostFs, raw);
+    const events: PathWatchEvent[] = [];
+    const watch = monitor.createWatch(
+      { ...SKILL_ROOT_WATCH_OPTIONS, debounceMs: 0 },
+      (event) => {
+        events.push(event);
+      },
+    );
+    await watch.setPaths(['/workspace/skills']);
+    statCalls.length = 0;
+
+    raw.fire('/workspace/skills/review/SKILL.md', {
+      action: 'deleted',
+      kind: 'file',
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(events).toEqual([
+      {
+        watchedPath: '/workspace/skills',
+        canonicalPath: '/workspace/skills',
+        change: {
+          path: '/workspace/skills/review/SKILL.md',
+          action: 'deleted',
+          kind: 'file',
+        },
+      },
+    ]);
+    expect(statCalls).toEqual([]);
+  });
+
+  it('re-arms the nearest ancestor when the watched root is deleted', async () => {
+    const directories = new Set(['/workspace', '/workspace/skills']);
+    const raw = stubHostFsWatch();
+    const monitor = build(mutableDirectoryFs(directories), raw);
+    const watch = monitor.createWatch(
+      { ...SKILL_ROOT_WATCH_OPTIONS, debounceMs: 0 },
+      () => {},
+    );
+    await watch.setPaths(['/workspace/skills']);
+
+    directories.delete('/workspace/skills');
+    raw.fire('/workspace/skills', {
+      action: 'deleted',
+      kind: 'directory',
+    });
+
+    await vi.waitFor(() => {
+      expect(raw.watchedPaths()).toEqual(['/workspace']);
+    });
+  });
+
   it('advances from the nearest existing ancestor when a deep missing root appears', async () => {
     const directories = new Set(['/root']);
     const raw = stubHostFsWatch();

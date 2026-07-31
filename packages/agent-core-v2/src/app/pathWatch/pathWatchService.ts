@@ -312,7 +312,12 @@ export class PathWatchService extends Disposable implements IPathWatchService {
   private onTargetChange(state: SharedPathState, change: HostFsChange): void {
     if (!this.isStateLive(state)) return;
     this.notify(state, change);
-    if (change.action === 'deleted') void this.queueAdvance(state);
+    if (
+      change.action === 'deleted' &&
+      normalizePath(change.path) === state.canonicalTarget
+    ) {
+      void this.queueAdvance(state);
+    }
   }
 
   private onLexicalParentChange(state: SharedPathState, change: HostFsChange): void {
