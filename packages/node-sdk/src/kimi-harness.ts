@@ -141,7 +141,12 @@ export class KimiHarness {
   async resumeSession(input: ResumeSessionInput): Promise<Session> {
     const id = normalizeSessionId(input.id);
     const active = this.activeSessions.get(id);
-    const { kaos, persistenceKaos, sessionStartedProperties, ...resumeInput } = input;
+    const {
+      kaos,
+      persistenceKaos,
+      sessionStartedProperties: _sessionStartedProperties,
+      ...resumeInput
+    } = input;
     // A session whose close is in flight (`isClosed` but not yet unmapped)
     // is not a valid resume target — fall through and re-resume fresh, which
     // the engine serializes behind that close.
