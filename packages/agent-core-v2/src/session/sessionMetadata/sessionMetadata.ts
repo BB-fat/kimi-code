@@ -25,12 +25,13 @@ export interface AgentMeta {
 
 export const SESSION_META_VERSION = 2;
 
+export type SessionTitleKind = 'replaceable' | 'generated' | 'custom';
+
 export interface SessionMeta {
   readonly id: string;
   readonly version?: number;
   readonly title?: string;
-  readonly titleSource?: 'prompt' | 'generated' | 'custom';
-  readonly isCustomTitle?: boolean;
+  readonly titleKind?: SessionTitleKind;
   readonly lastPrompt?: string;
   readonly createdAt: number;
   readonly updatedAt: number;

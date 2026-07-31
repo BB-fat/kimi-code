@@ -93,7 +93,7 @@ describe('SessionMetadata', () => {
     const meta = ix.get(ISessionMetadata);
     await meta.setTitle('t');
     await meta.setArchived(true);
-    expect(await meta.read()).toMatchObject({ title: 't', titleSource: 'custom', archived: true });
+    expect(await meta.read()).toMatchObject({ title: 't', titleKind: 'custom', archived: true });
   });
 
   it('sets a generated title while the metadata remains uncustomized', async () => {
@@ -102,8 +102,7 @@ describe('SessionMetadata', () => {
     await expect(meta.setGeneratedTitleIfUncustomized('generated title')).resolves.toBe(true);
     await expect(meta.read()).resolves.toMatchObject({
       title: 'generated title',
-      titleSource: 'generated',
-      isCustomTitle: false,
+      titleKind: 'generated',
     });
   });
 
@@ -183,13 +182,13 @@ describe('SessionMetadata', () => {
     const meta = ix.get(ISessionMetadata);
     await expect(meta.read()).resolves.toMatchObject({
       title: 'legacy title',
-      isCustomTitle: true,
+      titleKind: 'custom',
     });
 
     const fresh = createFreshMetadata(ix);
     await expect(fresh.read()).resolves.toMatchObject({
       title: 'legacy title',
-      isCustomTitle: true,
+      titleKind: 'custom',
     });
   });
 
@@ -209,16 +208,44 @@ describe('SessionMetadata', () => {
     const meta = ix.get(ISessionMetadata);
     await expect(meta.read()).resolves.toMatchObject({
       title: 'renamed title',
-      isCustomTitle: true,
+      titleKind: 'custom',
     });
 
     await meta.update({ archived: true });
     const fresh = createFreshMetadata(ix);
     await expect(fresh.read()).resolves.toMatchObject({
       title: 'renamed title',
-      isCustomTitle: true,
+      titleKind: 'custom',
       archived: true,
     });
+    const persisted = await store.get<Record<string, unknown>>(META_SCOPE, 'state.json');
+    expect(persisted).not.toHaveProperty('isCustomTitle');
+    expect(persisted).not.toHaveProperty('customTitle');
+  });
+
+  it('migrates a legacy non-custom title to replaceable title state', async () => {
+    const store = ix.get(IAtomicDocumentStore);
+    await store.set(META_SCOPE, 'state.json', {
+      id: 's1',
+      version: 2,
+      createdAt: 1700000000000,
+      updatedAt: 1700000000000,
+      archived: false,
+      title: 'prompt title',
+      isCustomTitle: false,
+      agents: {},
+      custom: {},
+    });
+
+    const meta = ix.get(ISessionMetadata);
+
+    await expect(meta.read()).resolves.toMatchObject({
+      title: 'prompt title',
+      titleKind: 'replaceable',
+    });
+    const persisted = await store.get<Record<string, unknown>>(META_SCOPE, 'state.json');
+    expect(persisted).toMatchObject({ title: 'prompt title', titleKind: 'replaceable' });
+    expect(persisted).not.toHaveProperty('isCustomTitle');
   });
 
   it('keeps a queued custom title when a generated title is enqueued afterward', async () => {
@@ -255,7 +282,7 @@ describe('SessionMetadata', () => {
     await expect(generated).resolves.toBe(false);
     await expect(meta.read()).resolves.toMatchObject({
       title: 'user title',
-      isCustomTitle: true,
+      titleKind: 'custom',
     });
   });
 

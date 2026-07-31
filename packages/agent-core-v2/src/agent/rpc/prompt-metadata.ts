@@ -8,7 +8,10 @@
  */
 
 import type { IEventService } from '#/app/event/event';
-import type { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
+import type {
+  ISessionMetadata,
+  SessionTitleKind,
+} from '#/session/sessionMetadata/sessionMetadata';
 
 import {
   promptMetadataTextFromContentParts,
@@ -61,12 +64,12 @@ export async function applyPromptMetadataUpdate(
 ): Promise<void> {
   if (text === undefined) return;
   const current = await target.metadata.read();
-  const patch: { lastPrompt: string; title?: string; isCustomTitle?: boolean } = {
+  const patch: { lastPrompt: string; title?: string; titleKind?: SessionTitleKind } = {
     lastPrompt: text,
   };
-  if (!current.isCustomTitle && isUntitled(current.title)) {
+  if (current.titleKind !== 'custom' && isUntitled(current.title)) {
     patch.title = titleFromPromptMetadataText(text);
-    patch.isCustomTitle = false;
+    patch.titleKind = 'replaceable';
   }
   await target.metadata.update(patch);
   target.eventService.publish({
@@ -77,7 +80,7 @@ export async function applyPromptMetadataUpdate(
       title: patch.title,
       patch: {
         title: patch.title,
-        isCustomTitle: patch.isCustomTitle,
+        isCustomTitle: patch.titleKind === undefined ? undefined : false,
         lastPrompt: text,
       },
     },

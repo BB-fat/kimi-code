@@ -97,6 +97,7 @@ describe('applyPromptMetadataUpdate', () => {
 
     expect(readMeta().lastPrompt).toBe('第二条');
     expect(readMeta().title).toBe('第一条');
+    expect(readMeta().titleKind).toBe('replaceable');
   });
 
   it('updates metadata for slash activations', async () => {

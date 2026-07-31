@@ -65,8 +65,8 @@ export class SessionTitleService implements ISessionTitleService {
 
   async generateTitle(options?: { readonly force?: boolean }): Promise<string | undefined> {
     const current = await this.metadata.read();
-    if (hasCustomTitle(current)) return undefined;
-    if (current.titleSource === 'generated' && options?.force !== true) return undefined;
+    if (current.titleKind === 'custom') return undefined;
+    if (current.titleKind === 'generated' && options?.force !== true) return undefined;
     const main = this.agentLifecycle.get(MAIN_AGENT_ID);
     const prompts =
       main === undefined
@@ -89,7 +89,7 @@ export class SessionTitleService implements ISessionTitleService {
 
   private async generateAndApplyOnce(chatContent: string): Promise<string | undefined> {
     const current = await this.metadata.read();
-    if (hasCustomTitle(current)) return undefined;
+    if (current.titleKind === 'custom') return undefined;
     const provider = this.providers.get(KIMI_CODE_PROVIDER_NAME);
     if (
       provider === undefined ||
@@ -156,17 +156,6 @@ export class SessionTitleService implements ISessionTitleService {
     });
     return title;
   }
-}
-
-function hasCustomTitle(metadata: {
-  readonly title?: unknown;
-  readonly isCustomTitle?: unknown;
-  readonly customTitle?: unknown;
-}): boolean {
-  if (typeof metadata.title === 'string' && typeof metadata.isCustomTitle === 'boolean') {
-    return metadata.isCustomTitle;
-  }
-  return metadata.isCustomTitle === true || typeof metadata.customTitle === 'string';
 }
 
 function titleInputFromPrompts(prompts: readonly string[]): string | undefined {

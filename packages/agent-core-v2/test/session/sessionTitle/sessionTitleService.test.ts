@@ -1,6 +1,6 @@
 /**
  * Scenario: on-demand managed chat_title generation through the session-scoped
- * service, including OAuth failures, legacy custom titles, request headers,
+ * service, including OAuth failures, title-state transitions, request headers,
  * and races.
  * Wiring: the real title service with contract fakes; only fetch crosses the
  * external boundary. Run with `pnpm --filter @moonshot-ai/agent-core-v2 exec
@@ -100,12 +100,12 @@ class FakeSessionMetadata implements ISessionMetadata {
   }
 
   setTitle(title: string): Promise<void> {
-    return this.update({ title, titleSource: 'custom', isCustomTitle: true });
+    return this.update({ title, titleKind: 'custom' });
   }
 
   async setGeneratedTitleIfUncustomized(title: string): Promise<boolean> {
-    if (this.meta.isCustomTitle === true) return false;
-    await this.update({ title, titleSource: 'generated', isCustomTitle: false });
+    if (this.meta.titleKind === 'custom') return false;
+    await this.update({ title, titleKind: 'generated' });
     return true;
   }
 
@@ -252,8 +252,7 @@ describe('SessionTitleService', () => {
 
     expect(title).toBe('生成的标题');
     expect(metadata.meta.title).toBe('生成的标题');
-    expect(metadata.meta.isCustomTitle).toBe(false);
-    expect(metadata.meta.titleSource).toBe('generated');
+    expect(metadata.meta.titleKind).toBe('generated');
 
     const [, init] = fetchMock.mock.calls[0]!;
     expect(JSON.parse(init?.body as string)).toEqual({
@@ -329,7 +328,7 @@ describe('SessionTitleService', () => {
 
     await expect(generation).resolves.toBeUndefined();
     expect(metadata.meta.title).toBe('user 取的标题');
-    expect(metadata.meta.isCustomTitle).toBe(true);
+    expect(metadata.meta.titleKind).toBe('custom');
   });
 
   it('skips generation when the current title was already generated', async () => {
@@ -349,7 +348,7 @@ describe('SessionTitleService', () => {
       '生成的标题',
     );
     expect(metadata.meta.title).toBe('生成的标题');
-    expect(metadata.meta.titleSource).toBe('generated');
+    expect(metadata.meta.titleKind).toBe('generated');
   });
 
   it('never overwrites a custom title even when forced', async () => {
@@ -387,7 +386,7 @@ describe('SessionTitleService', () => {
   it('keeps the current title when the backend request fails', async () => {
     fetchMock.mockImplementationOnce(async () => new Response('', { status: 500 }));
     titlePrompts = ['hello'];
-    await metadata.update({ title: 'hello', isCustomTitle: false });
+    await metadata.update({ title: 'hello', titleKind: 'replaceable' });
 
     await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
     expect(metadata.meta.title).toBe('hello');
@@ -477,29 +476,6 @@ describe('SessionTitleService', () => {
       oauthHost: 'https://auth.env.example.test',
     });
     expect(resolvedOAuthRefs[0]?.key).not.toBe(MANAGED_PROVIDER.oauth?.key);
-  });
-
-  it('does not generate over a legacy customTitle', async () => {
-    metadata.meta = {
-      ...metadata.meta,
-      customTitle: 'legacy title',
-    } as SessionMeta;
-
-    await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it('trusts a modern non-custom title over a stale legacy customTitle', async () => {
-    metadata.meta = {
-      ...metadata.meta,
-      title: 'easy title',
-      isCustomTitle: false,
-      customTitle: 'stale legacy title',
-    } as SessionMeta;
-    titlePrompts = ['hello'];
-
-    await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBe('生成的标题');
-    expect(metadata.meta.title).toBe('生成的标题');
   });
 
   it('shares an in-flight generation between concurrent requests', async () => {

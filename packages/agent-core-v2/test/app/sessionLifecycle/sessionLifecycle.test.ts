@@ -34,7 +34,10 @@ import { ISessionLifecycleService } from '#/app/sessionLifecycle/sessionLifecycl
 import { SessionLifecycleService } from '#/app/sessionLifecycle/sessionLifecycleService';
 import { IAgentActivityView } from '#/agent/activityView/activityView';
 import { ISessionExternalHooksService } from '#/session/externalHooks/externalHooks';
-import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
+import {
+  ISessionMetadata,
+  type SessionMetaPatch,
+} from '#/session/sessionMetadata/sessionMetadata';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
 import { ISessionToolPolicy } from '#/session/sessionToolPolicy/sessionToolPolicy';
 import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
@@ -1180,6 +1183,55 @@ describe('SessionLifecycleService', () => {
           }),
       });
     }
+
+    it('marks the default fork title as replaceable', async () => {
+      const updates: SessionMetaPatch[] = [];
+      const svc = build([
+        workspaceGetStub(),
+        stubPair(ISessionMetadata, {
+          ...metadataStub(),
+          read: () =>
+            Promise.resolve({
+              title: 'generated source',
+              titleKind: 'generated',
+              agents: {},
+            } as never),
+          update: (patch) => {
+            updates.push(patch);
+            return Promise.resolve();
+          },
+        }),
+      ]);
+      await svc.create({ sessionId: 'src', workDir: '/tmp/proj' });
+
+      await svc.fork({ sourceSessionId: 'src', newSessionId: 'dst' });
+
+      expect(updates).toContainEqual(
+        expect.objectContaining({ title: 'Fork: generated source', titleKind: 'replaceable' }),
+      );
+    });
+
+    it('marks an explicit fork title as custom', async () => {
+      const updates: SessionMetaPatch[] = [];
+      const svc = build([
+        workspaceGetStub(),
+        stubPair(ISessionMetadata, {
+          ...metadataStub(),
+          read: () => Promise.resolve({ title: 'source', agents: {} } as never),
+          update: (patch) => {
+            updates.push(patch);
+            return Promise.resolve();
+          },
+        }),
+      ]);
+      await svc.create({ sessionId: 'src', workDir: '/tmp/proj' });
+
+      await svc.fork({ sourceSessionId: 'src', newSessionId: 'dst', title: 'user title' });
+
+      expect(updates).toContainEqual(
+        expect.objectContaining({ title: 'user title', titleKind: 'custom' }),
+      );
+    });
 
     it('copies blobs, plans, background tasks, and media originals into the fork', async () => {
       const root = await makeTmpRoot();
