@@ -194,4 +194,79 @@ describe('fetchChatTitle', () => {
     if (result.kind !== 'error') return;
     expect(result.message).toMatch(/network down/);
   });
+
+  it('reports an external abort as an abort, not a timeout', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        (_url: string, init?: RequestInit) =>
+          new Promise<Response>((_, reject) => {
+            const rejectAbort = () => {
+              const err = new Error('aborted');
+              err.name = 'AbortError';
+              reject(err);
+            };
+            if (init?.signal?.aborted === true) {
+              rejectAbort();
+              return;
+            }
+            init?.signal?.addEventListener('abort', rejectAbort);
+          }),
+      ),
+    );
+    const external = new AbortController();
+
+    const resultPromise = fetchChatTitle('https://api.example/tools', 'tok', 'user: hi', {
+      signal: external.signal,
+      timeoutMs: 60_000,
+    });
+    external.abort();
+    const result = await resultPromise;
+
+    expect(result.kind).toBe('error');
+    if (result.kind !== 'error') return;
+    expect(result.message).toMatch(/aborted/);
+    expect(result.message).not.toMatch(/timed out/);
+  });
+
+  it('fails fast on an already-aborted external signal', async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new Error('fetch should not start when the signal is pre-aborted');
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const external = new AbortController();
+    external.abort();
+
+    const result = await fetchChatTitle('https://api.example/tools', 'tok', 'user: hi', {
+      signal: external.signal,
+    });
+
+    expect(result.kind).toBe('error');
+    if (result.kind !== 'error') return;
+    expect(result.message).toMatch(/aborted/);
+  });
+
+  it('removes the external abort listener once the request settles', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ title: '标题' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+      ),
+    );
+    const external = new AbortController();
+    const addSpy = vi.spyOn(external.signal, 'addEventListener');
+    const removeSpy = vi.spyOn(external.signal, 'removeEventListener');
+
+    await fetchChatTitle('https://api.example/tools', 'tok', 'user: hi', {
+      signal: external.signal,
+    });
+
+    expect(addSpy).toHaveBeenCalledTimes(1);
+    expect(removeSpy).toHaveBeenCalledTimes(1);
+    expect(removeSpy.mock.calls[0]?.[1]).toBe(addSpy.mock.calls[0]?.[1]);
+  });
 });

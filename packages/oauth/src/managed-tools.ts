@@ -37,10 +37,12 @@ export async function fetchChatTitle(
   opts: { timeoutMs?: number; headers?: Record<string, string>; signal?: AbortSignal } = {},
 ): Promise<FetchChatTitleResult> {
   const controller = new AbortController();
+  const onExternalAbort = () => {
+    controller.abort();
+  };
   if (opts.signal !== undefined) {
-    const external = opts.signal;
-    if (external.aborted) controller.abort();
-    else external.addEventListener('abort', () => { controller.abort(); }, { once: true });
+    if (opts.signal.aborted) controller.abort();
+    else opts.signal.addEventListener('abort', onExternalAbort, { once: true });
   }
   const timer = setTimeout(() => {
     controller.abort();
@@ -84,6 +86,7 @@ export async function fetchChatTitle(
     return { kind: 'error', message: `Failed to generate session title: ${msg}` };
   } finally {
     clearTimeout(timer);
+    opts.signal?.removeEventListener('abort', onExternalAbort);
   }
 }
 
