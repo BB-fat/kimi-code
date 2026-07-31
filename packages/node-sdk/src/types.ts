@@ -275,7 +275,7 @@ export type SessionTitleKind = 'replaceable' | 'generated' | 'custom';
 export interface SessionSummary {
   readonly id: string;
   readonly title?: string | undefined;
-  readonly titleKind?: SessionTitleKind | undefined;
+  readonly titleKind?: SessionTitleKind;
   readonly lastPrompt?: string;
   readonly workDir: string;
   readonly sessionDir: string;

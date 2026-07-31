@@ -122,7 +122,9 @@ export class KimiHarness {
       summary,
       rpc: this.rpc,
       onClose: () => {
-        this.activeSessions.delete(summary.id);
+        if (this.activeSessions.get(summary.id) === session) {
+          this.activeSessions.delete(summary.id);
+        }
       },
     });
     this.activeSessions.set(session.id, session);
@@ -138,7 +140,10 @@ export class KimiHarness {
     const id = normalizeSessionId(input.id);
     const active = this.activeSessions.get(id);
     const { kaos, persistenceKaos, sessionStartedProperties, ...resumeInput } = input;
-    if (active !== undefined) {
+    // A session whose close is in flight (`isClosed` but not yet unmapped)
+    // is not a valid resume target — fall through and re-resume fresh, which
+    // the engine serializes behind that close.
+    if (active !== undefined && !active.isClosed) {
       if (kaos !== undefined || persistenceKaos !== undefined) {
         await this.rpc.resumeSessionWithKaos({ ...resumeInput, id }, kaos ?? persistenceKaos as Kaos, persistenceKaos);
       } else if (input.agentProfile !== undefined) {
@@ -157,7 +162,9 @@ export class KimiHarness {
       summary,
       rpc: this.rpc,
       onClose: () => {
-        this.activeSessions.delete(summary.id);
+        if (this.activeSessions.get(summary.id) === session) {
+          this.activeSessions.delete(summary.id);
+        }
       },
     });
     this.activeSessions.set(session.id, session);
@@ -187,7 +194,9 @@ export class KimiHarness {
       summary,
       rpc: this.rpc,
       onClose: () => {
-        this.activeSessions.delete(summary.id);
+        if (this.activeSessions.get(summary.id) === session) {
+          this.activeSessions.delete(summary.id);
+        }
       },
     });
     this.activeSessions.set(session.id, session);
@@ -210,7 +219,9 @@ export class KimiHarness {
       summary,
       rpc: this.rpc,
       onClose: () => {
-        this.activeSessions.delete(summary.id);
+        if (this.activeSessions.get(summary.id) === session) {
+          this.activeSessions.delete(summary.id);
+        }
       },
     });
     this.activeSessions.set(session.id, session);
@@ -235,7 +246,9 @@ export class KimiHarness {
 
   async renameSession(input: RenameSessionInput): Promise<void> {
     await this.rpc.renameSession(input);
-    this.activeSessions.get(input.id)?.emitMetaUpdated({ title: input.title });
+    this.activeSessions
+      .get(input.id)
+      ?.emitMetaUpdated({ title: input.title, isCustomTitle: true });
   }
 
   /**

@@ -1001,6 +1001,16 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    * default model → `model.not_configured`) are pinned in the parity tests.
    */
   override async createSession(input: CreateSessionOptions): Promise<SessionSummary> {
+    // An explicit id takes the per-session queue so the check-then-create
+    // below is atomic against another create/close of the same id; a random
+    // id has no contenders and needs no serialization.
+    if (input.id !== undefined) {
+      return this.runSessionAccess(input.id, () => this.doCreateSession(input));
+    }
+    return this.doCreateSession(input);
+  }
+
+  private async doCreateSession(input: CreateSessionOptions): Promise<SessionSummary> {
     const workDir = normalizeRequiredWorkDir('createSession', input.workDir);
     if (input.id !== undefined) {
       const existing =
@@ -1096,16 +1106,20 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
         'forkSession turnIndex truncation is not wired to agent-core-v2 yet.',
       );
     }
-    const forkHandler = await handlerForSession(this.engineAccessor, input.id);
-    if (forkHandler === undefined) throw SDKRpcClientV2.sessionNotFound(input.id);
-    const handle = await forkHandler.accessor.get(IWorkspaceHandlerService).fork({
-      sourceSessionId: input.id,
-      newSessionId: input.forkId,
-      title: input.title,
-      metadata: input.metadata,
+    // The source session's reads (metadata, wire flush) stay atomic against
+    // its close/reload through the per-session queue.
+    return this.runSessionAccess(input.id, async () => {
+      const forkHandler = await handlerForSession(this.engineAccessor, input.id);
+      if (forkHandler === undefined) throw SDKRpcClientV2.sessionNotFound(input.id);
+      const handle = await forkHandler.accessor.get(IWorkspaceHandlerService).fork({
+        sourceSessionId: input.id,
+        newSessionId: input.forkId,
+        title: input.title,
+        metadata: input.metadata,
+      });
+      this.wireSession(handle);
+      return this.resumedSessionSummary(handle);
     });
-    this.wireSession(handle);
-    return this.resumedSessionSummary(handle);
   }
 
   override async closeSession(input: SessionIdRpcInput): Promise<void> {

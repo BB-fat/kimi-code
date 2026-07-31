@@ -322,6 +322,56 @@ key = "${titleOAuthRef.key}"
     }
   });
 
+  it('re-resumes a fresh session facade while the public close is in flight', async () => {
+    const { harness } = await makeHarness();
+    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-work-'));
+    tempDirs.push(workDir);
+
+    try {
+      const session = await harness.createSession({ id: 'ses_resume_race', workDir });
+      // close() flips `isClosed` synchronously; the engine close settles
+      // asynchronously. The public resume must not hand back the closing
+      // facade — it queues behind the close and materializes a fresh one.
+      const closing = session.close();
+      const resumed = await harness.resumeSession({ id: 'ses_resume_race' });
+      await closing;
+
+      expect(resumed).not.toBe(session);
+      expect(session.isClosed).toBe(true);
+      expect(resumed.isClosed).toBe(false);
+      expect(resumed.getResumeState()).toBeTruthy();
+      // The stale facade's late onClose must not evict the live session.
+      expect(harness.getSession('ses_resume_race')).toBe(resumed);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('rejects one of two concurrent creates with the same explicit session id', async () => {
+    const { harness } = await makeHarness();
+    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-work-'));
+    tempDirs.push(workDir);
+
+    try {
+      const [first, second] = await Promise.allSettled([
+        harness.createSession({ id: 'ses_same_id', workDir }),
+        harness.createSession({ id: 'ses_same_id', workDir }),
+      ]);
+
+      const outcomes = [first, second].map((result) => result.status);
+      expect(outcomes.sort()).toEqual(['fulfilled', 'rejected']);
+      const rejection = [first, second].find((result) => result.status === 'rejected');
+      expect((rejection as PromiseRejectedResult).reason).toMatchObject({
+        code: 'session.already_exists',
+      });
+      await expect(harness.resumeSession({ id: 'ses_same_id' })).resolves.toMatchObject({
+        id: 'ses_same_id',
+      });
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('serves listWorkspaceSkills through the engineAccessor escape hatch', async () => {
     const { harness, homeDir } = await makeHarness();
     const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-work-'));
