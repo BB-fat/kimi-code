@@ -10,7 +10,7 @@
  * failure degrades to keeping the current title, and a custom title set by
  * the user is never overwritten. An already-generated title is not
  * regenerated unless forced, and the write-back is dropped when this scope
- * is no longer the live session in `sessionLifecycle`. Provider config comes
+ * is no longer the live session in `workspaceHandler`. Provider config comes
  * from `provider`, the bearer token from `auth`, host identity headers from
  * `model`, prompt history from `agentLifecycle`/`sessionTitle`, and logs
  * through `log`. Bound at Session scope.
@@ -29,13 +29,13 @@ import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/
 import { ILogService } from '#/_base/log/log';
 import { IOAuthService } from '#/app/auth/auth';
 import { IEventService } from '#/app/event/event';
-import { ISessionLifecycleService } from '#/app/sessionLifecycle/sessionLifecycle';
 import { IAgentLifecycleService, MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
 import { IHostRequestHeaders } from '#/kosong/model/hostRequestHeaders';
 import { IProviderService } from '#/kosong/provider/provider';
 import { isOAuthCatalogVendor } from '#/kosong/provider/providerDefinition';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
+import { IWorkspaceHandlerService } from '#/workspace/workspaceHandler/workspaceHandler';
 
 import { IAgentTitlePromptSource } from './agentTitlePromptSource';
 import { ISessionTitleService } from './sessionTitle';
@@ -56,7 +56,7 @@ export class SessionTitleService implements ISessionTitleService {
     @ISessionMetadata private readonly metadata: ISessionMetadata,
     @IAgentLifecycleService private readonly agentLifecycle: IAgentLifecycleService,
     @IEventService private readonly eventService: IEventService,
-    @ISessionLifecycleService private readonly sessionLifecycle: ISessionLifecycleService,
+    @IWorkspaceHandlerService private readonly workspaceHandler: IWorkspaceHandlerService,
     @IProviderService private readonly providers: IProviderService,
     @IOAuthService private readonly oauth: IOAuthService,
     @IHostRequestHeaders private readonly hostHeaders: IHostRequestHeaders,
@@ -138,7 +138,7 @@ export class SessionTitleService implements ISessionTitleService {
       this.log.debug(`chat_title request failed: ${result.message}`);
       return undefined;
     }
-    const live = this.sessionLifecycle.get(this.ctx.sessionId);
+    const live = this.workspaceHandler.get(this.ctx.sessionId);
     if (live === undefined || live.accessor.get(ISessionMetadata) !== this.metadata) {
       return undefined;
     }

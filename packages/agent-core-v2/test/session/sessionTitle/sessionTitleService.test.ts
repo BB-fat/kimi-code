@@ -22,7 +22,7 @@ import { createServices, type TestInstantiationService } from '#/_base/di/test';
 import { Emitter } from '#/_base/event';
 import { IOAuthService } from '#/app/auth/auth';
 import { type DomainEvent, IEventService } from '#/app/event/event';
-import { ISessionLifecycleService } from '#/app/sessionLifecycle/sessionLifecycle';
+import { IWorkspaceHandlerService } from '#/workspace/workspaceHandler/workspaceHandler';
 import { HostRequestHeaders, IHostRequestHeaders } from '#/kosong/model/hostRequestHeaders';
 import {
   IProviderService,
@@ -213,7 +213,7 @@ describe('SessionTitleService', () => {
           get: () => mainAgent,
         });
         reg.defineInstance(IEventService, events);
-        reg.definePartialInstance(ISessionLifecycleService, {
+        reg.definePartialInstance(IWorkspaceHandlerService, {
           get: () => liveSession,
         });
         reg.defineInstance(IProviderService, stubProviderService(providers));
