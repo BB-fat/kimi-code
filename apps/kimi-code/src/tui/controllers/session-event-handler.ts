@@ -409,8 +409,9 @@ export class SessionEventHandler {
   }
 
   /**
-   * Best-effort auto title: after each completed turn, ask the engine to
-   * generate a title from the first prompts until one lands. The engine
+   * Best-effort auto title: right after a prompt is accepted by the engine
+   * (and again after each completed turn), ask the engine to generate a
+   * title from the first prompts until one lands. The engine
    * overwrites the prompt-derived easy title but never a custom title
    * (enforced server-side), and dedupes in-flight requests. A resolved string
    * means a title was applied — stop asking so later turns don't regenerate
@@ -419,7 +420,7 @@ export class SessionEventHandler {
    * dead RPC) disables further attempts for this session. The generated
    * title lands through the regular `session.meta.updated` event.
    */
-  private requestSessionTitleGeneration(): void {
+  requestSessionTitleGeneration(): void {
     if (this.titleGenerationDisabled) return;
     const { sessionId } = this.host.state.appState;
     if (sessionId.length === 0) return;
