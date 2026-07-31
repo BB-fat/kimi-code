@@ -34,8 +34,6 @@ export interface IAgentContextInjectorService {
     provider: ContextInjectionProvider,
   ): IDisposable;
 
-  inject(): Promise<void>;
-
   injectAfterCompaction(): Promise<void>;
 }
 

@@ -11,9 +11,9 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import type { ContextMessage } from '#/agent/contextMemory/types';
+import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import type { EnvironmentDisclosureSnapshot } from '#/app/agentProfileCatalog/agentProfileCatalog';
 
@@ -22,6 +22,7 @@ import {
   InMemoryWireRecordPersistence,
   type TestAgentContext,
 } from '../../harness';
+import { runWillBeginStepHooks } from '../loop/stubs';
 
 function localDateKey(date: Date): string {
   const year = date.getFullYear();
@@ -33,7 +34,7 @@ function localDateKey(date: Date): string {
 describe('AgentDateChangeService', () => {
   let ctx: TestAgentContext;
   let context: IAgentContextMemoryService;
-  let injector: IAgentContextInjectorService;
+  let loop: IAgentLoopService;
   let profile: IAgentProfileService;
 
   beforeEach(() => {
@@ -41,7 +42,7 @@ describe('AgentDateChangeService', () => {
     vi.setSystemTime(new Date(2026, 6, 29, 12));
     ctx = createTestAgent();
     context = ctx.get(IAgentContextMemoryService);
-    injector = ctx.get(IAgentContextInjectorService);
+    loop = ctx.get(IAgentLoopService);
     profile = ctx.get(IAgentProfileService);
   });
 
@@ -114,7 +115,7 @@ function messageText(message: ContextMessage): string {
   it('does not inject when the system prompt date is today', async () => {
     updateSystemPromptWithDate(profile, new Date().toISOString());
 
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
 
     expect(dateReminders(context)).toHaveLength(0);
   });
@@ -124,7 +125,7 @@ function messageText(message: ContextMessage): string {
     yesterday.setDate(yesterday.getDate() - 1);
     updateSystemPromptWithDate(profile, yesterday.toISOString());
 
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
 
     const reminders = dateReminders(context);
     expect(reminders).toHaveLength(1);
@@ -144,16 +145,16 @@ function messageText(message: ContextMessage): string {
       },
     });
 
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
     expect(dateReminders(context)).toHaveLength(1);
   });
 
   it('announces each date crossed by a long-lived session', async () => {
     updateSystemPromptWithDate(profile, new Date().toISOString());
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
 
     vi.setSystemTime(new Date(2026, 6, 30, 12));
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
 
     let reminders = dateReminders(context);
     expect(reminders).toHaveLength(1);
@@ -162,7 +163,7 @@ function messageText(message: ContextMessage): string {
     );
 
     vi.setSystemTime(new Date(2026, 6, 31, 12));
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
 
     reminders = dateReminders(context);
     expect(reminders).toHaveLength(2);
@@ -190,10 +191,10 @@ function messageText(message: ContextMessage): string {
     vi.setSystemTime(new Date(2026, 6, 30, 12));
     ctx = createTestAgent({ autoConfigure: false, persistence });
     context = ctx.get(IAgentContextMemoryService);
-    injector = ctx.get(IAgentContextInjectorService);
+    loop = ctx.get(IAgentLoopService);
     await ctx.restorePersisted();
 
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
 
     const reminders = dateReminders(context);
     expect(reminders).toHaveLength(1);
@@ -222,7 +223,7 @@ function messageText(message: ContextMessage): string {
       },
     });
 
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
 
     const reminders = dateReminders(context);
     expect(reminders).toHaveLength(2);
@@ -245,7 +246,7 @@ function messageText(message: ContextMessage): string {
       toolCalls: [],
       origin: { kind: 'user' },
     });
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
     expect(dateReminders(context)).toHaveLength(1);
 
     expect(context.undo(1)).toMatchObject({ removedCount: 1 });
@@ -257,7 +258,7 @@ function messageText(message: ContextMessage): string {
       origin: { kind: 'user' },
     });
 
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
 
     expect(dateReminders(context)).toHaveLength(1);
   });
@@ -265,7 +266,7 @@ function messageText(message: ContextMessage): string {
   it('adopts today silently when the system prompt carries no date line', async () => {
     updateSystemPromptWithoutDate(profile);
 
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
 
     expect(dateReminders(context)).toHaveLength(0);
     expect(context.get()).toHaveLength(0);
@@ -273,11 +274,11 @@ function messageText(message: ContextMessage): string {
 
   it('announces a crossed midnight after the silent seed', async () => {
     updateSystemPromptWithoutDate(profile);
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
     expect(dateReminders(context)).toHaveLength(0);
 
     vi.setSystemTime(new Date(2026, 6, 30, 12));
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
 
     const reminders = dateReminders(context);
     expect(reminders).toHaveLength(1);
@@ -285,7 +286,7 @@ function messageText(message: ContextMessage): string {
       "Today's date is now 2026-07-30",
     );
 
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
     expect(dateReminders(context)).toHaveLength(1);
   });
 });

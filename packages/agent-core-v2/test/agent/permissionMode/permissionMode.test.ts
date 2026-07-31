@@ -43,7 +43,6 @@ const injectorStub: IAgentContextInjectorService = {
       },
     };
   },
-  inject: async () => {},
   injectAfterCompaction: async () => {},
 };
 

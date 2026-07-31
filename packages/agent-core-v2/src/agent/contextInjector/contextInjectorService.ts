@@ -108,7 +108,7 @@ export class AgentContextInjectorService extends Disposable implements IAgentCon
     await this.inject();
   }
 
-  async inject(): Promise<void> {
+  private async inject(): Promise<void> {
     const isNewTurn = this.isNewTurn;
     this.isNewTurn = false;
     const history = this.context.get();

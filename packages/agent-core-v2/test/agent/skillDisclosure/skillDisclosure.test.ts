@@ -13,14 +13,15 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { InMemorySkillCatalog } from '#/app/skillCatalog/registry';
-import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import type { ContextMessage } from '#/agent/contextMemory/types';
+import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentSkillDisclosureService } from '#/agent/skillDisclosure/skillDisclosure';
 
 import { stubSkill } from '../../app/skillCatalog/stubs';
 import { createTestAgent, skillServices, type TestAgentContext } from '../../harness';
+import { runWillBeginStepHooks } from '../loop/stubs';
 
 function skillListReminders(context: IAgentContextMemoryService): readonly ContextMessage[] {
   return context.get().filter((message) => {
@@ -43,7 +44,7 @@ describe('skill disclosure (structured projection and reminder)', () => {
   let context: IAgentContextMemoryService;
   let ctx: TestAgentContext;
   let disclosure: IAgentSkillDisclosureService;
-  let injector: IAgentContextInjectorService;
+  let loop: IAgentLoopService;
   let profile: IAgentProfileService;
 
   beforeEach(() => {
@@ -51,7 +52,7 @@ describe('skill disclosure (structured projection and reminder)', () => {
     ctx = createTestAgent(skillServices(catalog));
     context = ctx.get(IAgentContextMemoryService);
     disclosure = ctx.get(IAgentSkillDisclosureService);
-    injector = ctx.get(IAgentContextInjectorService);
+    loop = ctx.get(IAgentLoopService);
     profile = ctx.get(IAgentProfileService);
   });
 
@@ -77,14 +78,14 @@ describe('skill disclosure (structured projection and reminder)', () => {
     disclosure.markDisclosed((await disclosure.resolve(true)).names, 1);
     catalog.registerBuiltinSkill(stubSkill('namespace:skill-b', { source: 'builtin' }));
 
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
 
     const reminders = skillListReminders(context);
     expect(reminders).toHaveLength(1);
     expect(messageText(reminders[0] as ContextMessage)).toContain('- namespace:skill-b:');
     expect(disclosure.disclosedNames()).toEqual(['skill-a']);
 
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
     expect(skillListReminders(context)).toHaveLength(1);
   });
 
@@ -93,7 +94,7 @@ describe('skill disclosure (structured projection and reminder)', () => {
     profile.update({ systemPrompt: systemPromptWithSkills(catalog.getModelSkillListing()) });
     catalog.registerBuiltinSkill(stubSkill('skill-b', { source: 'builtin' }));
 
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
 
     const reminders = skillListReminders(context);
     expect(reminders).toHaveLength(1);
@@ -105,10 +106,10 @@ describe('skill disclosure (structured projection and reminder)', () => {
     catalog.registerBuiltinSkill(stubSkill('skill-a', { source: 'builtin' }));
     disclosure.markDisclosed((await disclosure.resolve(true)).names, 1);
     catalog.registerBuiltinSkill(stubSkill('skill-b', { source: 'builtin' }));
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
 
     context.clear();
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
 
     const reminders = skillListReminders(context);
     expect(reminders).toHaveLength(1);
@@ -126,10 +127,10 @@ describe('skill disclosure (structured projection and reminder)', () => {
       origin: { kind: 'user' },
     });
     catalog.registerBuiltinSkill(stubSkill('skill-b', { source: 'builtin' }));
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
 
     context.undo(1);
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
 
     const reminders = skillListReminders(context);
     expect(reminders).toHaveLength(1);
@@ -140,7 +141,7 @@ describe('skill disclosure (structured projection and reminder)', () => {
   it('adopts the current names silently when no disclosure baseline exists', async () => {
     catalog.registerBuiltinSkill(stubSkill('skill-a', { source: 'builtin' }));
 
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
 
     expect(skillListReminders(context)).toHaveLength(0);
     expect(disclosure.disclosedNames()).toEqual(['skill-a']);
@@ -152,7 +153,7 @@ describe('skill disclosure (structured projection and reminder)', () => {
     profile.update({ disallowedTools: ['Skill'] });
     catalog.registerBuiltinSkill(stubSkill('skill-b', { source: 'builtin' }));
 
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
 
     expect(skillListReminders(context)).toHaveLength(0);
     expect(disclosure.disclosedNames()).toEqual(['skill-a']);
@@ -164,7 +165,7 @@ describe('skill disclosure (structured projection and reminder)', () => {
       stubSkill('skill-a', { source: 'builtin', description: 'reworded description' }),
     );
 
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
 
     expect(skillListReminders(context)).toHaveLength(0);
     expect(disclosure.disclosedNames()).toEqual(['skill-a', 'skill-b']);
@@ -175,7 +176,7 @@ describe('skill disclosure (structured projection and reminder)', () => {
     disclosure.markDisclosed((await disclosure.resolve(true)).names, 1);
     catalog.registerBuiltinSkill(stubSkill('skill-b', { source: 'builtin' }));
 
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
 
     const reminders = skillListReminders(context);
     expect(reminders).toHaveLength(1);
@@ -194,16 +195,43 @@ describe('skill disclosure (structured projection and reminder)', () => {
     catalog.registerBuiltinSkill(stubSkill('skill-a', { source: 'builtin' }));
     disclosure.markDisclosed((await disclosure.resolve(true)).names, 1);
     catalog.registerBuiltinSkill(stubSkill('skill-b', { source: 'builtin' }));
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
     expect(skillListReminders(context)).toHaveLength(1);
 
     catalog.registerBuiltinSkill(stubSkill('skill-c', { source: 'builtin' }));
     disclosure.markDisclosed((await disclosure.resolve(true)).names, 2);
     profile.update({ systemPrompt: systemPromptWithSkills(catalog.getModelSkillListing()) });
 
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
 
     expect(skillListReminders(context)).toHaveLength(1);
+  });
+
+  it('reannounces a skill when a newer render repeats the old floor after a stale reminder', async () => {
+    catalog.registerBuiltinSkill(stubSkill('skill-a', { source: 'builtin' }));
+    catalog.registerBuiltinSkill(stubSkill('skill-b', { source: 'builtin' }));
+    disclosure.markDisclosed(['skill-a'], 1);
+    context.append({
+      role: 'user',
+      content: [{ type: 'text', text: catalog.getModelSkillListing() }],
+      toolCalls: [],
+      origin: {
+        kind: 'injection',
+        variant: 'skill_list',
+        disclosure: {
+          kind: 'skills',
+          renderGeneration: 1,
+          names: ['skill-a', 'skill-b'],
+        },
+      },
+    });
+    disclosure.markDisclosed(['skill-a'], 2);
+
+    await runWillBeginStepHooks(loop);
+
+    const reminders = skillListReminders(context);
+    expect(reminders).toHaveLength(2);
+    expect(messageText(reminders[1] as ContextMessage)).toContain('- skill-b:');
   });
 
   it('still baselines on a legacy text reminder without typed disclosure', async () => {
@@ -217,11 +245,11 @@ describe('skill disclosure (structured projection and reminder)', () => {
       origin: { kind: 'injection', variant: 'skill_list' },
     });
 
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
     expect(skillListReminders(context)).toHaveLength(1);
 
     catalog.registerBuiltinSkill(stubSkill('skill-c', { source: 'builtin' }));
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
 
     const reminders = skillListReminders(context);
     expect(reminders).toHaveLength(2);
@@ -242,7 +270,7 @@ describe('skill disclosure (structured projection and reminder)', () => {
     disclosure.markDisclosed((await disclosure.resolve(true)).names, 2);
     profile.update({ systemPrompt: systemPromptWithSkills(catalog.getModelSkillListing()) });
 
-    await injector.inject();
+    await runWillBeginStepHooks(loop);
 
     expect(skillListReminders(context)).toHaveLength(1);
   });

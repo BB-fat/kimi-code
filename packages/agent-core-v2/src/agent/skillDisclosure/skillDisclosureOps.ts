@@ -5,10 +5,10 @@
  * restore the system-prompt skill baseline across replay and forks. Alongside
  * the names, the model records the render generation of the disclosure that
  * wrote them (renders, binding snapshots, and runtime seeds), so reminder
- * baselines can order the floor against in-context reminder disclosures; the
- * stored generation only advances together with the name set, so re-renders
- * with unchanged skills produce no record. Records replayed from before the
- * field existed read as generation 0.
+ * baselines can order the floor against in-context reminder disclosures. A
+ * newer render advances the stored generation even when its name set is
+ * unchanged. Records replayed from before the field existed read as generation
+ * 0.
  */
 
 import { z } from 'zod';
@@ -30,10 +30,13 @@ export const setDisclosedSkills = SkillDisclosureModel.defineOp('skill.disclosur
     names: z.array(z.string()).readonly(),
     renderGeneration: z.number().optional(),
   }),
-  apply: (state, payload) =>
-    stringArrayEqual(state.names, payload.names)
+  apply: (state, payload) => {
+    const renderGeneration = payload.renderGeneration ?? 0;
+    return stringArrayEqual(state.names, payload.names) &&
+      (state.renderGeneration ?? 0) === renderGeneration
       ? state
-      : { names: payload.names, renderGeneration: payload.renderGeneration ?? 0 },
+      : { names: payload.names, renderGeneration };
+  },
 });
 
 function stringArrayEqual(

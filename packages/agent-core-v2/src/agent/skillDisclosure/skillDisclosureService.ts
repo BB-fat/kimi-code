@@ -66,8 +66,14 @@ export class AgentSkillDisclosureService implements IAgentSkillDisclosureService
 
   markDisclosed(names: readonly string[], renderGeneration: number): void {
     const normalized = normalizeNames(names);
-    const current = this.disclosedNames();
-    if (current !== undefined && sameNames(current, normalized)) return;
+    const current = this.disclosedFloor();
+    if (
+      current !== undefined &&
+      current.renderGeneration === renderGeneration &&
+      sameNames(current.names, normalized)
+    ) {
+      return;
+    }
     this.wire.dispatch(setDisclosedSkills({ names: normalized, renderGeneration }));
   }
 }
