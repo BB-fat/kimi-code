@@ -57,12 +57,11 @@ export interface ISessionMetadata {
   update(patch: SessionMetaPatch): Promise<void>;
   setTitle(title: string): Promise<void>;
   /**
-   * Applies a generated title unless the user customized theirs. `allowWhen`
-   * is re-evaluated inside the serialized update, right before the write —
-   * a `false` there drops the write-back even if the update sat queued while
-   * the condition flipped (e.g. the session's close began).
+   * Applies a generated title unless the user customized theirs; the title
+   * kind is re-checked inside the serialized update, right before the write,
+   * so a custom title set while a generation was in flight still wins.
    */
-  setGeneratedTitleIfUncustomized(title: string, allowWhen?: () => boolean): Promise<boolean>;
+  setGeneratedTitleIfUncustomized(title: string): Promise<boolean>;
   setArchived(archived: boolean): Promise<void>;
   registerAgent(agentId: string, meta: AgentMeta): Promise<void>;
 }

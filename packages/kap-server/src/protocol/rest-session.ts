@@ -164,14 +164,6 @@ export type CompactSessionRequest = z.infer<typeof compactSessionRequestSchema>;
 export const compactSessionResponseSchema = z.object({});
 export type CompactSessionResponse = z.infer<typeof compactSessionResponseSchema>;
 
-export const generateSessionTitleRequestSchema = z.preprocess(
-  (value) => (value === undefined ? {} : value),
-  z.object({
-    force: z.boolean().optional(),
-  }),
-);
-export type GenerateSessionTitleRequest = z.infer<typeof generateSessionTitleRequestSchema>;
-
 export const undoSessionRequestSchema = z.preprocess(
   (value) => value === undefined ? {} : value,
   z.object({

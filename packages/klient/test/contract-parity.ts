@@ -202,10 +202,7 @@ import {
   questionResponseSchema,
   questionResultSchema,
 } from '../src/contract/session/question.js';
-import {
-  generateTitleOptionsSchema,
-  sessionTitleContract,
-} from '../src/contract/session/title.js';
+import { sessionTitleContract } from '../src/contract/session/title.js';
 
 import {
   authStatusSchema,
@@ -458,10 +455,6 @@ const _questionResponse: AssertWire<typeof questionResponseSchema, QuestionRespo
 const _questionResult: AssertWire<typeof questionResultSchema, QuestionResult> = true;
 
 // session/title.ts
-const _generateTitleOptions: AssertWire<
-  typeof generateTitleOptionsSchema,
-  NonNullable<Parameters<ISessionTitleService['generateTitle']>[0]>
-> = true;
 const _generateTitleOutput: AssertWire<
   (typeof sessionTitleContract)['generateTitle']['output'],
   Awaited<ReturnType<ISessionTitleService['generateTitle']>>

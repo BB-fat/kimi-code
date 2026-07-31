@@ -426,46 +426,6 @@ describe('SessionMetadata', () => {
     });
   });
 
-  it('vetoes a queued generated title when the gate flips before the write runs', async () => {
-    // The lifetime-abort window behind `allowWhen`: the generated-title
-    // update sits in the metadata queue behind a blocked write, the
-    // session's close fires before the update executes, and the queued
-    // write must be dropped rather than land after the abort.
-    const meta = ix.get(ISessionMetadata);
-    await meta.ready;
-    const store = ix.get(IAtomicDocumentStore);
-    const set = store.set.bind(store);
-    let releaseWrite: (() => void) | undefined;
-    let markWriteStarted: (() => void) | undefined;
-    const writeStarted = new Promise<void>((resolve) => {
-      markWriteStarted = resolve;
-    });
-    const writeReleased = new Promise<void>((resolve) => {
-      releaseWrite = resolve;
-    });
-    let shouldBlock = true;
-    vi.spyOn(store, 'set').mockImplementation(async (scope, key, value) => {
-      if (shouldBlock) {
-        shouldBlock = false;
-        markWriteStarted?.();
-        await writeReleased;
-      }
-      await set(scope, key, value);
-    });
-
-    const priorWrite = meta.update({ lastPrompt: 'hello' });
-    await writeStarted;
-    let allowed = true;
-    const generated = meta.setGeneratedTitleIfUncustomized('generated title', () => allowed);
-    allowed = false;
-    releaseWrite?.();
-
-    await priorWrite;
-    await expect(generated).resolves.toBe(false);
-    expect((await meta.read()).title).toBeUndefined();
-    expect((await meta.read()).titleKind).toBeUndefined();
-  });
-
   it('leaves existing agents/custom maps untouched', async () => {
     const store = ix.get(IAtomicDocumentStore);
     await store.set(META_SCOPE, 'state.json', {

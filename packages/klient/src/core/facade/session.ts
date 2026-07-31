@@ -70,9 +70,8 @@ export interface SessionFacade {
    * Generate and apply a title from the main agent's first prompts via the
    * managed `chat_title` tool. `undefined` when generation is unavailable
    * (no managed OAuth login, no prompt yet, or a custom title is set).
-   * `force` regenerates over an already-generated title.
    */
-  generateTitle(options?: { readonly force?: boolean }): Promise<string | undefined>;
+  generateTitle(): Promise<string | undefined>;
   update(patch: SessionMetaPatch): Promise<void>;
   setArchived(archived: boolean): Promise<void>;
   status(): Promise<SessionStatus>;
@@ -121,8 +120,8 @@ export function createSessionFacade(call: ScopedCaller, sessionId: string): Sess
   return {
     get: read,
     setTitle: (title) => call(scope, 'sessionMetadata', 'setTitle', [title]) as Promise<void>,
-    generateTitle: (options) =>
-      call(scope, 'sessionTitleService', 'generateTitle', [options]) as Promise<
+    generateTitle: () =>
+      call(scope, 'sessionTitleService', 'generateTitle', []) as Promise<
         string | undefined
       >,
     update: (patch) => call(scope, 'sessionMetadata', 'update', [patch]) as Promise<void>,

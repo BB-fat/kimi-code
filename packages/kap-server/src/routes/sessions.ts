@@ -117,7 +117,6 @@ import {
   createSessionChildRequestSchema,
   createSessionRequestSchema,
   forkSessionRequestSchema,
-  generateSessionTitleRequestSchema,
   getSessionGoalResponseSchema,
   listSessionChildrenResponseSchema,
   sessionAbortResponseSchema,
@@ -624,7 +623,6 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
       method: 'POST',
       path: '/sessions/{session_id}/title/generate',
       params: sessionIdParamSchema,
-      body: generateSessionTitleRequestSchema,
       success: { data: z.object({ title: z.string() }) },
       errors: {
         [ErrorCode.SESSION_NOT_FOUND]: {},
@@ -643,9 +641,7 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
           );
           return;
         }
-        const title = await handle.accessor
-          .get(ISessionTitleService)
-          .generateTitle({ force: req.body.force });
+        const title = await handle.accessor.get(ISessionTitleService).generateTitle();
         if (title === undefined) {
           reply.send(
             errEnvelope(

@@ -19,9 +19,9 @@
  * so the two can disagree) while a `false` marker never downgrades a
  * modern generated/custom state. The generated-title write path
  * (`setGeneratedTitleIfUncustomized`) serializes through the same update
- * queue as everything else and re-evaluates its caller-supplied veto
- * (`allowWhen`) inside the queued write, so a session close landing while
- * the update waits still drops the write-back.
+ * queue as everything else and re-checks the title kind inside the queued
+ * write, so a custom title set while a generation was in flight is never
+ * overwritten.
  * Re-registering an agent whose metadata is unchanged is
  * a no-op (no write, no mirror, no event), so resuming a session — which
  * re-registers its agents as they materialize — never bumps `updatedAt` and
@@ -110,9 +110,8 @@ export class SessionMetadata extends Disposable implements ISessionMetadata {
     await this.enqueueUpdate(() => this.applyUpdate(patch));
   }
 
-  private async applyUpdate(patch: SessionMetaPatch, allowWhen?: () => boolean): Promise<boolean> {
+  private async applyUpdate(patch: SessionMetaPatch): Promise<boolean> {
     await this.ready;
-    if (allowWhen?.() === false) return false;
     this.data = { ...this.data, ...patch, updatedAt: Date.now() };
     await this.store.set(this.scope, META_KEY, encodeSessionMeta(this.data));
     await this.mirrorToReadModel();
@@ -126,11 +125,11 @@ export class SessionMetadata extends Disposable implements ISessionMetadata {
     await this.update({ title, titleKind: 'custom' });
   }
 
-  async setGeneratedTitleIfUncustomized(title: string, allowWhen?: () => boolean): Promise<boolean> {
+  async setGeneratedTitleIfUncustomized(title: string): Promise<boolean> {
     return this.enqueueUpdate(async () => {
       await this.ready;
       if (this.data.titleKind === 'custom') return false;
-      return this.applyUpdate({ title, titleKind: 'generated' }, allowWhen);
+      return this.applyUpdate({ title, titleKind: 'generated' });
     });
   }
 

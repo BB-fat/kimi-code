@@ -100,9 +100,8 @@ class FakeSessionMetadata implements ISessionMetadata {
     return this.update({ title, titleKind: 'custom' });
   }
 
-  async setGeneratedTitleIfUncustomized(title: string, allowWhen?: () => boolean): Promise<boolean> {
+  async setGeneratedTitleIfUncustomized(title: string): Promise<boolean> {
     if (this.meta.titleKind === 'custom') return false;
-    if (allowWhen?.() === false) return false;
     await this.update({ title, titleKind: 'generated' });
     return true;
   }
@@ -321,28 +320,6 @@ describe('SessionTitleService', () => {
     expect(metadata.meta.title).toBe('已生成的标题');
   });
 
-  it('regenerates a generated title when forced', async () => {
-    await metadata.setGeneratedTitleIfUncustomized('已生成的标题');
-    titlePrompts = ['hello'];
-
-    await expect(ix.get(ISessionTitleService).generateTitle({ force: true })).resolves.toBe(
-      '生成的标题',
-    );
-    expect(metadata.meta.title).toBe('生成的标题');
-    expect(metadata.meta.titleKind).toBe('generated');
-  });
-
-  it('never overwrites a custom title even when forced', async () => {
-    await metadata.setTitle('user 取的标题');
-    titlePrompts = ['hello'];
-
-    await expect(
-      ix.get(ISessionTitleService).generateTitle({ force: true }),
-    ).resolves.toBeUndefined();
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(metadata.meta.title).toBe('user 取的标题');
-  });
-
   it('keeps the current title when the backend request fails', async () => {
     fetchMock.mockImplementationOnce(async () => new Response('', { status: 500 }));
     titlePrompts = ['hello'];
@@ -456,73 +433,6 @@ describe('SessionTitleService', () => {
     await expect(first).resolves.toBe('生成的标题');
     await expect(second).resolves.toBe('生成的标题');
     expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-
-  it('lets the later forced request win over a slower plain call', async () => {
-    const pendingFetch = createPendingFetch();
-    fetchMock.mockImplementationOnce(pendingFetch.fetch);
-    titlePrompts = ['hello'];
-
-    const plain = ix.get(ISessionTitleService).generateTitle();
-    await pendingFetch.started;
-    // The forced call neither joins the plain call's slot nor waits for it.
-    const forced = ix.get(ISessionTitleService).generateTitle({ force: true });
-    await expect(forced).resolves.toBe('生成的标题');
-
-    pendingFetch.resolve(
-      new Response(JSON.stringify({ title: '普通标题' }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }),
-    );
-    // The plain call started earlier, so its slower response is superseded:
-    // its write-back is vetoed and the forced title stays.
-    await expect(plain).resolves.toBeUndefined();
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(metadata.meta.title).toBe('生成的标题');
-    expect(metadata.meta.titleKind).toBe('generated');
-  });
-
-  it('lets the later plain request win over a slower forced call', async () => {
-    const pendingFetch = createPendingFetch();
-    fetchMock.mockImplementationOnce(pendingFetch.fetch);
-    titlePrompts = ['hello'];
-
-    const forced = ix.get(ISessionTitleService).generateTitle({ force: true });
-    await pendingFetch.started;
-    const plain = ix.get(ISessionTitleService).generateTitle();
-    await expect(plain).resolves.toBe('生成的标题');
-
-    pendingFetch.resolve(
-      new Response(JSON.stringify({ title: '强制标题' }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }),
-    );
-    await expect(forced).resolves.toBeUndefined();
-    expect(metadata.meta.title).toBe('生成的标题');
-  });
-
-  it('does not share a forced in-flight result with a plain call', async () => {
-    await metadata.setGeneratedTitleIfUncustomized('已生成的标题');
-    const pendingFetch = createPendingFetch();
-    fetchMock.mockImplementationOnce(pendingFetch.fetch);
-    titlePrompts = ['hello'];
-
-    const forced = ix.get(ISessionTitleService).generateTitle({ force: true });
-    await pendingFetch.started;
-    // An already-generated title makes the plain call exit early on its own
-    // instead of riding the forced regeneration's result.
-    await expect(ix.get(ISessionTitleService).generateTitle()).resolves.toBeUndefined();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-
-    pendingFetch.resolve(
-      new Response(JSON.stringify({ title: '强制标题' }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }),
-    );
-    await expect(forced).resolves.toBe('强制标题');
   });
 
   it('returns unavailable without calling the backend when no prompt was seen', async () => {

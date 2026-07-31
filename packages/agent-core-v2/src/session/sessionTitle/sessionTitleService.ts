@@ -9,9 +9,8 @@
  * (the kap-server route), gated by a managed Kimi Code OAuth login; any
  * failure degrades to keeping the current title, and a custom title set by
  * the user is never overwritten. An already-generated title is not
- * regenerated unless forced. Plain calls coalesce onto one shared
- * in-flight generation while a forced regeneration always runs on its
- * own; the newest request always wins the write-back.
+ * regenerated. Concurrent calls coalesce onto one shared in-flight
+ * generation.
  * Provider config comes
  * from `provider`, the bearer token from `auth`, host identity headers from
  * `model`, prompt history from `agentLifecycle`/`sessionTitle`, and logs
@@ -51,7 +50,6 @@ export class SessionTitleService implements ISessionTitleService {
   declare readonly _serviceBrand: undefined;
 
   private _shared: Promise<string | undefined> | undefined;
-  private _generationSeq = 0;
 
   constructor(
     @ISessionContext private readonly ctx: ISessionContext,
@@ -64,21 +62,19 @@ export class SessionTitleService implements ISessionTitleService {
     @ILogService private readonly log: ILogService,
   ) {}
 
-  async generateTitle(options?: { readonly force?: boolean }): Promise<string | undefined> {
-    if (options?.force !== true && this._shared !== undefined) return this._shared;
-    const tracked = this.generateTitleOnce(options).finally(() => {
+  async generateTitle(): Promise<string | undefined> {
+    if (this._shared !== undefined) return this._shared;
+    const tracked = this.generateTitleOnce().finally(() => {
       if (this._shared === tracked) this._shared = undefined;
     });
-    if (options?.force !== true) this._shared = tracked;
+    this._shared = tracked;
     return tracked;
   }
 
-  private async generateTitleOnce(options?: {
-    readonly force?: boolean;
-  }): Promise<string | undefined> {
+  private async generateTitleOnce(): Promise<string | undefined> {
     const current = await this.metadata.read();
     if (current.titleKind === 'custom') return undefined;
-    if (current.titleKind === 'generated' && options?.force !== true) return undefined;
+    if (current.titleKind === 'generated') return undefined;
     const main = this.agentLifecycle.get(MAIN_AGENT_ID);
     const prompts =
       main === undefined
@@ -86,11 +82,10 @@ export class SessionTitleService implements ISessionTitleService {
         : await main.accessor.get(IAgentTitlePromptSource).firstUserPrompts(MAX_TITLE_PROMPTS);
     const input = titleInputFromPrompts(prompts);
     if (input === undefined) return undefined;
-    const seq = ++this._generationSeq;
-    return this.generateAndApply(input, seq);
+    return this.generateAndApply(input);
   }
 
-  private async generateAndApply(chatContent: string, seq: number): Promise<string | undefined> {
+  private async generateAndApply(chatContent: string): Promise<string | undefined> {
     const current = await this.metadata.read();
     if (current.titleKind === 'custom') return undefined;
     const provider = this.providers.get(KIMI_CODE_PROVIDER_NAME);
@@ -142,10 +137,7 @@ export class SessionTitleService implements ISessionTitleService {
       return undefined;
     }
     const title = result.title.slice(0, MAX_GENERATED_TITLE_LENGTH);
-    const applied = await this.metadata.setGeneratedTitleIfUncustomized(
-      title,
-      () => seq === this._generationSeq,
-    );
+    const applied = await this.metadata.setGeneratedTitleIfUncustomized(title);
     if (!applied) return undefined;
     this.eventService.publish({
       type: 'session.meta.updated',
