@@ -132,6 +132,25 @@ describe('FileSessionIndex (legacy)', () => {
     expect((await store.get('none'))?.cwd).toBeUndefined();
   });
 
+  it('projects the title state, honoring a legacy custom marker over a stale titleKind', async () => {
+    await seedSession('generated', {
+      title: 'gen',
+      titleKind: 'generated',
+      isCustomTitle: false,
+    });
+    await seedSession('stale-mixed', {
+      title: '用户标题',
+      titleKind: 'replaceable',
+      isCustomTitle: true,
+    });
+    await seedSession('plain', { title: 'plain' });
+
+    const store = build();
+    expect((await store.get('generated'))?.titleKind).toBe('generated');
+    expect((await store.get('stale-mixed'))?.titleKind).toBe('custom');
+    expect((await store.get('plain'))?.titleKind).toBeUndefined();
+  });
+
   it('list filters by sessionId without enumerating all sessions', async () => {
     await seedSession('active', { title: 'hello' });
     await seedSession('archived', { archived: true });

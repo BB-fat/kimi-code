@@ -71,9 +71,12 @@ function parseTime(value: unknown): number {
   return 0;
 }
 
-function toTitleKind(value: unknown): SessionSummary['titleKind'] {
-  return value === 'replaceable' || value === 'generated' || value === 'custom'
-    ? value
+function toTitleKind(titleKind: unknown, isCustomTitle: unknown): SessionSummary['titleKind'] {
+  // Same priority as the metadata document's canonical normalization: a
+  // legacy writer's explicit custom marker outranks a stale titleKind.
+  if (isCustomTitle === true) return 'custom';
+  return titleKind === 'replaceable' || titleKind === 'generated' || titleKind === 'custom'
+    ? titleKind
     : undefined;
 }
 
@@ -340,7 +343,7 @@ export class FileSessionIndex implements ISessionIndex {
       workspaceId,
       cwd: recoverCwd(meta),
       title: typeof meta['title'] === 'string' ? meta['title'] : undefined,
-      titleKind: toTitleKind(meta['titleKind']),
+      titleKind: toTitleKind(meta['titleKind'], meta['isCustomTitle']),
       lastPrompt: typeof meta['lastPrompt'] === 'string' ? meta['lastPrompt'] : undefined,
       createdAt: parseTime(meta['createdAt']),
       updatedAt: parseTime(meta['updatedAt']),

@@ -13,6 +13,7 @@ export const sessionSummarySchema = z.object({
   workspaceId: z.string(),
   cwd: z.string().optional(),
   title: z.string().optional(),
+  titleKind: z.enum(['replaceable', 'generated', 'custom']).optional(),
   lastPrompt: z.string().optional(),
   createdAt: z.number(),
   updatedAt: z.number(),
