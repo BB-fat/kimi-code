@@ -11,8 +11,12 @@
  * session work can cancel itself and drop its write-back. A close/archive
  * is tracked in a closing registry from that first synchronous step until
  * the scope is disposed: `get`/`list` hide the session while it is
- * closing, and `resume` waits the close out and re-materializes instead
- * of returning the doomed handle,
+ * closing, `resume` waits the close out and re-materializes instead of
+ * returning the doomed handle, and a failing close hook never strands the
+ * teardown. A duplicate close joins the in-flight one, while an archive
+ * arriving during a plain close waits it out and then lands the archived
+ * flag directly on the persisted document (it never rides the close to
+ * success without archiving),
  * tearing sessions down on close/archive — archiving flags the session's
  * `sessionMetadata`, removes its `agentLifecycle` agents, restoring clears
  * the archived flag, and broadcasts through `event`; session start and
@@ -161,6 +165,11 @@ type MaterializeSessionOptions = Omit<CreateSessionOptions, 'sessionId'> & {
   readonly sessionId: string;
 };
 
+type ClosingEntry = {
+  readonly kind: 'close' | 'archive';
+  readonly run: Promise<void>;
+};
+
 export class WorkspaceHandlerService extends Disposable implements IWorkspaceHandlerService {
   declare readonly _serviceBrand: undefined;
   private readonly sessions = new Map<string, ISessionScopeHandle>();
@@ -173,8 +182,9 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
   private readonly _onDidForkSession = this._register(new Emitter<SessionForkedEvent>());
   readonly onDidForkSession: Event<SessionForkedEvent> = this._onDidForkSession.event;
   private readonly resuming = new Map<string, Promise<ISessionScopeHandle | undefined>>();
-  private readonly closing = new Map<string, Promise<void>>();
+  private readonly closing = new Map<string, ClosingEntry>();
   private readonly sessionLifetimes = new Map<string, AbortController>();
+  private readonly reservedTargets = new Set<string>();
 
   constructor(
     @IInstantiationService private readonly instantiation: IInstantiationService,
@@ -219,6 +229,24 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
 
   async create(opts: CreateSessionOptions): Promise<ISessionScopeHandle> {
     const sessionId = opts.sessionId ?? createSessionId();
+    if (this.sessions.has(sessionId) || this.reservedTargets.has(sessionId)) {
+      throw new Error2(
+        ErrorCodes.SESSION_ALREADY_EXISTS,
+        `Session "${sessionId}" already exists`,
+      );
+    }
+    this.reservedTargets.add(sessionId);
+    try {
+      return await this.createReserved(opts, sessionId);
+    } finally {
+      this.reservedTargets.delete(sessionId);
+    }
+  }
+
+  private async createReserved(
+    opts: CreateSessionOptions,
+    sessionId: string,
+  ): Promise<ISessionScopeHandle> {
     const handle = await this.materializeSession({ ...opts, sessionId });
     try {
       const main =
@@ -376,7 +404,7 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
     if (closing !== undefined) {
       // A close is already in flight — wait it out and re-materialize
       // instead of handing back the doomed handle.
-      return closing.then(() => this.resume(sessionId, opts));
+      return closing.run.then(() => this.resume(sessionId, opts));
     }
     const live = this.sessions.get(sessionId);
     if (live !== undefined) return Promise.resolve(live);
@@ -429,27 +457,43 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
 
   async close(sessionId: string): Promise<void> {
     const inflight = this.closing.get(sessionId);
-    if (inflight !== undefined) return inflight;
+    if (inflight !== undefined) return inflight.run;
     const handle = this.sessions.get(sessionId);
     if (handle === undefined) return;
-    return this.trackClosing(sessionId, this.doClose(sessionId, handle));
+    return this.trackClosing(sessionId, 'close', this.doClose(sessionId, handle));
   }
 
   private async doClose(sessionId: string, handle: ISessionScopeHandle): Promise<void> {
     this.invalidateSessionLifetime(sessionId);
-    await this.announceWillClose({ sessionId, handle, reason: 'exit' });
-    this.sessions.delete(sessionId);
-    await this.drainAgents(handle);
-    handle.dispose();
-    this._onDidCloseSession.fire({ sessionId });
+    try {
+      await this.announceWillClose({ sessionId, handle, reason: 'exit' });
+    } finally {
+      // A failing close hook must not strand the session half-open: the
+      // teardown always completes; the hook error still reaches the caller.
+      this.sessions.delete(sessionId);
+      await this.drainAgents(handle);
+      handle.dispose();
+      this._onDidCloseSession.fire({ sessionId });
+    }
   }
 
   async archive(sessionId: string): Promise<void> {
     const inflight = this.closing.get(sessionId);
-    if (inflight !== undefined) return inflight;
+    if (inflight !== undefined) {
+      if (inflight.kind === 'archive') return inflight.run;
+      // A plain close is already tearing the session down — the archive
+      // must not ride it to success. Wait it out (tracked, so a resume
+      // queues behind the marker write), then land the archived flag
+      // directly on the persisted document of the now-closed session.
+      return this.trackClosing(
+        sessionId,
+        'archive',
+        inflight.run.then(() => this.markArchivedOnDisk(sessionId)),
+      );
+    }
     const handle = this.sessions.get(sessionId);
     if (handle === undefined) return;
-    return this.trackClosing(sessionId, this.doArchive(sessionId, handle));
+    return this.trackClosing(sessionId, 'archive', this.doArchive(sessionId, handle));
   }
 
   private async doArchive(sessionId: string, handle: ISessionScopeHandle): Promise<void> {
@@ -461,18 +505,32 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
       type: 'event.session.archived',
       payload: { sessionId },
     });
-    await this.announceWillClose({ sessionId, handle, reason: 'exit' });
-    this.sessions.delete(sessionId);
-    handle.dispose();
-    this._onDidArchiveSession.fire({ sessionId });
+    try {
+      await this.announceWillClose({ sessionId, handle, reason: 'exit' });
+    } finally {
+      this.sessions.delete(sessionId);
+      handle.dispose();
+      this._onDidArchiveSession.fire({ sessionId });
+    }
   }
 
-  private async trackClosing(sessionId: string, run: Promise<void>): Promise<void> {
-    this.closing.set(sessionId, run);
+  private async markArchivedOnDisk(sessionId: string): Promise<void> {
+    const scope = sessionScopeOf(this.handlerScope, sessionId);
+    const meta = await this.docs.get<SessionMeta>(scope, 'state.json');
+    if (meta === undefined) return;
+    await this.docs.set(scope, 'state.json', { ...meta, archived: true, updatedAt: Date.now() });
+  }
+
+  private async trackClosing(
+    sessionId: string,
+    kind: ClosingEntry['kind'],
+    run: Promise<void>,
+  ): Promise<void> {
+    this.closing.set(sessionId, { kind, run });
     try {
       await run;
     } finally {
-      if (this.closing.get(sessionId) === run) this.closing.delete(sessionId);
+      if (this.closing.get(sessionId)?.run === run) this.closing.delete(sessionId);
     }
   }
 
@@ -509,7 +567,7 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
     // Wait out an in-flight close of the source instead of capturing its
     // doomed handle (a close starting mid-fork remains an accepted,
     // pre-existing window — fork never quiesces the source).
-    await this.closing.get(sourceId);
+    await this.closing.get(sourceId)?.run;
     const sourceHandle = this.sessions.get(sourceId);
     const indexSummary = await this.index.get(sourceId);
     if (
@@ -530,6 +588,7 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
     let targetId: string | undefined;
     let target: ISessionScopeHandle | undefined;
     let targetSessionDir: string | undefined;
+    let targetReserved = false;
     try {
       const sourceMeta =
         sourceHandle !== undefined
@@ -537,7 +596,18 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
           : await this.readMetaFromDisk(sourceId);
 
       targetId = opts.newSessionId ?? createSessionId();
-      if (this.sessions.has(targetId) || (await this.index.get(targetId)) !== undefined) {
+      if (this.sessions.has(targetId) || this.reservedTargets.has(targetId)) {
+        throw new Error2(
+          ErrorCodes.SESSION_ALREADY_EXISTS,
+          `Session "${targetId}" already exists`,
+        );
+      }
+      // The check and the reservation are one synchronous step: a concurrent
+      // create/fork of the same target id loses before either materializes,
+      // so the loser can never tear down the winner's scope or directory.
+      this.reservedTargets.add(targetId);
+      targetReserved = true;
+      if ((await this.index.get(targetId)) !== undefined) {
         throw new Error2(
           ErrorCodes.SESSION_ALREADY_EXISTS,
           `Session "${targetId}" already exists`,
@@ -612,6 +682,10 @@ export class WorkspaceHandlerService extends Disposable implements IWorkspaceHan
         await this.hostFs.remove(targetSessionDir).catch(() => {});
       }
       throw error;
+    } finally {
+      if (targetReserved && targetId !== undefined) {
+        this.reservedTargets.delete(targetId);
+      }
     }
   }
 

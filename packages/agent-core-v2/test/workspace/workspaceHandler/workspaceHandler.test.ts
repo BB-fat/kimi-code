@@ -602,6 +602,140 @@ describe('WorkspaceHandlerService', () => {
     expect(svc.get('s1')).toBeUndefined();
   });
 
+  it('resume waits out an in-flight close and returns a fresh scope', async () => {
+    const svc = await build([
+      stubPair(IWorkspaceService, persistentWorkspaceStub()),
+      stubPair(ISessionIndex, sessionIndexWithSummary('s1', '/tmp/proj')),
+      stubPair(IAgentLifecycleService, agentLifecycleWithMainStub()),
+    ]);
+    const original = await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
+
+    let closeStarted!: () => void;
+    let releaseClose!: () => void;
+    const closeBegan = new Promise<void>((resolve) => {
+      closeStarted = resolve;
+    });
+    const closeGate = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    original.accessor
+      .get(ISessionLifecycleHooks)
+      .onWillCloseSession.register('test-block', async (_event, next) => {
+        closeStarted();
+        await closeGate;
+        await next();
+      });
+
+    const closing = svc.close('s1');
+    await closeBegan;
+    // The closing session is hidden from get/list immediately.
+    expect(svc.get('s1')).toBeUndefined();
+    expect(svc.list()).toEqual([]);
+
+    let settled = false;
+    const resumed = svc.resume('s1').then((handle) => {
+      settled = true;
+      return handle;
+    });
+    await tick();
+    expect(settled).toBe(false);
+
+    releaseClose();
+    await closing;
+    const fresh = await resumed;
+    expect(fresh).toBeDefined();
+    expect(fresh).not.toBe(original);
+    expect(svc.get('s1')).toBe(fresh);
+  });
+
+  it('archive during a plain close waits it out and lands the archived flag on disk', async () => {
+    const docs = new Map<string, unknown>();
+    const docStore = {
+      _serviceBrand: undefined,
+      get: (scope: string, key: string) => Promise.resolve(docs.get(`${scope}/${key}`)),
+      set: (scope: string, key: string, value: unknown) => {
+        docs.set(`${scope}/${key}`, value);
+        return Promise.resolve();
+      },
+      delete: () => Promise.resolve(),
+      list: () => Promise.resolve([]),
+      watch: () => (_listener: unknown) => ({ dispose: () => {} }),
+      acquire: () => ({ dispose: () => {} }),
+    } as unknown as IAtomicDocumentStore;
+    const svc = await build([stubPair(IAtomicDocumentStore, docStore)]);
+    const original = await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
+    const metaKey = `${original.accessor.get(ISessionContext).metaScope}/state.json`;
+    docs.set(metaKey, { id: 's1', version: 2, createdAt: 1, updatedAt: 1, archived: false });
+
+    let releaseClose!: () => void;
+    const closeGate = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    original.accessor
+      .get(ISessionLifecycleHooks)
+      .onWillCloseSession.register('test-block', async (_event, next) => {
+        await closeGate;
+        await next();
+      });
+
+    const closing = svc.close('s1');
+    await tick();
+    const archived = svc.archive('s1');
+    releaseClose();
+    await closing;
+    await archived;
+
+    // The archive must not ride the close: the marker lands on the persisted
+    // document after the close completes.
+    expect(docs.get(metaKey)).toMatchObject({ archived: true });
+  });
+
+  it('still completes the teardown when a close hook fails', async () => {
+    const svc = await build();
+    const original = await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
+    original.accessor
+      .get(ISessionLifecycleHooks)
+      .onWillCloseSession.register('test-boom', async () => {
+        throw new Error('hook boom');
+      });
+
+    await expect(svc.close('s1')).rejects.toThrow('hook boom');
+    // The hook error reaches the caller, but the session is gone, not
+    // stranded as a half-closed zombie.
+    expect(svc.get('s1')).toBeUndefined();
+  });
+
+  it('rejects a concurrent create with the same reserved session id', async () => {
+    const svc = await build();
+
+    const [first, second] = await Promise.allSettled([
+      svc.create({ sessionId: 's1', workDir: '/tmp/proj' }),
+      svc.create({ sessionId: 's1', workDir: '/tmp/proj' }),
+    ]);
+
+    expect([first.status, second.status].sort()).toEqual(['fulfilled', 'rejected']);
+    const rejection = [first, second].find((result) => result.status === 'rejected');
+    expect((rejection as PromiseRejectedResult).reason).toMatchObject({
+      code: ErrorCodes.SESSION_ALREADY_EXISTS,
+    });
+  });
+
+  it('rejects a concurrent fork racing for the same reserved target id', async () => {
+    const svc = await build();
+    await svc.create({ sessionId: 'src', workDir: '/tmp/proj' });
+
+    const [first, second] = await Promise.allSettled([
+      svc.fork({ sourceSessionId: 'src', newSessionId: 'dst' }),
+      svc.fork({ sourceSessionId: 'src', newSessionId: 'dst' }),
+    ]);
+
+    expect([first.status, second.status].sort()).toEqual(['fulfilled', 'rejected']);
+    const rejection = [first, second].find((result) => result.status === 'rejected');
+    expect((rejection as PromiseRejectedResult).reason).toMatchObject({
+      code: ErrorCodes.SESSION_ALREADY_EXISTS,
+    });
+  });
+
   it('create seeds identity and materializes metadata', async () => {
     const svc = await build();
     const h = await svc.create({ sessionId: 's1', workDir: '/tmp/proj' });
