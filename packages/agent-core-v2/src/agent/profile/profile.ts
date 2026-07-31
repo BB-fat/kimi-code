@@ -42,7 +42,6 @@ export class ProfileError extends Error2 {
 }
 
 export interface AgentConfigData {
-  cwd: string;
   modelAlias?: string;
   modelCapabilities: ModelCapability;
   profileName?: string;
@@ -51,7 +50,6 @@ export interface AgentConfigData {
 }
 
 export type AgentConfigUpdateData = Partial<{
-  cwd: string;
   modelAlias: string;
   profileName: string;
   thinkingLevel: string;
@@ -75,7 +73,6 @@ export interface ProfileData extends AgentConfigData {
 }
 
 export type ProfileUpdateData = Partial<{
-  cwd: string;
   modelAlias: string;
   profileName: string;
   thinkingLevel: string;
@@ -87,7 +84,6 @@ export type ProfileUpdateData = Partial<{
 }>;
 
 export interface ProfileBindingSnapshot {
-  readonly cwd: string;
   readonly modelAlias?: string;
   readonly profileName?: string;
   readonly thinkingLevel: string;
@@ -101,8 +97,6 @@ export interface ProfileBindingSnapshot {
 }
 
 export interface ProfileServiceOptions {
-  readonly cwd?: string | (() => string | undefined);
-  readonly chdir?: (cwd: string) => void | Promise<void>;
   readonly emitStatusUpdated?: () => void;
 }
 
@@ -130,7 +124,6 @@ export interface BindAgentInput {
   readonly model?: string;
   readonly thinking?: string;
   readonly strictThinking?: boolean;
-  readonly cwd?: string;
 }
 
 export interface IAgentProfileService {

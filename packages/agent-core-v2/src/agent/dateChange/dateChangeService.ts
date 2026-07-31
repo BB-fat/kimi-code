@@ -27,6 +27,7 @@ import {
 } from '#/agent/contextInjector/disclosureBaseline';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentStateService } from '#/agent/state/agentState';
+import { ISessionContext } from '#/session/sessionContext/sessionContext';
 
 import { IAgentDateChangeService } from './dateChange';
 
@@ -44,6 +45,7 @@ export class AgentDateChangeService extends Disposable implements IAgentDateChan
     @IAgentContextInjectorService dynamicInjector: IAgentContextInjectorService,
     @IAgentProfileService private readonly profile: IAgentProfileService,
     @IAgentStateService private readonly states: IAgentStateService,
+    @ISessionContext private readonly sessionContext: ISessionContext,
   ) {
     super();
     this.states.register(dateChangeSeedKey);
@@ -56,7 +58,7 @@ export class AgentDateChangeService extends Disposable implements IAgentDateChan
     lastDisclosure,
   }: ContextInjectionContext): ContextInjectionResult | undefined {
     const profileData = this.profile.data();
-    if (profileData.environmentDisclosure?.cwd !== profileData.cwd) return undefined;
+    if (profileData.environmentDisclosure?.cwd !== this.sessionContext.cwd) return undefined;
     const renderGeneration = profileData.renderGeneration ?? 0;
     const current = currentDateDisclosure();
     const baseline = pickDisclosureBaseline<DateDisclosure>(
@@ -82,7 +84,7 @@ export class AgentDateChangeService extends Disposable implements IAgentDateChan
 
   private dateFromProfile(): DateDisclosure | undefined {
     const profileData = this.profile.data();
-    if (profileData.environmentDisclosure?.cwd !== profileData.cwd) return undefined;
+    if (profileData.environmentDisclosure?.cwd !== this.sessionContext.cwd) return undefined;
     const date = profileData.environmentDisclosure.date;
     if (!date?.disclosed) return undefined;
     return {

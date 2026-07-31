@@ -16,6 +16,7 @@ import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import type { EnvironmentDisclosureSnapshot } from '#/app/agentProfileCatalog/agentProfileCatalog';
+import { ISessionContext } from '#/session/sessionContext/sessionContext';
 
 import {
   createTestAgent,
@@ -56,12 +57,13 @@ function systemPromptWithDate(iso: string): string {
 
 function updateSystemPromptWithDate(
   profile: IAgentProfileService,
+  cwd: string,
   iso: string,
   renderGeneration?: number,
 ): void {
   const date = new Date(iso);
   const environment: EnvironmentDisclosureSnapshot = {
-    cwd: profile.data().cwd,
+    cwd,
     date: {
       disclosed: true,
       value: {
@@ -77,9 +79,9 @@ function updateSystemPromptWithDate(
   });
 }
 
-function updateSystemPromptWithoutDate(profile: IAgentProfileService): void {
+function updateSystemPromptWithoutDate(profile: IAgentProfileService, cwd: string): void {
   const environment: EnvironmentDisclosureSnapshot = {
-    cwd: profile.data().cwd,
+    cwd,
     date: { disclosed: false },
   };
   profile.update({
@@ -113,7 +115,7 @@ function messageText(message: ContextMessage): string {
   });
 
   it('does not inject when the system prompt date is today', async () => {
-    updateSystemPromptWithDate(profile, new Date().toISOString());
+    updateSystemPromptWithDate(profile, ctx.get(ISessionContext).cwd, new Date().toISOString());
 
     await runWillBeginStepHooks(loop);
 
@@ -123,7 +125,7 @@ function messageText(message: ContextMessage): string {
   it('injects once when the rendered date is stale, then stays quiet', async () => {
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);
-    updateSystemPromptWithDate(profile, yesterday.toISOString());
+    updateSystemPromptWithDate(profile, ctx.get(ISessionContext).cwd, yesterday.toISOString());
 
     await runWillBeginStepHooks(loop);
 
@@ -150,7 +152,7 @@ function messageText(message: ContextMessage): string {
   });
 
   it('announces each date crossed by a long-lived session', async () => {
-    updateSystemPromptWithDate(profile, new Date().toISOString());
+    updateSystemPromptWithDate(profile, ctx.get(ISessionContext).cwd, new Date().toISOString());
     await runWillBeginStepHooks(loop);
 
     vi.setSystemTime(new Date(2026, 6, 30, 12));
@@ -184,7 +186,7 @@ function messageText(message: ContextMessage): string {
     await ctx.dispose();
     ctx = createTestAgent({ persistence });
     profile = ctx.get(IAgentProfileService);
-    updateSystemPromptWithDate(profile, new Date().toISOString());
+    updateSystemPromptWithDate(profile, ctx.get(ISessionContext).cwd, new Date().toISOString());
     await ctx.wire.flush();
     await ctx.dispose();
 
@@ -206,7 +208,7 @@ function messageText(message: ContextMessage): string {
   it('uses the newer persisted render snapshot over older reminder metadata', async () => {
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);
-    updateSystemPromptWithDate(profile, yesterday.toISOString(), 2);
+    updateSystemPromptWithDate(profile, ctx.get(ISessionContext).cwd, yesterday.toISOString(), 2);
     context.append({
       role: 'user',
       content: [{ type: 'text', text: 'older date reminder' }],
@@ -239,7 +241,7 @@ function messageText(message: ContextMessage): string {
   it('re-injects after undo removes the structured reminder metadata', async () => {
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);
-    updateSystemPromptWithDate(profile, yesterday.toISOString());
+    updateSystemPromptWithDate(profile, ctx.get(ISessionContext).cwd, yesterday.toISOString());
     context.append({
       role: 'user',
       content: [{ type: 'text', text: 'first turn' }],
@@ -264,7 +266,7 @@ function messageText(message: ContextMessage): string {
   });
 
   it('adopts today silently when the system prompt carries no date line', async () => {
-    updateSystemPromptWithoutDate(profile);
+    updateSystemPromptWithoutDate(profile, ctx.get(ISessionContext).cwd);
 
     await runWillBeginStepHooks(loop);
 
@@ -273,7 +275,7 @@ function messageText(message: ContextMessage): string {
   });
 
   it('announces a crossed midnight after the silent seed', async () => {
-    updateSystemPromptWithoutDate(profile);
+    updateSystemPromptWithoutDate(profile, ctx.get(ISessionContext).cwd);
     await runWillBeginStepHooks(loop);
     expect(dateReminders(context)).toHaveLength(0);
 

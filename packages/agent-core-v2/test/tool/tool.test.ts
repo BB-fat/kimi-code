@@ -186,6 +186,7 @@ function profileCatalogWithPreference(
     get: (name) => [main, target].find((profile) => profile.name === name),
     getDefault: () => main,
     list: () => [target],
+    inspect: () => undefined,
     load: async () => {},
     reload: async () => {},
   };
@@ -238,7 +239,7 @@ function createAgentLifecycleStub(options: AgentLifecycleStubOptions = {}): Agen
   const servicesByAgentId = new Map(options.handleServices);
   const handle = (agentId: string): IAgentScopeHandle => ({
     id: agentId,
-    kind: 2,
+    kind: LifecycleScope.Agent,
     accessor: {
       get: (serviceId) => {
         const service = servicesByAgentId.get(agentId)?.get(serviceId);
@@ -586,6 +587,7 @@ describe('Agent tool description', () => {
       get: (name) => profiles.find((profile) => profile.name === name),
       getDefault: () => restricted,
       list: () => profiles,
+      inspect: () => undefined,
       load: async () => {},
       reload: async () => {},
     };
@@ -623,6 +625,7 @@ describe('Agent tool description', () => {
       get: (name) => profiles.find((profile) => profile.name === name),
       getDefault: () => caller,
       list: () => [coder, explore],
+      inspect: () => undefined,
       load: async () => {},
       reload: async () => {},
     };
@@ -658,12 +661,12 @@ describe('Agent tool description', () => {
       get: (name) => [caller, coder, explore].find((profile) => profile.name === name),
       getDefault: () => caller,
       list: () => [coder, explore],
+      inspect: () => undefined,
       load: async () => {},
       reload: async () => {},
     };
     ctx = createTestAgent(sessionService(ISessionAgentProfileCatalog, catalog));
     ctx.get(IAgentProfileService).applyBindingSnapshot({
-      cwd: '',
       profileName: 'deleted-profile',
       thinkingLevel: 'off',
       systemPrompt: 'persisted prompt',
@@ -803,6 +806,7 @@ describe('Agent tool execution contract', () => {
       get: (name) => profiles.find((profile) => profile.name === name),
       getDefault: () => caller,
       list: () => [coder, explore],
+      inspect: () => undefined,
       load: async () => {},
       reload: async () => {},
     };
@@ -834,7 +838,6 @@ describe('Agent tool execution contract', () => {
       sessionService(ISessionAgentProfileCatalog, allowlistCatalog(['coder'])),
     );
     context.get(IAgentProfileService).applyBindingSnapshot({
-      cwd: '',
       profileName: 'deleted-profile',
       thinkingLevel: 'off',
       systemPrompt: 'persisted prompt',
@@ -3052,7 +3055,7 @@ describe('Agent tools', () => {
         [emit] agent.activity.updated      { "lifecycle": "ready", "turn": { "turnId": 0, "origin": { "kind": "user" }, "phase": "running", "step": 0, "ending": false, "pendingApprovals": [], "activeToolCalls": [], "since": "<time>" }, "background": [] }
         [emit] context.spliced             { "start": 0, "deleteCount": 0, "messages": [ { "role": "user", "content": [ { "type": "text", "text": "Look up moon" } ], "toolCalls": [], "origin": { "kind": "user" }, "id": "<msg-1>" } ] }
         [wire] context.append_message      { "message": { "role": "user", "content": [ { "type": "text", "text": "Look up moon" } ], "toolCalls": [], "origin": { "kind": "user" }, "id": "<msg-1>" }, "time": "<time>" }
-        [wire] skill.disclosure.set        { "names": [ "check-kimi-code-docs", "update-config", "write-goal" ], "renderGeneration": 1, "time": "<time>" }
+        [wire] skill.disclosure.set        { "names": [], "renderGeneration": 1, "time": "<time>" }
         [emit] context.spliced             { "start": 1, "deleteCount": 0, "messages": [ { "role": "user", "content": [ { "type": "text", "text": "<auto-mode-enter-reminder>" } ], "toolCalls": [], "origin": { "kind": "injection", "variant": "permission_mode" } } ] }
         [wire] context.append_message      { "message": { "role": "user", "content": [ { "type": "text", "text": "<auto-mode-enter-reminder>" } ], "toolCalls": [], "origin": { "kind": "injection", "variant": "permission_mode" } }, "time": "<time>" }
         [emit] turn.step.started           { "turnId": 0, "step": 1, "stepId": "<uuid-1>" }

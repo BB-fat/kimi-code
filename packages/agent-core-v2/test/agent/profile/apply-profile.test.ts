@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'pathe';
 
@@ -11,7 +11,7 @@ import { IPluginService } from '#/app/plugin/plugin';
 import type { EnabledPluginSystemPrompt } from '#/app/plugin/types';
 import { InMemorySkillCatalog } from '#/app/skillCatalog/registry';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
-import { PLUGIN_SKILL_SOURCE_ID } from '#/session/sessionSkillCatalog/pluginSkillSource';
+import { PLUGIN_SKILL_SOURCE_ID } from '#/app/skillCatalog/skillSource';
 
 import {
   appService,
@@ -112,7 +112,6 @@ describe('AgentProfileService.applyProfile', () => {
   it('refreshes the active profile system prompt exactly without resetting active tools', async () => {
     await writeFile(join(workDir, 'AGENTS.md'), 'old instructions', 'utf-8');
     const { profile: svc } = buildContext();
-    svc.update({ cwd: workDir });
     await svc.applyProfile(exactProfile);
     svc.update({ activeToolNames: ['Read'] });
     await writeFile(join(workDir, 'AGENTS.md'), 'new instructions', 'utf-8');
@@ -123,10 +122,7 @@ describe('AgentProfileService.applyProfile', () => {
     expect(svc.getActiveToolNames()).toEqual(['Read']);
   });
 
-  it('does not let an older refresh overwrite a newer cwd prompt', async () => {
-    const cwdA = join(workDir, 'a');
-    const cwdB = join(workDir, 'b');
-    await Promise.all([mkdir(cwdA), mkdir(cwdB)]);
+  it('does not let an older refresh overwrite a newer prompt update', async () => {
     const fs = new HostFileSystem();
     ctx = createTestAgent(
       execEnvServices({ hostFs: fs }),
@@ -139,35 +135,23 @@ describe('AgentProfileService.applyProfile', () => {
     const firstReadStarted = deferred();
     const releaseFirstRead = deferred();
     const readdir = fs.readdir.bind(fs);
+    let blocking = true;
     vi.spyOn(fs, 'readdir').mockImplementation(async (path) => {
-      if (path === cwdA) {
+      if (blocking) {
+        blocking = false;
         firstReadStarted.resolve();
         await releaseFirstRead.promise;
       }
       return readdir(path);
     });
-    const refreshes: Promise<void>[] = [];
-    const refresh = svc.refreshSystemPrompt.bind(svc);
-    vi.spyOn(svc, 'refreshSystemPrompt').mockImplementation(() => {
-      const pending = refresh();
-      refreshes.push(pending);
-      return pending;
-    });
 
-    svc.update({ cwd: cwdA });
+    const pending = svc.refreshSystemPrompt();
     await firstReadStarted.promise;
-    svc.update({ cwd: cwdB });
-    await vi.waitFor(() => {
-      expect(refreshes).toHaveLength(2);
-    });
-    await refreshes[1];
-    expect(svc.getSystemPrompt()).toContain(`cwd:${cwdB}`);
-
+    svc.update({ systemPrompt: 'newer prompt' });
     releaseFirstRead.resolve();
-    await refreshes[0];
-    expect(svc.data().cwd).toBe(cwdB);
-    expect(svc.getSystemPrompt()).toContain(`cwd:${cwdB}`);
-    expect(svc.getSystemPrompt()).not.toContain(`cwd:${cwdA}`);
+    await pending;
+
+    expect(svc.getSystemPrompt()).toBe('newer prompt');
   });
 
   it('caches an agents-md warning when the content exceeds the 32 KB soft budget', async () => {

@@ -1,1097 +1,140 @@
 /**
- * Scenario: session skill-source discovery, merge, and plugin refresh.
+ * Scenario: the Session-scope skill-catalog view over the seeded workspace data.
  *
- * Exercises the real scoped catalog and source services with filesystem or
- * in-memory discovery boundaries, including controlled concurrent refreshes.
- * Run: `pnpm --filter @moonshot-ai/agent-core-v2 exec vitest run
+ * Exercises `SessionSkillCatalogService` against a controlled
+ * `ISessionSkillCatalogData` seed: snapshot forwarding, change-event
+ * fan-out, session-local ad-hoc sink contributions, and the no-rescan
+ * `reload()`. Run: `pnpm --filter @moonshot-ai/agent-core-v2 exec vitest run
  * test/session/sessionSkillCatalog/skillCatalog.test.ts`.
  */
 
-import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-
-import { join } from 'pathe';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { createScopedTestHost, stubPair } from '#/_base/di/test';
 import {
   _clearScopedRegistryForTests,
   LifecycleScope,
-  ScopeActivation,
   registerScopedService,
 } from '#/_base/di/scope';
-import { Emitter, type Event } from '#/_base/event';
-import { IBootstrapService } from '#/app/bootstrap/bootstrap';
-import { IPluginService } from '#/app/plugin/plugin';
-import { PluginService } from '#/app/plugin/pluginService';
-import type { ReloadSummary } from '#/app/plugin/types';
-import { IProviderService } from '#/kosong/provider/provider';
-import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
-import { IConfigService } from '#/app/config/config';
-import { IPathWatchService } from '#/app/pathWatch/pathWatch';
-import { PathWatchService } from '#/app/pathWatch/pathWatchService';
-import {
-  EXTRA_SKILL_DIRS_SECTION,
-  MERGE_ALL_AVAILABLE_SKILLS_SECTION,
-} from '#/app/skillCatalog/configSection';
-import { ISkillCatalogRuntimeOptions } from '#/app/skillCatalog/skillCatalogRuntimeOptions';
-import { BuiltinSkillSource, IBuiltinSkillSource } from '#/app/skillCatalog/builtinSkillSource';
-import { IUserFileSkillSource, UserFileSkillSource } from '#/app/skillCatalog/userFileSkillSource';
-import { InMemorySkillDiscovery } from '#/app/skillCatalog/inMemorySkillDiscovery';
-import type { SkillContribution } from '#/app/skillCatalog/skillSource';
-import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
+import { Emitter } from '#/_base/event';
+import { InMemorySkillCatalog } from '#/app/skillCatalog/registry';
+import type { SkillCatalog } from '#/app/skillCatalog/types';
+import { ISessionSkillCatalog, type ISkillCatalogSink } from '#/session/sessionSkillCatalog/skillCatalog';
+import { ISessionSkillCatalogData } from '#/session/sessionSkillCatalog/skillCatalogData';
 import { SessionSkillCatalogService } from '#/session/sessionSkillCatalog/skillCatalogService';
-import { ExplicitFileSkillSource, IExplicitFileSkillSource } from '#/session/sessionSkillCatalog/explicitFileSkillSource';
-import { ExtraFileSkillSource, IExtraFileSkillSource } from '#/session/sessionSkillCatalog/extraFileSkillSource';
-import { IWorkspaceFileSkillSource, WorkspaceFileSkillSource } from '#/session/sessionSkillCatalog/workspaceFileSkillSource';
-import { IPluginSkillSource, PluginSkillSource } from '#/session/sessionSkillCatalog/pluginSkillSource';
 import { ISessionStateService } from '#/session/state/sessionState';
 import { SessionStateService } from '#/session/state/sessionStateService';
-import { ISkillDiscovery } from '#/app/skillCatalog/skillDiscovery';
-import type { SkillRoot } from '#/app/skillCatalog/types';
-import { IHostFileSystem } from '#/os/interface/hostFileSystem';
-import { IHostFsWatchService } from '#/os/interface/hostFsWatch';
 
-import { stubBootstrap } from '../../app/bootstrap/stubs';
 import { stubSkill } from '../../app/skillCatalog/stubs';
-import { stubProviderService } from '../../app/provider/stubs';
-import { stubHostFsWatch, type StubHostFsWatch } from '../../os/stubs';
-import { createFakeHostFs } from '../../tools/fixtures/fake-exec';
 
-const bootstrapStub = stubBootstrap('/home');
-
-function pathWatchHostFs(): IHostFileSystem {
-  return createFakeHostFs({
-    stat: async () => ({ isFile: false, isDirectory: true, size: 0 }),
-    realpath: async (path) => path,
-  });
-}
-
-function configStub(): IConfigService & {
-  setExtraSkillDirs(dirs: readonly string[]): void;
-  setMergeAllAvailableSkills(value: boolean): void;
-  fireSectionChange(domain: string): void;
+function dataSeed(initial: InMemorySkillCatalog): {
+  readonly data: ISessionSkillCatalogData;
+  readonly changes: Emitter<string>;
+  replace(next: InMemorySkillCatalog): void;
 } {
-  let extraSkillDirs: readonly string[] = [];
-  let mergeAllAvailableSkills = true;
-  const sectionChangeListeners: Array<(event: unknown) => void> = [];
+  let current: SkillCatalog = initial;
+  const changes = new Emitter<string>();
   return {
-    _serviceBrand: undefined,
-    ready: Promise.resolve(),
-    onDidChangeConfiguration: () => ({ dispose: () => {} }),
-    onDidSectionChange: (listener: (event: unknown) => void) => {
-      sectionChangeListeners.push(listener);
-      return { dispose: () => {} };
+    changes,
+    data: {
+      _serviceBrand: undefined,
+      ready: Promise.resolve(),
+      onDidChange: changes.event,
+      get catalog() {
+        return current;
+      },
     },
-    get: (domain: string) => {
-      if (domain === EXTRA_SKILL_DIRS_SECTION) return [...extraSkillDirs];
-      if (domain === MERGE_ALL_AVAILABLE_SKILLS_SECTION) return mergeAllAvailableSkills;
-      return undefined;
+    replace(next: InMemorySkillCatalog) {
+      current = next;
     },
-    inspect: () => ({ value: undefined, defaultValue: undefined, userValue: undefined, memoryValue: undefined }),
-    getAll: () => ({}),
-    set: async () => {},
-    replace: async () => {},
-    reload: async () => {},
-    diagnostics: () => [],
-    setExtraSkillDirs: (dirs: readonly string[]) => {
-      extraSkillDirs = [...dirs];
-    },
-    setMergeAllAvailableSkills: (value: boolean) => {
-      mergeAllAvailableSkills = value;
-    },
-    fireSectionChange: (domain: string) => {
-      for (const listener of sectionChangeListeners) {
-        listener({ domain, source: 'set', value: undefined, previousValue: undefined });
-      }
-    },
-  } as unknown as IConfigService & {
-    setExtraSkillDirs(dirs: readonly string[]): void;
-    setMergeAllAvailableSkills(value: boolean): void;
-    fireSectionChange(domain: string): void;
   };
 }
 
-function pluginStub(
-  skillRoots: readonly SkillRoot[] = [],
-  reloadEmitter?: Emitter<ReloadSummary>,
-): IPluginService {
-  return {
-    _serviceBrand: undefined,
-    onDidReload: reloadEmitter !== undefined ? reloadEmitter.event : () => ({ dispose: () => {} }),
-    listPlugins: async () => [],
-    installPlugin: async () => ({ id: '' }) as never,
-    setPluginEnabled: async () => {},
-    setPluginMcpServerEnabled: async () => {},
-    removePlugin: async () => {},
-    reloadPlugins: async () => ({ added: [], removed: [], errors: [] }),
-    getPluginInfo: async () => {
-      throw new Error('getPluginInfo is not used by these tests');
-    },
-    listPluginCommands: async () => [],
-    checkUpdates: async () => [],
-    pluginSkillRoots: async () => skillRoots,
-    pluginAgentRoots: async () => [],
-    enabledSessionStarts: async () => [],
-    enabledSystemPrompts: async () => [],
-    enabledMcpServers: async () => ({}),
-    enabledHooks: async () => [],
-  };
+function catalogOf(...skills: readonly ReturnType<typeof stubSkill>[]): InMemorySkillCatalog {
+  const catalog = new InMemorySkillCatalog();
+  for (const skill of skills) catalog.register(skill, { replace: true });
+  return catalog;
 }
 
-function workspaceStub(workDir: string): {
-  readonly stub: ISessionWorkspaceContext;
-  setWorkDir(dir: string): void;
-} {
-  let current = workDir;
-  const stub = {
-    _serviceBrand: undefined,
-    get workDir() {
-      return current;
-    },
-    additionalDirs: [] as readonly string[],
-    setWorkDir: (dir: string) => {
-      current = dir;
-    },
-    setAdditionalDirs: () => {},
-    resolve: (rel: string) => rel,
-    isWithin: () => true,
-    assertAllowed: (p: string) => p,
-    addAdditionalDir: () => {},
-    removeAdditionalDir: () => {},
-  } satisfies ISessionWorkspaceContext;
-  return { stub, setWorkDir: (dir) => { current = dir; } };
-}
-
-function makeHost(
-  store: ISkillDiscovery,
-  ws: ISessionWorkspaceContext,
-  pluginRoots: readonly SkillRoot[] = [],
-  explicitDirs?: readonly string[],
-  pluginReloadEmitter?: Emitter<ReloadSummary>,
-) {
-  const config = configStub();
-  const watch = stubHostFsWatch();
-  const runtimeOptions = {
-    _serviceBrand: undefined,
-    explicitDirs,
-  } as unknown as ISkillCatalogRuntimeOptions;
-  const host = createScopedTestHost([
-    stubPair(ISkillDiscovery, store),
-    stubPair(IBootstrapService, bootstrapStub),
-    stubPair(IConfigService, config),
-    stubPair(ISkillCatalogRuntimeOptions, runtimeOptions),
-    stubPair(IPluginService, pluginStub(pluginRoots, pluginReloadEmitter)),
-    stubPair(IHostFileSystem, pathWatchHostFs()),
-    stubPair(IHostFsWatchService, watch),
-  ]);
-  const session = host.child(LifecycleScope.Session, 's1', [stubPair(ISessionWorkspaceContext, ws)]);
-  return { host, session, config, watch };
-}
-
-function waitForEvents(event: Event<unknown>, count: number): Promise<void> {
-  return new Promise((resolve) => {
-    let received = 0;
-    const disposable = event(() => {
-      received += 1;
-      if (received === count) {
-        disposable.dispose();
-        resolve();
-      }
-    });
-  });
-}
-
-function deferred<T>(): {
-  readonly promise: Promise<T>;
-  readonly resolve: (value: T) => void;
-} {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
-}
-
-async function withSkillCatalogWorkspace(
-  run: (fixture: { readonly workDir: string; readonly skillRoot: string }) => Promise<void>,
-): Promise<void> {
-  const workDir = await mkdtemp(join(tmpdir(), 'skill-catalog-'));
-  const skillRoot = join(workDir, '.kimi-code', 'skills');
-  await mkdir(skillRoot, { recursive: true });
-  try {
-    await run({ workDir, skillRoot: await realpath(skillRoot) });
-  } finally {
-    await rm(workDir, { recursive: true, force: true });
-  }
-}
-
-describe('SessionSkillCatalogService', () => {
+describe('SessionSkillCatalogService (seed view)', () => {
   beforeEach(() => {
-    // Keep the scoped registry limited to the catalog chain these tests
-    // exercise so unrelated OnScopeCreated registrations do not run; every
-    // other dependency arrives as a seeded stub via `createScopedTestHost`.
     _clearScopedRegistryForTests();
     registerScopedService(
       LifecycleScope.Session,
       ISessionStateService,
       SessionStateService,
-      ScopeActivation.OnScopeCreated,
-      'state',
-    );
-    registerScopedService(LifecycleScope.App, IBuiltinSkillSource, BuiltinSkillSource);
-    registerScopedService(LifecycleScope.App, IUserFileSkillSource, UserFileSkillSource);
-    registerScopedService(LifecycleScope.App, IPluginService, PluginService);
-    registerScopedService(
-      LifecycleScope.App,
-      IPathWatchService,
-      PathWatchService,
-      ScopeActivation.OnScopeCreated,
-      'pathWatch',
     );
     registerScopedService(LifecycleScope.Session, ISessionSkillCatalog, SessionSkillCatalogService);
-    registerScopedService(LifecycleScope.Session, IExplicitFileSkillSource, ExplicitFileSkillSource);
-    registerScopedService(LifecycleScope.Session, IExtraFileSkillSource, ExtraFileSkillSource);
-    registerScopedService(LifecycleScope.Session, IWorkspaceFileSkillSource, WorkspaceFileSkillSource);
-    registerScopedService(LifecycleScope.Session, IPluginSkillSource, PluginSkillSource);
   });
 
-  it('merges global and project skills; project wins on name collision', async () => {
-    const store = new InMemorySkillDiscovery();
-    store.setUserSkills([
-      stubSkill('global-only'),
-      stubSkill('shared', { description: 'from user' }),
-    ]);
-    store.setProjectSkills([
-      stubSkill('project-only'),
-      stubSkill('shared', { description: 'from project' }),
-    ]);
-    const { stub: ws } = workspaceStub('/work');
-    const { host, session } = makeHost(store, ws);
-
-    const catalog = session.accessor.get(ISessionSkillCatalog);
-    await catalog.load();
-
-    const names = catalog.catalog.listSkills().map((s) => s.name);
-    expect(names).toContain('global-only');
-    expect(names).toContain('project-only');
-    expect(names).toContain('shared');
-    expect(catalog.catalog.getSkill('shared')?.description).toBe('from project');
-    host.dispose();
-  });
-
-  it('orders project, user and plugin skills as project > user > plugin', async () => {
-    const store = new InMemorySkillDiscovery();
-    store.setUserSkills([
-      stubSkill('shared', { description: 'from user' }),
-      stubSkill('user-plugin', { description: 'from user' }),
-    ]);
-    store.setProjectSkills([stubSkill('shared', { description: 'from project' })]);
-    store.setExtraSkills([
-      stubSkill('shared', { description: 'from extra', source: 'extra' }),
-      stubSkill('user-plugin', { description: 'from extra', source: 'extra' }),
-      stubSkill('extra-plugin', { description: 'from extra', source: 'extra' }),
-    ]);
-    store.setPluginSkills([
-      stubSkill('shared', {
-        description: 'from plugin',
-        source: 'extra',
-        plugin: { id: 'demo' },
-      }),
-      stubSkill('user-plugin', {
-        description: 'from plugin',
-        source: 'extra',
-        plugin: { id: 'demo' },
-      }),
-      stubSkill('extra-plugin', {
-        description: 'from plugin',
-        source: 'extra',
-        plugin: { id: 'demo' },
-      }),
-    ]);
-    const pluginRoot: SkillRoot = {
-      path: '/plugins/demo/skills',
-      source: 'extra',
-      plugin: { id: 'demo' },
-    };
-    const { stub: ws } = workspaceStub('/work');
-    const { host, session, config } = makeHost(store, ws, [pluginRoot]);
-    config.setExtraSkillDirs(['/']);
-
-    const catalog = session.accessor.get(ISessionSkillCatalog);
-    await catalog.load();
-
-    expect(catalog.catalog.getSkill('shared')?.description).toBe('from project');
-    expect(catalog.catalog.getSkill('user-plugin')?.description).toBe('from user');
-    expect(catalog.catalog.getSkill('extra-plugin')?.description).toBe('from extra');
-    host.dispose();
-  });
-
-  it('replaces default user and project discovery with explicitDirs', async () => {
-    const store = new InMemorySkillDiscovery();
-    store.setUserSkills([stubSkill('from-explicit', { description: 'from explicit' })]);
-    store.setProjectSkills([stubSkill('project-only', { description: 'from project' })]);
-    store.setExtraSkills([stubSkill('extra-only', { description: 'from extra', source: 'extra' })]);
-    store.setPluginSkills([
-      stubSkill('plugin-only', {
-        description: 'from plugin',
-        source: 'extra',
-        plugin: { id: 'demo' },
-      }),
-    ]);
-    const pluginRoot: SkillRoot = {
-      path: '/plugins/demo/skills',
-      source: 'extra',
-      plugin: { id: 'demo' },
-    };
-    const { stub: ws } = workspaceStub('/work');
-    const { host, session, config } = makeHost(store, ws, [pluginRoot], ['/']);
-    config.setExtraSkillDirs(['/']);
-
-    const catalog = session.accessor.get(ISessionSkillCatalog);
-    await catalog.load();
-
-    expect(catalog.catalog.getSkill('from-explicit')?.description).toBe('from explicit');
-    expect(catalog.catalog.getSkill('project-only')).toBeUndefined();
-    expect(catalog.catalog.getSkill('extra-only')?.description).toBe('from extra');
-    expect(catalog.catalog.getSkill('plugin-only')?.description).toBe('from plugin');
-    host.dispose();
-  });
-
-  it('waits for config ready before loading extra skill dirs', async () => {
-    let markReady!: () => void;
-    let ready = false;
-    const configReady = new Promise<void>((resolve) => {
-      markReady = () => {
-        ready = true;
-        resolve();
-      };
-    });
-    const config = {
-      ...configStub(),
-      ready: configReady,
-      get: (domain: string) => {
-        if (domain === EXTRA_SKILL_DIRS_SECTION) return ready ? ['/'] : [];
-        if (domain === MERGE_ALL_AVAILABLE_SKILLS_SECTION) return true;
-        return undefined;
-      },
-    } as unknown as IConfigService;
-    const store = new InMemorySkillDiscovery();
-    store.setExtraSkills([stubSkill('extra-only', { description: 'from extra', source: 'extra' })]);
-    const runtimeOptions = {
-      _serviceBrand: undefined,
-    } as unknown as ISkillCatalogRuntimeOptions;
-    const { stub: ws } = workspaceStub('/work');
-    const host = createScopedTestHost([
-      stubPair(ISkillDiscovery, store),
-      stubPair(IBootstrapService, bootstrapStub),
-      stubPair(IConfigService, config),
-      stubPair(ISkillCatalogRuntimeOptions, runtimeOptions),
-      stubPair(IPluginService, pluginStub()),
-      stubPair(IHostFileSystem, pathWatchHostFs()),
-      stubPair(IHostFsWatchService, stubHostFsWatch()),
-    ]);
-    const session = host.child(LifecycleScope.Session, 's1', [stubPair(ISessionWorkspaceContext, ws)]);
-
-    const catalog = session.accessor.get(ISessionSkillCatalog);
-    let settled = false;
-    const loading = catalog.load().then(() => {
-      settled = true;
-    });
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(settled).toBe(false);
-
-    markReady();
-    await loading;
-
-    expect(catalog.catalog.getSkill('extra-only')?.description).toBe('from extra');
-    host.dispose();
-  });
-
-  it('does not arm a file source after disposal releases its pending config wait', async () => {
-    const configReady = deferred<void>();
-    const readyRequested = deferred<void>();
-    const baseConfig = configStub();
-    baseConfig.setExtraSkillDirs(['/late-skills']);
-    const config = {
-      ...baseConfig,
-      get ready() {
-        readyRequested.resolve(undefined);
-        return configReady.promise;
-      },
-    } as unknown as IConfigService;
-    const watch = stubHostFsWatch();
-    const { stub: ws } = workspaceStub('/work');
-    const host = createScopedTestHost([
-      stubPair(ISkillDiscovery, new InMemorySkillDiscovery()),
-      stubPair(IBootstrapService, bootstrapStub),
-      stubPair(IConfigService, config),
-      stubPair(ISkillCatalogRuntimeOptions, {
-        _serviceBrand: undefined,
-      } as unknown as ISkillCatalogRuntimeOptions),
-      stubPair(IPluginService, pluginStub()),
-      stubPair(IHostFileSystem, pathWatchHostFs()),
-      stubPair(IHostFsWatchService, watch),
-    ]);
+  function makeSession(data: ISessionSkillCatalogData) {
+    const host = createScopedTestHost([]);
     const session = host.child(LifecycleScope.Session, 's1', [
-      stubPair(ISessionWorkspaceContext, ws),
+      stubPair(ISessionSkillCatalogData, data),
     ]);
-    const catalog = session.accessor.get(ISessionSkillCatalog);
-    const loading = catalog.load();
+    return { host, catalog: session.accessor.get(ISessionSkillCatalog) };
+  }
 
-    await readyRequested.promise;
-    session.dispose();
-    configReady.resolve(undefined);
-    await loading;
+  it('exposes the seeded snapshot after ready', async () => {
+    const seed = dataSeed(catalogOf(stubSkill('from-workspace')));
+    const { host, catalog } = makeSession(seed.data);
 
-    expect(watch.watchedPaths()).toEqual([]);
+    await catalog.load();
+    expect(catalog.catalog.getSkill('from-workspace')).toBeDefined();
     host.dispose();
   });
 
-  it('reloads user and workspace sources when mergeAllAvailableSkills changes', async () => {
-    class CountingDiscovery implements ISkillDiscovery {
-      declare readonly _serviceBrand: undefined;
-      calls = 0;
-      async discover() {
-        this.calls++;
-        return { skills: [], skipped: [], scannedRoots: [] };
-      }
-    }
-    const store = new CountingDiscovery();
-    const config = configStub();
-    const runtimeOptions = {
-      _serviceBrand: undefined,
-    } as unknown as ISkillCatalogRuntimeOptions;
-    const { stub: ws } = workspaceStub('/work');
-    const host = createScopedTestHost([
-      stubPair(ISkillDiscovery, store),
-      stubPair(IBootstrapService, bootstrapStub),
-      stubPair(IConfigService, config),
-      stubPair(ISkillCatalogRuntimeOptions, runtimeOptions),
-      stubPair(IPluginService, pluginStub()),
-      stubPair(IHostFileSystem, pathWatchHostFs()),
-      stubPair(IHostFsWatchService, stubHostFsWatch()),
-    ]);
-    const session = host.child(LifecycleScope.Session, 's1', [stubPair(ISessionWorkspaceContext, ws)]);
-
-    const catalog = session.accessor.get(ISessionSkillCatalog);
+  it('re-folds and forwards the source id when the seed fires a change', async () => {
+    const seed = dataSeed(catalogOf(stubSkill('before')));
+    const { host, catalog } = makeSession(seed.data);
     await catalog.load();
-    const afterLoad = store.calls;
 
-    const reloaded = waitForEvents(catalog.onDidChange, 2);
-    config.fireSectionChange(MERGE_ALL_AVAILABLE_SKILLS_SECTION);
-    await reloaded;
+    const seen: string[] = [];
+    const subscription = catalog.onDidChange((sourceId) => seen.push(sourceId));
+    seed.replace(catalogOf(stubSkill('after')));
+    seed.changes.fire('workspace');
 
-    expect(store.calls).toBe(afterLoad + 2);
-    host.dispose();
-  });
-
-  it('reload replaces project skills when the workDir changes', async () => {
-    const store = new InMemorySkillDiscovery();
-    store.setUserSkills([stubSkill('global-only')]);
-    store.setProjectSkills([stubSkill('first')]);
-    const { stub: ws, setWorkDir } = workspaceStub('/work1');
-    const { host, session } = makeHost(store, ws);
-
-    const catalog = session.accessor.get(ISessionSkillCatalog);
-    await catalog.load();
-    expect(catalog.catalog.getSkill('first')).toBeDefined();
-
-    setWorkDir('/work2');
-    store.setProjectSkills([stubSkill('second')]);
-    const changes: string[] = [];
-    const subscription = catalog.onDidChange((sourceId) => changes.push(sourceId));
-    await catalog.reload();
-
-    expect(catalog.catalog.getSkill('first')).toBeUndefined();
-    expect(catalog.catalog.getSkill('second')).toBeDefined();
-    expect(catalog.catalog.getSkill('global-only')).toBeDefined();
-    expect(changes).toEqual(['catalog']);
+    expect(catalog.catalog.getSkill('before')).toBeUndefined();
+    expect(catalog.catalog.getSkill('after')).toBeDefined();
+    expect(seen).toEqual(['workspace']);
     subscription.dispose();
     host.dispose();
   });
 
-  it('does not reload when the workDir is unchanged', async () => {
-    const store = new InMemorySkillDiscovery();
-    store.setProjectSkills([stubSkill('first')]);
-    const { stub: ws } = workspaceStub('/work');
-    const { host, session } = makeHost(store, ws);
-
-    const catalog = session.accessor.get(ISessionSkillCatalog);
+  it('merges ad-hoc sink contributions over the seed and drops them on remove', async () => {
+    const seed = dataSeed(catalogOf(stubSkill('shared', { description: 'from workspace' })));
+    const { host, catalog } = makeSession(seed.data);
     await catalog.load();
 
-    store.setProjectSkills([stubSkill('second')]);
-    await catalog.load();
-
-    expect(catalog.catalog.getSkill('first')).toBeDefined();
-    expect(catalog.catalog.getSkill('second')).toBeUndefined();
-    host.dispose();
-  });
-
-  it('passes plugin skill roots to the store so plugin skills are discoverable', async () => {
-    const pluginRoot: SkillRoot = {
-      path: '/plugins/demo/skills',
-      source: 'extra',
-      plugin: { id: 'demo', instructions: 'Use the demo tools.' },
-    };
-    class ExtraRootStore implements ISkillDiscovery {
-      declare readonly _serviceBrand: undefined;
-      receivedRoots: readonly SkillRoot[] | undefined;
-      async discover(roots: readonly SkillRoot[]) {
-        if (roots.some((root) => root.plugin !== undefined)) {
-          this.receivedRoots = roots;
-        }
-        const pluginSkills = roots
-          .filter((root) => root.plugin !== undefined)
-          .map((root) => stubSkill('demo-skill', { source: 'extra', plugin: root.plugin }));
-        return { skills: pluginSkills, skipped: [], scannedRoots: [] };
-      }
-    }
-    const store = new ExtraRootStore();
-    const { stub: ws } = workspaceStub('/work');
-    const { host, session } = makeHost(store, ws, [pluginRoot]);
-
-    const catalog = session.accessor.get(ISessionSkillCatalog);
-    await catalog.load();
-
-    expect(store.receivedRoots).toEqual([pluginRoot]);
-    expect(catalog.catalog.getSkill('demo-skill')?.plugin?.id).toBe('demo');
-    expect(catalog.catalog.getPluginSkill('demo', 'demo-skill')).toBeDefined();
-    host.dispose();
-  });
-
-  it('feeds scanned roots from file sources into the merged catalog', async () => {
-    await withSkillCatalogWorkspace(async ({ workDir, skillRoot }) => {
-      class RootDiscovery implements ISkillDiscovery {
-        declare readonly _serviceBrand: undefined;
-        async discover(roots: readonly SkillRoot[]) {
-          return {
-            skills: [],
-            skipped: [],
-            scannedRoots: roots
-              .filter((root) => root.source === 'project')
-              .map((root) => root.path),
-          };
-        }
-      }
-      const { stub: ws } = workspaceStub(workDir);
-      const { host, session } = makeHost(new RootDiscovery(), ws);
-
-      try {
-        const catalog = session.accessor.get(ISessionSkillCatalog);
-        await catalog.load();
-
-        expect(catalog.catalog.getSkillRoots()).toEqual([skillRoot]);
-      } finally {
-        host.dispose();
-      }
-    });
-  });
-
-  it('feeds skipped skills from file sources into the merged catalog', async () => {
-    await withSkillCatalogWorkspace(async ({ workDir }) => {
-      const skippedEntry = {
-        path: join(workDir, '.kimi-code', 'skills', 'bad', 'SKILL.md'),
-        type: 'nope',
-        reason: 'unsupported skill type "nope"',
-      };
-      class SkippingDiscovery implements ISkillDiscovery {
-        declare readonly _serviceBrand: undefined;
-        async discover(roots: readonly SkillRoot[]) {
-          const isProject = roots.some((root) => root.source === 'project');
-          return {
-            skills: [],
-            skipped: isProject ? [skippedEntry] : [],
-            scannedRoots: [],
-          };
-        }
-      }
-      const { stub: ws } = workspaceStub(workDir);
-      const { host, session } = makeHost(new SkippingDiscovery(), ws);
-
-      try {
-        const catalog = session.accessor.get(ISessionSkillCatalog);
-        await catalog.load();
-
-        expect(catalog.catalog.getSkippedByPolicy()).toEqual([skippedEntry]);
-      } finally {
-        host.dispose();
-      }
-    });
-  });
-
-  it('fires onDidChange with the plugin source id after a plugin reload re-pulls plugin skills', async () => {
-    const store = new InMemorySkillDiscovery();
-    store.setPluginSkills([
-      stubSkill('demo-skill', { source: 'extra', plugin: { id: 'demo' } }),
-    ]);
-    const reloadEmitter = new Emitter<ReloadSummary>();
-    const pluginRoot: SkillRoot = {
-      path: '/plugins/demo/skills',
-      source: 'extra',
-      plugin: { id: 'demo' },
-    };
-    const { stub: ws } = workspaceStub('/work');
-    const { host, session } = makeHost(store, ws, [pluginRoot], undefined, reloadEmitter);
-
-    try {
-      const catalog = session.accessor.get(ISessionSkillCatalog);
-      await catalog.load();
-      expect(catalog.catalog.getPluginSkill('demo', 'demo-skill')).toBeDefined();
-
-      const refreshed = new Promise<string>((resolve) => {
-        const d = catalog.onDidChange((sourceId) => {
-          d.dispose();
-          resolve(sourceId);
-        });
-      });
-      reloadEmitter.fire({ added: [], removed: [], errors: [] });
-
-      await expect(refreshed).resolves.toBe('plugin');
-    } finally {
-      host.dispose();
-      reloadEmitter.dispose();
-    }
-  });
-
-  it('queues a plugin refresh during initial load so the refreshed contribution remains active', async () => {
-    const initialLoad = deferred<SkillContribution>();
-    const refreshedLoad = deferred<SkillContribution>();
-    const initialStarted = deferred<void>();
-    const refreshedStarted = deferred<void>();
-    const sourceChanges = new Emitter<void>();
-    let loadCount = 0;
-    const pluginSource: IPluginSkillSource = {
-      _serviceBrand: undefined,
-      id: 'plugin',
-      priority: 5,
-      onDidChange: sourceChanges.event,
-      load: () => {
-        loadCount += 1;
-        if (loadCount === 1) {
-          initialStarted.resolve(undefined);
-          return initialLoad.promise;
-        }
-        if (loadCount === 2) {
-          refreshedStarted.resolve(undefined);
-          return refreshedLoad.promise;
-        }
-        throw new Error('unexpected plugin source load');
-      },
-    };
-    const { stub: ws } = workspaceStub('/work');
-    const host = createScopedTestHost([
-      stubPair(ISkillDiscovery, new InMemorySkillDiscovery()),
-      stubPair(IBootstrapService, bootstrapStub),
-      stubPair(IConfigService, configStub()),
-      stubPair(ISkillCatalogRuntimeOptions, {
-        _serviceBrand: undefined,
-      } as unknown as ISkillCatalogRuntimeOptions),
-      stubPair(IPluginService, pluginStub()),
-      stubPair(IHostFileSystem, pathWatchHostFs()),
-      stubPair(IHostFsWatchService, stubHostFsWatch()),
-    ]);
-    const session = host.child(LifecycleScope.Session, 's1', [
-      stubPair(ISessionWorkspaceContext, ws),
-      stubPair(IPluginSkillSource, pluginSource),
-    ]);
-
-    try {
-      const catalog = session.accessor.get(ISessionSkillCatalog);
-      const loading = catalog.load();
-      await initialStarted.promise;
-      const sourceIds: string[] = [];
-      const refreshed = new Promise<void>((resolve) => {
-        const subscription = catalog.onDidChange((sourceId) => {
-          sourceIds.push(sourceId);
-          if (sourceId === 'plugin') {
-            subscription.dispose();
-            resolve();
-          }
-        });
-      });
-
-      sourceChanges.fire();
-
-      expect(loadCount).toBe(1);
-
-      initialLoad.resolve({
-        skills: [
-          stubSkill('stale-skill', { source: 'extra', plugin: { id: 'demo' } }),
-        ],
-      });
-      await refreshedStarted.promise;
-      refreshedLoad.resolve({
-        skills: [
-          stubSkill('fresh-skill', { source: 'extra', plugin: { id: 'demo' } }),
-        ],
-      });
-      await Promise.all([loading, refreshed]);
-
-      expect(sourceIds).toEqual(['plugin']);
-      expect(catalog.catalog.getPluginSkill('demo', 'stale-skill')).toBeUndefined();
-      expect(catalog.catalog.getPluginSkill('demo', 'fresh-skill')).toBeDefined();
-    } finally {
-      host.dispose();
-      sourceChanges.dispose();
-    }
-  });
-
-  it('does not commit a source contribution that finishes after session disposal', async () => {
-    const started = deferred<void>();
-    const result = deferred<SkillContribution>();
-    let loadSignal: AbortSignal | undefined;
-    const pluginSource: IPluginSkillSource = {
-      _serviceBrand: undefined,
-      id: 'plugin',
-      priority: 5,
-      load: (signal) => {
-        loadSignal = signal;
-        started.resolve(undefined);
-        return result.promise;
-      },
-    };
-    const { stub: ws } = workspaceStub('/work');
-    const host = createScopedTestHost([
-      stubPair(ISkillDiscovery, new InMemorySkillDiscovery()),
-      stubPair(IBootstrapService, bootstrapStub),
-      stubPair(IConfigService, configStub()),
-      stubPair(ISkillCatalogRuntimeOptions, {
-        _serviceBrand: undefined,
-      } as unknown as ISkillCatalogRuntimeOptions),
-      stubPair(IPluginService, pluginStub()),
-      stubPair(IHostFileSystem, pathWatchHostFs()),
-      stubPair(IHostFsWatchService, stubHostFsWatch()),
-    ]);
-    const session = host.child(LifecycleScope.Session, 's1', [
-      stubPair(ISessionWorkspaceContext, ws),
-      stubPair(IPluginSkillSource, pluginSource),
-    ]);
-    const catalog = session.accessor.get(ISessionSkillCatalog);
-    const loading = catalog.load();
-
-    await started.promise;
-    session.dispose();
-    expect(loadSignal?.aborted).toBe(true);
-    result.resolve({ skills: [stubSkill('late-skill')] });
-    await loading;
-
-    expect(catalog.catalog.getSkill('late-skill')).toBeUndefined();
-    host.dispose();
-  });
-
-  it('binds thisArg when forwarding plugin reloads through the plugin skill source', async () => {
-    const reloadEmitter = new Emitter<ReloadSummary>();
-    const pluginService = pluginStub([], reloadEmitter);
-    const { stub: ws } = workspaceStub('/work');
-    const host = createScopedTestHost([
-      stubPair(ISkillDiscovery, new InMemorySkillDiscovery()),
-      stubPair(IBootstrapService, bootstrapStub),
-      stubPair(IConfigService, configStub()),
-      stubPair(ISkillCatalogRuntimeOptions, {
-        _serviceBrand: undefined,
-      } as unknown as ISkillCatalogRuntimeOptions),
-      stubPair(IPluginService, pluginService),
-      stubPair(IHostFileSystem, pathWatchHostFs()),
-      stubPair(IHostFsWatchService, stubHostFsWatch()),
-    ]);
-    const session = host.child(LifecycleScope.Session, 's1', [
-      stubPair(ISessionWorkspaceContext, ws),
-    ]);
-
-    try {
-      const source = session.accessor.get(IPluginSkillSource);
-      void source.id;
-      const receiver = { tag: 'receiver' };
-      const seen: unknown[] = [];
-      const subscription = source.onDidChange?.(
-        function (this: unknown) {
-          seen.push(this);
-        },
-        receiver,
-      );
-
-      reloadEmitter.fire({ added: [], removed: [], errors: [] });
-
-      expect(seen).toEqual([receiver]);
-      subscription?.dispose();
-    } finally {
-      host.dispose();
-      reloadEmitter.dispose();
-    }
-  });
-
-  it('keeps non-plugin skills working and recovers plugin skills after a corrupt installed.json is fixed and reloaded', async () => {
-    const homeDir = await mkdtemp(join(tmpdir(), 'plugin-home-'));
-    await mkdir(join(homeDir, 'plugins'), { recursive: true });
-    await writeFile(join(homeDir, 'plugins', 'installed.json'), '{ not json', 'utf8');
-
-    const managedRoot = join(homeDir, 'plugins', 'managed', 'demo');
-    await mkdir(join(managedRoot, 'skills', 'demo-skill'), { recursive: true });
-    await writeFile(
-      join(managedRoot, 'kimi.plugin.json'),
-      JSON.stringify({ name: 'demo', skills: './skills/' }),
-      'utf8',
+    const sink = catalog as unknown as ISkillCatalogSink;
+    sink.set(
+      'adhoc',
+      { skills: [stubSkill('shared', { description: 'from adhoc' }), stubSkill('adhoc-only')] },
+      { priority: 40 },
     );
-    await writeFile(
-      join(managedRoot, 'skills', 'demo-skill', 'SKILL.md'),
-      '---\nname: demo-skill\ndescription: demo\n---\nbody',
-      'utf8',
-    );
+    expect(catalog.catalog.getSkill('shared')?.description).toBe('from adhoc');
+    expect(catalog.catalog.getSkill('adhoc-only')).toBeDefined();
 
-    const store = new InMemorySkillDiscovery();
-    store.setUserSkills([stubSkill('global-only')]);
-    store.setPluginSkills([
-      stubSkill('demo-skill', { source: 'extra', plugin: { id: 'demo' } }),
-    ]);
-    const host = createScopedTestHost([
-      stubPair(ISkillDiscovery, store),
-      stubPair(IBootstrapService, stubBootstrap(homeDir)),
-      stubPair(IConfigService, configStub()),
-      stubPair(ISkillCatalogRuntimeOptions, {
-        _serviceBrand: undefined,
-      } as unknown as ISkillCatalogRuntimeOptions),
-      stubPair(IProviderService, stubProviderService()),
-      stubPair(IHostFileSystem, pathWatchHostFs()),
-      stubPair(IHostFsWatchService, stubHostFsWatch()),
-    ]);
-    const { stub: ws } = workspaceStub('/work');
-    const session = host.child(LifecycleScope.Session, 's1', [
-      stubPair(ISessionWorkspaceContext, ws),
-    ]);
-
-    try {
-      const catalog = session.accessor.get(ISessionSkillCatalog);
-      await catalog.load();
-      expect(catalog.catalog.getSkill('global-only')).toBeDefined();
-      expect(catalog.catalog.getPluginSkill('demo', 'demo-skill')).toBeUndefined();
-
-      await writeFile(
-        join(homeDir, 'plugins', 'installed.json'),
-        JSON.stringify({
-          version: 1,
-          plugins: [
-            {
-              id: 'demo',
-              root: managedRoot,
-              source: 'local-path',
-              enabled: true,
-              installedAt: '2026-01-01T00:00:00.000Z',
-              updatedAt: '2026-01-01T00:00:00.000Z',
-            },
-          ],
-        }),
-        'utf8',
-      );
-      const refreshed = new Promise<void>((resolve) => {
-        const d = catalog.onDidChange((sourceId) => {
-          if (sourceId === 'plugin') {
-            d.dispose();
-            resolve();
-          }
-        });
-      });
-      await host.app.accessor.get(IPluginService).reloadPlugins();
-      await refreshed;
-
-      expect(catalog.catalog.getPluginSkill('demo', 'demo-skill')).toBeDefined();
-    } finally {
-      host.dispose();
-      await rm(homeDir, { recursive: true, force: true });
-    }
+    sink.remove('adhoc');
+    expect(catalog.catalog.getSkill('shared')?.description).toBe('from workspace');
+    expect(catalog.catalog.getSkill('adhoc-only')).toBeUndefined();
+    host.dispose();
   });
 
-  it('reloads the user source after a debounced fs event under a watched root', async () => {
-    const store = new InMemorySkillDiscovery();
-    store.setUserSkills([stubSkill('initial')]);
-    const { stub: ws } = workspaceStub('/work');
-    const { host, session, watch } = makeHost(store, ws);
+  it('reload re-folds the current seed without rescanning and fires catalog', async () => {
+    const seed = dataSeed(catalogOf(stubSkill('one')));
+    const { host, catalog } = makeSession(seed.data);
+    await catalog.load();
 
-    try {
-      const catalog = session.accessor.get(ISessionSkillCatalog);
-      await catalog.load();
-      expect(catalog.catalog.getSkill('initial')).toBeDefined();
-      expect(watch.watchedPaths()).toContain('/home/skills');
-      expect(watch.watchedPaths()).toContain('/home/test/.agents/skills');
+    // A silent seed swap (no change event) becomes visible through reload.
+    seed.replace(catalogOf(stubSkill('two')));
+    const seen: string[] = [];
+    const subscription = catalog.onDidChange((sourceId) => seen.push(sourceId));
+    await catalog.reload();
 
-      store.setUserSkills([stubSkill('initial'), stubSkill('added')]);
-      const refreshed = new Promise<string>((resolve) => {
-        const subscription = catalog.onDidChange((sourceId) => {
-          subscription.dispose();
-          resolve(sourceId);
-        });
-      });
-      watch.fire('/home/test/.agents/skills/added/SKILL.md', { action: 'created' });
-      const sourceId = await refreshed;
-
-      expect(sourceId).toBe('user');
-      expect(catalog.catalog.getSkill('added')).toBeDefined();
-    } finally {
-      host.dispose();
-    }
-  });
-
-  it('reloads the workspace source after an fs event under a project skills root', async () => {
-    const store = new InMemorySkillDiscovery();
-    const { stub: ws } = workspaceStub('/work');
-    const { host, session, watch } = makeHost(store, ws);
-
-    try {
-      const catalog = session.accessor.get(ISessionSkillCatalog);
-      await catalog.load();
-      expect(watch.watchedPaths()).toContain('/work/.kimi-code/skills');
-      expect(watch.watchedPaths()).toContain('/work/.agents/skills');
-
-      store.setProjectSkills([stubSkill('project-added')]);
-      const refreshed = new Promise<string>((resolve) => {
-        const subscription = catalog.onDidChange((sourceId) => {
-          subscription.dispose();
-          resolve(sourceId);
-        });
-      });
-      watch.fire('/work/.agents/skills/project-added/SKILL.md', { action: 'created' });
-      const sourceId = await refreshed;
-
-      expect(sourceId).toBe('workspace');
-      expect(catalog.catalog.getSkill('project-added')).toBeDefined();
-    } finally {
-      host.dispose();
-    }
-  });
-
-  it('reloads the explicit source after an fs event under an explicit root', async () => {
-    const store = new InMemorySkillDiscovery();
-    store.setUserSkills([stubSkill('initial')]);
-    const { stub: ws } = workspaceStub('/work');
-    const root = tmpdir();
-    const { host, session, watch } = makeHost(store, ws, [], [root]);
-
-    try {
-      const catalog = session.accessor.get(ISessionSkillCatalog);
-      await catalog.load();
-      expect(catalog.catalog.getSkill('initial')).toBeDefined();
-      expect(watch.watchedPaths()).toContain(root);
-
-      store.setUserSkills([stubSkill('initial'), stubSkill('explicit-added')]);
-      const refreshed = new Promise<string>((resolve) => {
-        const subscription = catalog.onDidChange((sourceId) => {
-          if (sourceId !== 'explicit') return;
-          subscription.dispose();
-          resolve(sourceId);
-        });
-      });
-      watch.fire(join(root, 'explicit-added', 'SKILL.md'), { action: 'created' });
-
-      await expect(refreshed).resolves.toBe('explicit');
-      expect(catalog.catalog.getSkill('explicit-added')).toBeDefined();
-    } finally {
-      host.dispose();
-    }
-  });
-
-  it('reloads the extra source after an fs event under an extra root', async () => {
-    const store = new InMemorySkillDiscovery();
-    store.setExtraSkills([stubSkill('initial-extra', { source: 'extra' })]);
-    const { stub: ws } = workspaceStub('/work');
-    const { host, session, config, watch } = makeHost(store, ws);
-    const root = tmpdir();
-    config.setExtraSkillDirs([root]);
-
-    try {
-      const catalog = session.accessor.get(ISessionSkillCatalog);
-      await catalog.load();
-      expect(catalog.catalog.getSkill('initial-extra')).toBeDefined();
-      expect(watch.watchedPaths()).toContain(root);
-
-      store.setExtraSkills([
-        stubSkill('initial-extra', { source: 'extra' }),
-        stubSkill('extra-added', { source: 'extra' }),
-      ]);
-      const refreshed = new Promise<string>((resolve) => {
-        const subscription = catalog.onDidChange((sourceId) => {
-          if (sourceId !== 'extra') return;
-          subscription.dispose();
-          resolve(sourceId);
-        });
-      });
-      watch.fire(join(root, 'extra-added', 'SKILL.md'), { action: 'created' });
-
-      await expect(refreshed).resolves.toBe('extra');
-      expect(catalog.catalog.getSkill('extra-added')).toBeDefined();
-    } finally {
-      host.dispose();
-    }
-  });
-
-  it('reloads the plugin source after an fs event under a plugin skill root', async () => {
-    const store = new InMemorySkillDiscovery();
-    store.setPluginSkills([
-      stubSkill('initial-plugin', { source: 'extra', plugin: { id: 'demo' } }),
-    ]);
-    const pluginRoot: SkillRoot = {
-      path: '/plugins/demo/skills',
-      source: 'extra',
-      plugin: { id: 'demo' },
-    };
-    const { stub: ws } = workspaceStub('/work');
-    const { host, session, watch } = makeHost(store, ws, [pluginRoot]);
-
-    try {
-      const catalog = session.accessor.get(ISessionSkillCatalog);
-      await catalog.load();
-      expect(catalog.catalog.getPluginSkill('demo', 'initial-plugin')).toBeDefined();
-      expect(watch.watchedPaths()).toContain(pluginRoot.path);
-
-      store.setPluginSkills([
-        stubSkill('initial-plugin', { source: 'extra', plugin: { id: 'demo' } }),
-        stubSkill('added-plugin', { source: 'extra', plugin: { id: 'demo' } }),
-      ]);
-      const refreshed = new Promise<string>((resolve) => {
-        const subscription = catalog.onDidChange((sourceId) => {
-          if (sourceId !== 'plugin') return;
-          subscription.dispose();
-          resolve(sourceId);
-        });
-      });
-      watch.fire('/plugins/demo/skills/added-plugin/SKILL.md', { action: 'created' });
-
-      await expect(refreshed).resolves.toBe('plugin');
-      expect(catalog.catalog.getPluginSkill('demo', 'added-plugin')).toBeDefined();
-    } finally {
-      host.dispose();
-    }
-  });
-
-  it('keeps the previous contribution when a watch-triggered reload fails', async () => {
-    const store = new InMemorySkillDiscovery();
-    store.setUserSkills([stubSkill('initial')]);
-    let failDiscovery = false;
-    const reloadAttempted = deferred<void>();
-    const discovery: ISkillDiscovery = {
-      _serviceBrand: undefined,
-      discover: async (roots) => {
-        if (failDiscovery) {
-          reloadAttempted.resolve(undefined);
-          throw new Error('scan failed');
-        }
-        return store.discover(roots);
-      },
-    };
-    const { stub: ws } = workspaceStub('/work');
-    const { host, session, watch } = makeHost(discovery, ws);
-
-    try {
-      const catalog = session.accessor.get(ISessionSkillCatalog);
-      await catalog.load();
-      expect(catalog.catalog.getSkill('initial')).toBeDefined();
-
-      failDiscovery = true;
-      watch.fire('/home/test/.agents/skills/added/SKILL.md', { action: 'created' });
-      await reloadAttempted.promise;
-
-      expect(catalog.catalog.getSkill('initial')).toBeDefined();
-    } finally {
-      host.dispose();
-    }
+    expect(catalog.catalog.getSkill('two')).toBeDefined();
+    expect(seen).toEqual(['catalog']);
+    subscription.dispose();
+    host.dispose();
   });
 });
