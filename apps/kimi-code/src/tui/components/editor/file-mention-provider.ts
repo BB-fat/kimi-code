@@ -20,6 +20,12 @@ export interface SlashAutocompleteCommand extends SlashCommand {
   readonly aliases?: readonly string[];
   /** When true, offered by mid-prompt `/` autocomplete (not only at input start). */
   readonly midPrompt?: boolean;
+  /**
+   * When true, selecting this command from the mid-prompt menu runs it
+   * immediately (via the `onImmediateCommand` constructor callback) instead of
+   * inserting its name into the text. Leading-slash selection still inserts.
+   */
+  readonly immediate?: boolean;
 }
 
 interface FsMentionCandidate {
@@ -49,6 +55,7 @@ export class FileMentionProvider implements AutocompleteProvider {
     private readonly fdPath: string | null,
     additionalDirs: readonly string[] = [],
     private readonly getInputMode: () => 'prompt' | 'bash' = () => 'prompt',
+    private readonly onImmediateCommand?: (name: string) => void,
   ) {
     this.additionalDirs = additionalDirs.map((dir) => normalizePath(resolve(workDir, dir)));
     // Build an expanded list that includes alias entries so that
@@ -169,11 +176,22 @@ export class FileMentionProvider implements AutocompleteProvider {
 
         if (matches.length > 0) {
           return {
-            items: matches.map((m) => ({
-              value: m.cmd.name,
-              label: m.label,
-              description: formatSlashCommandDescription(m.cmd),
-            })),
+            items: matches.map((m) => {
+              const description = formatSlashCommandDescription(m.cmd);
+              // Mid-prompt immediate commands run on selection instead of
+              // inserting text — say so in the menu.
+              const note =
+                !slashToken.isLeading && m.cmd.immediate === true
+                  ? 'runs immediately'
+                  : undefined;
+              return {
+                value: m.cmd.name,
+                label: m.label,
+                description:
+                  [description, note].filter((part) => part !== undefined).join(' — ') ||
+                  undefined,
+              };
+            }),
             // Prefix is only the `/token` so applyCompletion replaces just that
             // span, including when the slash sits mid-prompt.
             prefix: slashToken.token,
@@ -221,7 +239,7 @@ export class FileMentionProvider implements AutocompleteProvider {
     cursorCol: number,
     item: AutocompleteItem,
     prefix: string,
-  ): { lines: string[]; cursorLine: number; cursorCol: number } {
+  ): { lines: string[]; cursorLine: number; cursorCol: number; preventSubmit?: boolean } {
     // In bash mode a leading `/` is a path, but pi-tui's applyCompletion
     // mistakes it for a slash command (prefix starts with `/`, nothing before
     // it, no second `/`) and prepends another `/`, producing e.g.
@@ -242,8 +260,24 @@ export class FileMentionProvider implements AutocompleteProvider {
       const currentLine = lines[cursorLine] ?? '';
       const textBeforeCursor = currentLine.slice(0, cursorCol);
       const slashToken = extractSlashTokenAtCursor(textBeforeCursor);
-      const isCommandItem = this.slashCommands.some((cmd) => cmd.name === item.value);
-      if (slashToken !== null && slashToken.token === prefix && isCommandItem) {
+      const command = this.slashCommands.find((cmd) => cmd.name === item.value);
+      if (slashToken !== null && slashToken.token === prefix && command !== undefined) {
+        // Mid-prompt selection of an immediate command runs it in place: the
+        // `/token` is dropped from the draft, and Enter must not fall through
+        // to submit (pi-tui submits slash-prefix completions on confirm).
+        if (!slashToken.isLeading && command.immediate === true) {
+          this.onImmediateCommand?.(command.name);
+          const beforePrefix = currentLine.slice(0, slashToken.startIndex);
+          const afterCursor = currentLine.slice(cursorCol);
+          const newLines = [...lines];
+          newLines[cursorLine] = `${beforePrefix}${afterCursor}`;
+          return {
+            lines: newLines,
+            cursorLine,
+            cursorCol: beforePrefix.length,
+            preventSubmit: true,
+          };
+        }
         const beforePrefix = currentLine.slice(0, slashToken.startIndex);
         const afterCursor = currentLine.slice(cursorCol);
         const newLine = `${beforePrefix}/${item.value} ${afterCursor}`;

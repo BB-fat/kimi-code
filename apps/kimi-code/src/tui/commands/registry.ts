@@ -163,6 +163,7 @@ export const BUILTIN_SLASH_COMMANDS = [
     description: 'Open TUI settings',
     priority: 100,
     availability: 'always',
+    midPrompt: true,
   },
   {
     name: 'plan',
@@ -212,6 +213,7 @@ export const BUILTIN_SLASH_COMMANDS = [
     description: 'Manage AI providers (add / delete / refresh)',
     priority: 95,
     availability: 'always',
+    midPrompt: true,
   },
   {
     name: 'btw',
@@ -226,6 +228,7 @@ export const BUILTIN_SLASH_COMMANDS = [
     description: 'Show available commands and shortcuts',
     priority: 80,
     availability: 'always',
+    midPrompt: true,
   },
   {
     name: 'new',
@@ -245,6 +248,7 @@ export const BUILTIN_SLASH_COMMANDS = [
     description: 'Browse background tasks',
     priority: 80,
     availability: 'always',
+    midPrompt: true,
   },
   {
     name: 'mcp',
@@ -252,6 +256,7 @@ export const BUILTIN_SLASH_COMMANDS = [
     description: 'Show MCP server status',
     priority: 60,
     availability: 'always',
+    midPrompt: true,
   },
   {
     name: 'plugins',
@@ -259,6 +264,7 @@ export const BUILTIN_SLASH_COMMANDS = [
     description: 'Manage plugins',
     priority: 60,
     availability: 'always',
+    midPrompt: true,
   },
   {
     name: 'add-dir',

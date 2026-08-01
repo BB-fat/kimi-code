@@ -186,6 +186,31 @@ export function dispatchInput(host: SlashCommandHost, text: string): void {
   void executeSlashIntent(host, text, intent);
 }
 
+/**
+ * Run a built-in slash command triggered by selecting it from the mid-prompt
+ * autocomplete. Unlike dispatchInput the editor draft is still in place, so a
+ * blocked command only reports the error — it must not touch the draft.
+ */
+export function triggerImmediateSlashCommand(host: SlashCommandHost, commandName: string): void {
+  const intent = resolveSlashCommandInput({
+    input: `/${commandName}`,
+    skillCommandMap: host.skillCommandMap,
+    pluginCommandMap: host.pluginCommandMap,
+    isStreaming: host.state.appState.streamingPhase !== 'idle',
+    isCompacting: host.state.appState.isCompacting,
+  });
+  if (intent.kind === 'blocked') {
+    host.track('input_command_invalid', { reason: 'blocked', command: intent.commandName });
+    host.showError(slashBusyMessage(intent.commandName, intent.reason));
+    return;
+  }
+  if (intent.kind !== 'builtin') return;
+  host.track('input_command', { command: intent.name });
+  void handleBuiltInSlashCommand(host, intent.name, intent.args).catch((error: unknown) => {
+    host.showError(formatErrorMessage(error));
+  });
+}
+
 async function executeSlashIntent(
   host: SlashCommandHost,
   originalInput: string,

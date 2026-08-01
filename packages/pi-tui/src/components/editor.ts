@@ -796,6 +796,12 @@ export class Editor implements Component, Focusable {
 
 					if (this.autocompletePrefix.startsWith("/")) {
 						this.cancelAutocomplete();
+						// The completion ran a side effect (e.g. an in-place command);
+						// keep the draft instead of submitting it.
+						if (result.preventSubmit === true) {
+							if (this.onChange) this.onChange(this.getText());
+							return;
+						}
 						// Fall through to submit
 					} else {
 						this.cancelAutocomplete();

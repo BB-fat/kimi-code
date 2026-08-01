@@ -2761,6 +2761,49 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.isShowingAutocomplete(), false);
 		});
 
+		it("does not submit when a slash completion returns preventSubmit", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+
+			// Provider whose completion runs a side effect instead of editing text
+			const mockProvider: AutocompleteProvider = {
+				getSuggestions: async (lines, _cursorLine, cursorCol) => {
+					const text = lines[0] || "";
+					const prefix = text.slice(0, cursorCol);
+					if (prefix.startsWith("/")) {
+						return {
+							items: [{ value: "/plan", label: "plan", description: "Toggle plan mode" }],
+							prefix,
+						};
+					}
+					return null;
+				},
+				applyCompletion: (lines, cursorLine, cursorCol) => ({
+					lines,
+					cursorLine,
+					cursorCol,
+					preventSubmit: true,
+				}),
+			};
+
+			editor.setAutocompleteProvider(mockProvider);
+			let submitted = "";
+			editor.onSubmit = (text) => {
+				submitted = text;
+			};
+
+			editor.handleInput("/");
+			await flushAutocomplete();
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+
+			// Enter confirms the completion: the menu closes, the draft stays, and
+			// the input is NOT submitted (slash completions normally fall through
+			// to submit on confirm).
+			editor.handleInput("\r");
+			assert.strictEqual(editor.isShowingAutocomplete(), false);
+			assert.strictEqual(submitted, "");
+			assert.strictEqual(editor.getText(), "/");
+		});
+
 		it("applies exact typed slash-argument value on Enter even when first item is highlighted", async () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 

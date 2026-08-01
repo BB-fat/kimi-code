@@ -57,6 +57,14 @@ const LARK_CALENDAR_COMMAND = {
   midPrompt: true,
 };
 
+const PLAN_COMMAND = {
+  name: 'plan',
+  aliases: [],
+  description: 'Toggle plan mode',
+  midPrompt: true,
+  immediate: true,
+};
+
 const HELP_COMMAND = {
   name: 'help',
   aliases: ['h'],
@@ -284,6 +292,66 @@ describe('FileMentionProvider', () => {
 
     expect(applied.lines[0]).toBe('please /yolo ');
     expect(applied.cursorCol).toBe('please /yolo '.length);
+  });
+
+  it('runs an immediate command on mid-prompt selection and drops the token', () => {
+    const triggered: string[] = [];
+    const provider = new FileMentionProvider([PLAN_COMMAND], workDir, NO_FD, [], () => 'prompt', (name) => {
+      triggered.push(name);
+    });
+    const line = 'please /pl';
+    const applied = provider.applyCompletion([line], 0, line.length, {
+      value: 'plan',
+      label: 'plan',
+    }, '/pl');
+
+    expect(triggered).toEqual(['plan']);
+    expect(applied.lines).toEqual(['please ']);
+    expect(applied.cursorCol).toBe('please '.length);
+    expect(applied.preventSubmit).toBe(true);
+  });
+
+  it('keeps text after the cursor when an immediate command drops the token', () => {
+    const triggered: string[] = [];
+    const provider = new FileMentionProvider([PLAN_COMMAND], workDir, NO_FD, [], () => 'prompt', (name) => {
+      triggered.push(name);
+    });
+    const line = 'please /pl and more';
+    const applied = provider.applyCompletion([line], 0, 'please /pl'.length, {
+      value: 'plan',
+      label: 'plan',
+    }, '/pl');
+
+    expect(triggered).toEqual(['plan']);
+    expect(applied.lines).toEqual(['please  and more']);
+    expect(applied.cursorCol).toBe('please '.length);
+    expect(applied.preventSubmit).toBe(true);
+  });
+
+  it('still inserts an immediate command at the leading slash', () => {
+    const triggered: string[] = [];
+    const provider = new FileMentionProvider([PLAN_COMMAND], workDir, NO_FD, [], () => 'prompt', (name) => {
+      triggered.push(name);
+    });
+    const applied = provider.applyCompletion(['/pl'], 0, 3, { value: 'plan', label: 'plan' }, '/pl');
+
+    expect(triggered).toEqual([]);
+    expect(applied.lines[0]).toBe('/plan ');
+    expect(applied.preventSubmit).toBeUndefined();
+  });
+
+  it('marks immediate commands in the mid-prompt menu only', async () => {
+    const provider = new FileMentionProvider([PLAN_COMMAND, LARK_CALENDAR_COMMAND], workDir, NO_FD);
+
+    const mid = await provider.getSuggestions(['please /'], 0, 'please /'.length, { signal: ctrl() });
+    const midPlan = mid!.items.find((item) => item.value === 'plan');
+    const midSkill = mid!.items.find((item) => item.value === 'skill:lark-calendar');
+    expect(midPlan?.description).toContain('runs immediately');
+    expect(midSkill?.description ?? '').not.toContain('runs immediately');
+
+    const leading = await provider.getSuggestions(['/'], 0, 1, { signal: ctrl() });
+    const leadingPlan = leading!.items.find((item) => item.value === 'plan');
+    expect(leadingPlan?.description ?? '').not.toContain('runs immediately');
   });
 
   it('applies add-dir absolute path completions without a double slash', () => {

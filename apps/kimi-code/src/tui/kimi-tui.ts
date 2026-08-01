@@ -440,38 +440,53 @@ export class KimiTUI {
   // Autocomplete & Skill Commands
   // =========================================================================
 
-  private getSlashCommands(): readonly KimiSlashCommand[] {
-    const builtins = sortSlashCommands(BUILTIN_SLASH_COMMANDS).filter((command) =>
+  private getBuiltinSlashCommands(): readonly KimiSlashCommand[] {
+    return sortSlashCommands(BUILTIN_SLASH_COMMANDS).filter((command) =>
       isExperimentalFlagEnabled(command.experimentalFlag),
     );
-    return [...builtins, ...this.skillCommands, ...this.pluginCommands];
+  }
+
+  private getSlashCommands(): readonly KimiSlashCommand[] {
+    return [...this.getBuiltinSlashCommands(), ...this.skillCommands, ...this.pluginCommands];
   }
 
   private setupAutocomplete(): void {
-    const slashCommands: SlashAutocompleteCommand[] = this.getSlashCommands().map((cmd) => {
+    const toAutocomplete = (cmd: KimiSlashCommand, immediate?: boolean): SlashAutocompleteCommand => {
       const completer = cmd.completeArgs;
       return {
         name: cmd.name,
         aliases: cmd.aliases,
         description: cmd.description,
         midPrompt: cmd.midPrompt,
+        immediate,
         ...(cmd.argumentHint !== undefined ? { argumentHint: cmd.argumentHint } : {}),
         ...(completer !== undefined
           ? { getArgumentCompletions: (prefix: string) => completer(prefix) }
           : {}),
       };
-    });
+    };
+    // Built-ins offered mid-prompt run immediately on selection (they are
+    // toggles/pickers/info panels); skill and plugin commands insert their
+    // name and activate on submit with the surrounding text as args.
+    const autocompleteCommands: SlashAutocompleteCommand[] = [
+      ...this.getBuiltinSlashCommands().map((cmd) => toAutocomplete(cmd, true)),
+      ...this.skillCommands.map((cmd) => toAutocomplete(cmd)),
+      ...this.pluginCommands.map((cmd) => toAutocomplete(cmd)),
+    ];
     const provider = new FileMentionProvider(
-      slashCommands,
+      autocompleteCommands,
       this.state.appState.workDir,
       this.fdPath,
       this.state.appState.additionalDirs,
       () => this.state.appState.inputMode,
+      (name) => {
+        slashCommands.triggerImmediateSlashCommand(this, name);
+      },
     );
     this.state.editor.setAutocompleteProvider(provider);
 
     const argumentHints = new Map<string, string>();
-    for (const cmd of slashCommands) {
+    for (const cmd of autocompleteCommands) {
       if (cmd.argumentHint === undefined) continue;
       argumentHints.set(cmd.name, cmd.argumentHint);
       for (const alias of cmd.aliases ?? []) {
