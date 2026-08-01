@@ -10,12 +10,22 @@ import {
   type SlashCommand,
 } from '@moonshot-ai/pi-tui';
 
+import { extractSlashTokenAtCursor } from '#/tui/commands/parse';
+
 const PATH_DELIMITERS = new Set([' ', '\t', '"', "'", '=']);
 const MAX_FALLBACK_SCAN = 2000;
 const MAX_FALLBACK_SUGGESTIONS = 50;
 
 export interface SlashAutocompleteCommand extends SlashCommand {
   readonly aliases?: readonly string[];
+  /** When true, offered by mid-prompt `/` autocomplete (not only at input start). */
+  readonly midPrompt?: boolean;
+  /**
+   * When true, selecting this command from the mid-prompt menu runs it
+   * immediately (via the `onImmediateCommand` constructor callback) instead of
+   * inserting its name into the text. Leading-slash selection still inserts.
+   */
+  readonly immediate?: boolean;
 }
 
 interface FsMentionCandidate {
@@ -45,6 +55,7 @@ export class FileMentionProvider implements AutocompleteProvider {
     private readonly fdPath: string | null,
     additionalDirs: readonly string[] = [],
     private readonly getInputMode: () => 'prompt' | 'bash' = () => 'prompt',
+    private readonly onImmediateCommand?: (name: string) => void,
   ) {
     this.additionalDirs = additionalDirs.map((dir) => normalizePath(resolve(workDir, dir)));
     // Build an expanded list that includes alias entries so that
@@ -100,10 +111,6 @@ export class FileMentionProvider implements AutocompleteProvider {
       }
     }
 
-    if (shouldSuppressLeadingWhitespaceSlashPath(textBeforeCursor, options.force)) {
-      return null;
-    }
-
     if (
       shouldSuppressSlashArgumentCompletion(
         textBeforeCursor,
@@ -115,15 +122,20 @@ export class FileMentionProvider implements AutocompleteProvider {
     }
 
     // Handle slash-command name completion ourselves so that aliases are
-    // searchable and visible in the label.
-    if (!options.force && textBeforeCursor.startsWith('/')) {
-      const spaceIndex = textBeforeCursor.indexOf(' ');
-      if (spaceIndex === -1) {
-        const tokens = textBeforeCursor
+    // searchable and visible in the label. Supports mid-prompt `/` tokens
+    // (after existing text) for commands marked `midPrompt`. Bash mode treats
+    // `/` as a path separator, so never intercept there.
+    if (!options.force && this.getInputMode() !== 'bash') {
+      const slashToken = extractSlashTokenAtCursor(textBeforeCursor);
+      if (slashToken !== null) {
+        const tokens = slashToken.token
           .slice(1)
-          .trim()
           .split(/\s+/)
           .filter((t) => t.length > 0);
+
+        const candidates = slashToken.isLeading
+          ? this.slashCommands
+          : this.slashCommands.filter((cmd) => cmd.midPrompt === true);
 
         type SlashMatch = {
           cmd: SlashAutocompleteCommand;
@@ -133,7 +145,7 @@ export class FileMentionProvider implements AutocompleteProvider {
         };
         const matches: SlashMatch[] = [];
 
-        for (const cmd of this.slashCommands) {
+        for (const cmd of candidates) {
           const nameScore = scoreTokens(tokens, cmd.name);
           if (nameScore !== null) {
             matches.push({ cmd, score: nameScore, viaAlias: false, label: cmd.name });
@@ -162,16 +174,38 @@ export class FileMentionProvider implements AutocompleteProvider {
         // Primary-name matches outrank alias matches on score ties.
         matches.sort((a, b) => a.score - b.score || Number(a.viaAlias) - Number(b.viaAlias));
 
-        if (matches.length === 0) return null;
-        return {
-          items: matches.map((m) => ({
-            value: m.cmd.name,
-            label: m.label,
-            description: formatSlashCommandDescription(m.cmd),
-          })),
-          prefix: textBeforeCursor,
-        };
+        if (matches.length > 0) {
+          return {
+            items: matches.map((m) => {
+              const description = formatSlashCommandDescription(m.cmd);
+              // Mid-prompt immediate commands run on selection instead of
+              // inserting text — say so in the menu.
+              const note =
+                !slashToken.isLeading && m.cmd.immediate === true
+                  ? 'runs immediately'
+                  : undefined;
+              return {
+                value: m.cmd.name,
+                label: m.label,
+                description:
+                  [description, note].filter((part) => part !== undefined).join(' — ') ||
+                  undefined,
+              };
+            }),
+            // Prefix is only the `/token` so applyCompletion replaces just that
+            // span, including when the slash sits mid-prompt.
+            prefix: slashToken.token,
+          };
+        }
+        // No command matched: fall through so path completion can still run
+        // for mid-prompt tokens that look like paths.
+        if (slashToken.isLeading) return null;
       }
+    }
+
+    // Leading whitespace + `/` must not fall through to root path completion.
+    if (shouldSuppressLeadingWhitespaceSlashPath(textBeforeCursor, options.force)) {
+      return null;
     }
 
     // In bash mode `/` is a path separator, not a slash command. Skip slash
@@ -205,7 +239,7 @@ export class FileMentionProvider implements AutocompleteProvider {
     cursorCol: number,
     item: AutocompleteItem,
     prefix: string,
-  ): { lines: string[]; cursorLine: number; cursorCol: number } {
+  ): { lines: string[]; cursorLine: number; cursorCol: number; preventSubmit?: boolean } {
     // In bash mode a leading `/` is a path, but pi-tui's applyCompletion
     // mistakes it for a slash command (prefix starts with `/`, nothing before
     // it, no second `/`) and prepends another `/`, producing e.g.
@@ -215,6 +249,48 @@ export class FileMentionProvider implements AutocompleteProvider {
     if (this.getInputMode() === 'bash' && prefix.startsWith('/')) {
       return applyPathCompletion(lines, cursorLine, cursorCol, item, prefix);
     }
+
+    // Mid-prompt (and leading) slash-command *name* completion only. Do not
+    // treat path-argument prefixes like `/` or `/tmp` after `/add-dir ` as
+    // command names — those must go through pi-tui's path branch. The same
+    // `/token` prefix is also emitted by mid-prompt *path* completion (e.g.
+    // `please /tm` completing to `/tmp/`), so require the item to be a
+    // registered command name before rewriting it as `/name `.
+    if (this.getInputMode() !== 'bash') {
+      const currentLine = lines[cursorLine] ?? '';
+      const textBeforeCursor = currentLine.slice(0, cursorCol);
+      const slashToken = extractSlashTokenAtCursor(textBeforeCursor);
+      const command = this.slashCommands.find((cmd) => cmd.name === item.value);
+      if (slashToken !== null && slashToken.token === prefix && command !== undefined) {
+        // Mid-prompt selection of an immediate command runs it in place: the
+        // `/token` is dropped from the draft, and Enter must not fall through
+        // to submit (pi-tui submits slash-prefix completions on confirm).
+        if (!slashToken.isLeading && command.immediate === true) {
+          this.onImmediateCommand?.(command.name);
+          const beforePrefix = currentLine.slice(0, slashToken.startIndex);
+          const afterCursor = currentLine.slice(cursorCol);
+          const newLines = [...lines];
+          newLines[cursorLine] = `${beforePrefix}${afterCursor}`;
+          return {
+            lines: newLines,
+            cursorLine,
+            cursorCol: beforePrefix.length,
+            preventSubmit: true,
+          };
+        }
+        const beforePrefix = currentLine.slice(0, slashToken.startIndex);
+        const afterCursor = currentLine.slice(cursorCol);
+        const newLine = `${beforePrefix}/${item.value} ${afterCursor}`;
+        const newLines = [...lines];
+        newLines[cursorLine] = newLine;
+        return {
+          lines: newLines,
+          cursorLine,
+          cursorCol: beforePrefix.length + item.value.length + 2, // `/` + name + space
+        };
+      }
+    }
+
     return this.inner.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
   }
 }

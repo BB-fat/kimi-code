@@ -337,4 +337,85 @@ describe('slash command busy helpers', () => {
       reason: 'streaming',
     });
   });
+
+  it('resolves a leading slash command with indent', () => {
+    expect(resolve('  /help')).toMatchObject({ kind: 'builtin', name: 'help', args: '' });
+  });
+
+  it('activates a mid-prompt skill and uses surrounding text as args', () => {
+    const skillCommandMap = new Map([['skill:review', 'review']]);
+    expect(
+      resolve('please check this /skill:review carefully', { skillCommandMap }),
+    ).toEqual({
+      kind: 'skill',
+      commandName: 'skill:review',
+      skillName: 'review',
+      args: 'please check this carefully',
+    });
+  });
+
+  it('does not bare-fallback external skills mid-prompt (avoids /tmp hijacks)', () => {
+    const skillCommandMap = new Map([['skill:tmp', 'tmp']]);
+    expect(resolve('cd /tmp then continue', { skillCommandMap })).toEqual({
+      kind: 'not-command',
+    });
+  });
+
+  it('activates a mid-prompt builtin skill by exact registered name', () => {
+    const skillCommandMap = new Map([['mcp-config', 'mcp-config']]);
+    expect(resolve('please /mcp-config here', { skillCommandMap })).toEqual({
+      kind: 'skill',
+      commandName: 'mcp-config',
+      skillName: 'mcp-config',
+      args: 'please here',
+    });
+  });
+
+  it('activates a mid-prompt plugin command with surrounding text as args', () => {
+    const pluginCommandMap = new Map([['my-plugin:deploy', 'Deploy $ARGUMENTS']]);
+    expect(resolve('ship it /my-plugin:deploy prod', { pluginCommandMap })).toEqual({
+      kind: 'plugin-command',
+      commandName: 'deploy',
+      pluginId: 'my-plugin',
+      args: 'ship it prod',
+    });
+  });
+
+  it('does not treat a mid-prompt non-skill builtin as a command', () => {
+    expect(resolve('please /new session')).toEqual({ kind: 'not-command' });
+    expect(resolve('enable /yolo please')).toEqual({ kind: 'not-command' });
+  });
+
+  it('skips unknown mid-prompt tokens and still finds a later skill', () => {
+    const skillCommandMap = new Map([['skill:review', 'review']]);
+    expect(
+      resolve('check /tmp then /skill:review carefully', { skillCommandMap }),
+    ).toEqual({
+      kind: 'skill',
+      commandName: 'skill:review',
+      skillName: 'review',
+      args: 'check /tmp then carefully',
+    });
+  });
+
+  it('skips a mid-prompt yolo token and still finds a later skill', () => {
+    const skillCommandMap = new Map([['skill:review', 'review']]);
+    expect(resolve('please /yolo /skill:review', { skillCommandMap })).toEqual({
+      kind: 'skill',
+      commandName: 'skill:review',
+      skillName: 'review',
+      args: 'please /yolo',
+    });
+  });
+
+  it('blocks a mid-prompt skill while streaming', () => {
+    const skillCommandMap = new Map([['skill:review', 'review']]);
+    expect(
+      resolve('please /skill:review', { skillCommandMap, isStreaming: true }),
+    ).toEqual({
+      kind: 'blocked',
+      commandName: 'skill:review',
+      reason: 'streaming',
+    });
+  });
 });

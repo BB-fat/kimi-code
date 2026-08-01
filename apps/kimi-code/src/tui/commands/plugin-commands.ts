@@ -21,6 +21,7 @@ export function buildPluginSlashCommands(defs: readonly PluginCommandDef[]): Plu
       name: commandName,
       aliases: [],
       description: def.description,
+      midPrompt: true,
     } satisfies KimiSlashCommand;
   });
   return { commands, commandMap };

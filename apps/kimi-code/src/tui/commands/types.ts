@@ -9,6 +9,12 @@ export interface KimiSlashCommand<Name extends string = string> extends SlashCom
   readonly description: string;
   readonly priority?: number;
   readonly availability?: SlashCommandAvailability | ((args: string) => SlashCommandAvailability);
+  /**
+   * When true, this command is offered by `/` autocomplete mid-prompt (after
+   * existing text), not only when the input starts with `/`. Defaults to false
+   * for built-ins; skill and plugin commands set it true.
+   */
+  readonly midPrompt?: boolean;
   /** When set, the command is hidden from the palette and blocked unless this flag is enabled. */
   readonly experimentalFlag?: FlagId;
   /**

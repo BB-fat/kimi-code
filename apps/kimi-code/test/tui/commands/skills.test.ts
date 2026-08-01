@@ -47,11 +47,13 @@ describe('skill slash commands', () => {
       name: 'skill:commit',
       aliases: [],
       description: 'commit skill',
+      midPrompt: true,
     });
     expect(built.commands[1]).toMatchObject({
       name: 'skill:nested-review',
       aliases: [],
       description: 'Nested review skill',
+      midPrompt: true,
     });
     expect([...built.commandMap.entries()]).toEqual([
       ['skill:commit', 'commit'],

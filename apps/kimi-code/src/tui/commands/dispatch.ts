@@ -172,22 +172,52 @@ export interface SlashCommandHost {
 // ---------------------------------------------------------------------------
 
 export function dispatchInput(host: SlashCommandHost, text: string): void {
-  if (parseSlashInput(text) !== null) {
-    void executeSlashCommand(host, text);
-    return;
-  }
-  host.sendNormalUserInput(text);
-}
-
-async function executeSlashCommand(host: SlashCommandHost, input: string): Promise<void> {
-  const parsedCommand = parseSlashInput(input);
   const intent = resolveSlashCommandInput({
-    input,
+    input: text,
     skillCommandMap: host.skillCommandMap,
     pluginCommandMap: host.pluginCommandMap,
     isStreaming: host.state.appState.streamingPhase !== 'idle',
     isCompacting: host.state.appState.isCompacting,
   });
+  if (intent.kind === 'not-command') {
+    host.sendNormalUserInput(text);
+    return;
+  }
+  void executeSlashIntent(host, text, intent);
+}
+
+/**
+ * Run a built-in slash command triggered by selecting it from the mid-prompt
+ * autocomplete. Unlike dispatchInput the editor draft is still in place, so a
+ * blocked command only reports the error — it must not touch the draft.
+ */
+export function triggerImmediateSlashCommand(host: SlashCommandHost, commandName: string): void {
+  const intent = resolveSlashCommandInput({
+    input: `/${commandName}`,
+    skillCommandMap: host.skillCommandMap,
+    pluginCommandMap: host.pluginCommandMap,
+    isStreaming: host.state.appState.streamingPhase !== 'idle',
+    isCompacting: host.state.appState.isCompacting,
+  });
+  if (intent.kind === 'blocked') {
+    host.track('input_command_invalid', { reason: 'blocked', command: intent.commandName });
+    host.showError(slashBusyMessage(intent.commandName, intent.reason));
+    return;
+  }
+  if (intent.kind !== 'builtin') return;
+  host.track('input_command', { command: intent.name });
+  void handleBuiltInSlashCommand(host, intent.name, intent.args).catch((error: unknown) => {
+    host.showError(formatErrorMessage(error));
+  });
+}
+
+async function executeSlashIntent(
+  host: SlashCommandHost,
+  originalInput: string,
+  intent: ReturnType<typeof resolveSlashCommandInput>,
+): Promise<void> {
+  const leadingInput = originalInput.trimStart();
+  const parsedCommand = parseSlashInput(leadingInput);
 
   switch (intent.kind) {
     case 'not-command':
@@ -195,6 +225,9 @@ async function executeSlashCommand(host: SlashCommandHost, input: string): Promi
     case 'blocked':
       host.track('input_command_invalid', { reason: 'blocked', command: intent.commandName });
       host.showError(slashBusyMessage(intent.commandName, intent.reason));
+      // Editor clears on submit before dispatch; put the draft back so a
+      // mid-prompt skill blocked while streaming is not lost.
+      host.restoreInputText(originalInput);
       return;
     case 'invalid':
       host.track('input_command_invalid', {
@@ -207,6 +240,7 @@ async function executeSlashCommand(host: SlashCommandHost, input: string): Promi
       const session = host.session;
       if (host.state.appState.model.trim().length === 0 || session === undefined) {
         host.showError(LLM_NOT_SET_MESSAGE);
+        host.restoreInputText(originalInput);
         return;
       }
       host.track('input_command', {
@@ -219,11 +253,13 @@ async function executeSlashCommand(host: SlashCommandHost, input: string): Promi
     case 'plugin-command': {
       if (host.state.appState.model.trim().length === 0) {
         host.showError(LLM_NOT_SET_MESSAGE);
+        host.restoreInputText(originalInput);
         return;
       }
       const session = host.session;
       if (session === undefined) {
         host.showError(LLM_NOT_SET_MESSAGE);
+        host.restoreInputText(originalInput);
         return;
       }
       host.track('input_command', { command: `${intent.pluginId}:${intent.commandName}` });

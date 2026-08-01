@@ -263,6 +263,12 @@ export interface AutocompleteProvider {
 		lines: string[];
 		cursorLine: number;
 		cursorCol: number;
+		/**
+		 * When true, confirming (Enter) this completion must not fall through to
+		 * submitting the editor text: the completion ran a side effect (e.g.
+		 * executed a command in place) and the draft stays untouched.
+		 */
+		preventSubmit?: boolean;
 	};
 
 	// Check if file completion should trigger for explicit Tab completion
