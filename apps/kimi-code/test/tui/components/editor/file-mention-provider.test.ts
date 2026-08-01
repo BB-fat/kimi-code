@@ -298,6 +298,21 @@ describe('FileMentionProvider', () => {
     expect(applied.lines[0]).toBe('/add-dir /tmp/shared/');
   });
 
+  it('applies mid-prompt path completions without rewriting them as command names', async () => {
+    const provider = new FileMentionProvider([YOLO_COMMAND], workDir, NO_FD);
+    const line = 'please /tm';
+    // No midPrompt command fuzzy-matches `tm`, so the token falls through to
+    // path completion, which reuses the same `/tm` prefix.
+    const suggestions = await provider.getSuggestions([line], 0, line.length, { signal: ctrl() });
+    expect(suggestions).not.toBeNull();
+    const item = suggestions!.items.find((entry) => entry.value === '/tmp/');
+    expect(item).toBeDefined();
+
+    const applied = provider.applyCompletion([line], 0, line.length, item!, suggestions!.prefix);
+    expect(applied.lines[0]).toBe('please /tmp/');
+    expect(applied.cursorCol).toBe('please /tmp/'.length);
+  });
+
   it('does not intercept bash-mode path completion with midPrompt commands', async () => {
     const provider = new FileMentionProvider(
       [YOLO_COMMAND, LARK_CALENDAR_COMMAND],

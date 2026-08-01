@@ -234,12 +234,16 @@ export class FileMentionProvider implements AutocompleteProvider {
 
     // Mid-prompt (and leading) slash-command *name* completion only. Do not
     // treat path-argument prefixes like `/` or `/tmp` after `/add-dir ` as
-    // command names — those must go through pi-tui's path branch.
+    // command names — those must go through pi-tui's path branch. The same
+    // `/token` prefix is also emitted by mid-prompt *path* completion (e.g.
+    // `please /tm` completing to `/tmp/`), so require the item to be a
+    // registered command name before rewriting it as `/name `.
     if (this.getInputMode() !== 'bash') {
       const currentLine = lines[cursorLine] ?? '';
       const textBeforeCursor = currentLine.slice(0, cursorCol);
       const slashToken = extractSlashTokenAtCursor(textBeforeCursor);
-      if (slashToken !== null && slashToken.token === prefix) {
+      const isCommandItem = this.slashCommands.some((cmd) => cmd.name === item.value);
+      if (slashToken !== null && slashToken.token === prefix && isCommandItem) {
         const beforePrefix = currentLine.slice(0, slashToken.startIndex);
         const afterCursor = currentLine.slice(cursorCol);
         const newLine = `${beforePrefix}/${item.value} ${afterCursor}`;

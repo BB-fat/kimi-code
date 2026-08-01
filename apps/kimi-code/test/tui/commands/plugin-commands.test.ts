@@ -19,7 +19,9 @@ describe('buildPluginSlashCommands', () => {
         path: '/p/deploy.md',
       },
     ]);
-    expect(commands).toEqual([{ name: 'my-plugin:deploy', aliases: [], description: 'Deploy' }]);
+    expect(commands).toEqual([
+      { name: 'my-plugin:deploy', aliases: [], description: 'Deploy', midPrompt: true },
+    ]);
     expect(commandMap.get('my-plugin:deploy')).toBe('Deploy $ARGUMENTS');
   });
 

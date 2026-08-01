@@ -2161,14 +2161,6 @@ export class Editor implements Component, Focusable {
 		return this.state.cursorLine === 0;
 	}
 
-	// Helper method to check if cursor is at start of message (for slash command detection)
-	private isAtStartOfMessage(): boolean {
-		if (!this.isSlashMenuAllowed()) return false;
-		const currentLine = this.state.lines[this.state.cursorLine] || "";
-		const beforeCursor = currentLine.slice(0, this.state.cursorCol);
-		return beforeCursor.trim() === "" || beforeCursor.trim() === "/";
-	}
-
 	private isInSlashCommandContext(textBeforeCursor: string): boolean {
 		if (!this.isSlashMenuAllowed()) return false;
 		// Leading slash command (optional indent), including argument typing.

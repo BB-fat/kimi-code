@@ -44,7 +44,7 @@ export function extractSlashTokenAtCursor(textBeforeCursor: string): SlashTokenA
   // Already inside a leading slash command's arguments (e.g. `/add-dir /tmp`).
   // The trailing `/…` is a path, not a new command name token.
   const leading = before.trimStart();
-  if (leading.startsWith('/') && leading.includes(' ')) return null;
+  if (leading.startsWith('/') && /\s/.test(leading)) return null;
 
   const token = textBeforeCursor.slice(tokenStart);
   if (token.length === 0) return null;
