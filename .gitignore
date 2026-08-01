@@ -3,6 +3,7 @@ dist/
 dist-web/
 dist-single/
 dist-native/
+.turbo/
 .tmp-api-extractor/
 .contract-types-tmp/
 .local/
