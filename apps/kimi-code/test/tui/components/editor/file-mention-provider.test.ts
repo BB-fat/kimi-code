@@ -43,10 +43,18 @@ const NEW_COMMAND = {
   description: 'Start a fresh session in the current workspace',
 };
 
+const YOLO_COMMAND = {
+  name: 'yolo',
+  aliases: ['yes'],
+  description: 'Toggle YOLO mode',
+  midPrompt: true,
+};
+
 const LARK_CALENDAR_COMMAND = {
   name: 'skill:lark-calendar',
   aliases: [],
   description: 'Manage Lark calendars',
+  midPrompt: true,
 };
 
 const HELP_COMMAND = {
@@ -234,6 +242,89 @@ describe('FileMentionProvider', () => {
       value: 'help',
       label: 'help (h, ?)',
     });
+  });
+
+  it('offers only midPrompt commands after existing text', async () => {
+    const provider = new FileMentionProvider(
+      [NEW_COMMAND, YOLO_COMMAND, LARK_CALENDAR_COMMAND, HELP_COMMAND],
+      workDir,
+      NO_FD,
+    );
+    const line = 'please /';
+    const result = await provider.getSuggestions([line], 0, line.length, { signal: ctrl() });
+
+    expect(result).not.toBeNull();
+    expect(result!.prefix).toBe('/');
+    const values = result!.items.map((item) => item.value);
+    expect(values).toContain('yolo');
+    expect(values).toContain('skill:lark-calendar');
+    expect(values).not.toContain('new');
+    expect(values).not.toContain('help');
+  });
+
+  it('still offers all commands at the leading slash', async () => {
+    const provider = new FileMentionProvider(
+      [NEW_COMMAND, YOLO_COMMAND, HELP_COMMAND],
+      workDir,
+      NO_FD,
+    );
+    const result = await provider.getSuggestions(['/'], 0, 1, { signal: ctrl() });
+
+    expect(result).not.toBeNull();
+    const values = result!.items.map((item) => item.value);
+    expect(values).toEqual(expect.arrayContaining(['new', 'yolo', 'help']));
+  });
+
+  it('applies mid-prompt slash completion without rewriting leading text', () => {
+    const provider = new FileMentionProvider([YOLO_COMMAND], workDir, NO_FD);
+    const applied = provider.applyCompletion(['please /yo'], 0, 'please /yo'.length, {
+      value: 'yolo',
+      label: 'yolo',
+    }, '/yo');
+
+    expect(applied.lines[0]).toBe('please /yolo ');
+    expect(applied.cursorCol).toBe('please /yolo '.length);
+  });
+
+  it('applies add-dir absolute path completions without a double slash', () => {
+    const provider = new FileMentionProvider([ADD_DIR_COMMAND], workDir, NO_FD);
+    const line = '/add-dir /';
+    const applied = provider.applyCompletion([line], 0, line.length, {
+      value: '/tmp/shared/',
+      label: 'shared/',
+      description: '/tmp/shared',
+    }, '/');
+
+    expect(applied.lines[0]).toBe('/add-dir /tmp/shared/');
+  });
+
+  it('does not intercept bash-mode path completion with midPrompt commands', async () => {
+    const provider = new FileMentionProvider(
+      [YOLO_COMMAND, LARK_CALENDAR_COMMAND],
+      workDir,
+      NO_FD,
+      [],
+      () => 'bash',
+    );
+    writeFileSync(join(workDir, 'Appfile'), 'x');
+    mkdirSync(join(workDir, 'Applications'));
+    const result = await provider.getSuggestions(['cd /'], 0, 'cd /'.length, {
+      signal: ctrl(),
+      force: true,
+    });
+    // force:true path completion — must not surface slash commands
+    if (result !== null) {
+      expect(result.items.every((item) => item.value !== 'yolo')).toBe(true);
+      expect(result.items.every((item) => !String(item.value).startsWith('skill:'))).toBe(true);
+    }
+
+    const soft = await provider.getSuggestions(['cd /'], 0, 'cd /'.length, {
+      signal: ctrl(),
+      force: false,
+    });
+    if (soft !== null) {
+      expect(soft.items.every((item) => item.value !== 'yolo')).toBe(true);
+    }
   });
 
   it('returns null for a bare slash when no commands are registered', async () => {

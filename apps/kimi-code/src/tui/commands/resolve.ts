@@ -5,7 +5,7 @@ import {
   type BuiltinSlashCommandName,
 } from './registry';
 import { isExperimentalFlagEnabled } from './experimental-flags';
-import { parseSlashInput } from './parse';
+import { findInlineSlashTokens, parseSlashInput } from './parse';
 import type {
   KimiSlashCommand,
   SlashCommandBusyReason,
@@ -52,10 +52,72 @@ export interface ResolveSlashCommandInput {
   readonly isCompacting: boolean;
 }
 
+/**
+ * Resolve a submitted editor string. Leading slash commands (optional indent)
+ * use the existing path; free text may embed a mid-prompt skill/plugin token
+ * whose surrounding words become the skill/plugin args.
+ */
 export function resolveSlashCommandInput(options: ResolveSlashCommandInput): SlashCommandIntent {
-  const parsed = parseSlashInput(options.input);
-  if (parsed === null) return { kind: 'not-command' };
+  const leadingInput = options.input.trimStart();
+  const parsed = parseSlashInput(leadingInput);
+  if (parsed !== null) {
+    return resolveParsedSlashCommand(parsed, options, leadingInput);
+  }
 
+  // Scan every mid-prompt `/token`; skip unknowns so an earlier `/tmp` or
+  // `/yolo` does not hide a later skill/plugin activation.
+  for (const inline of findInlineSlashTokens(options.input)) {
+    // Exact map key only (no bare→`skill:` fallback). Mid-prompt bare names
+    // like `/tmp` would otherwise hijack common path segments whenever a
+    // skill happens to share that name. Autocomplete inserts the registered
+    // name (`skill:foo` or builtin bare name) for external skills.
+    const skillName = options.skillCommandMap.get(inline.name);
+    if (skillName !== undefined) {
+      const busyReason = slashCommandBusyReason(options);
+      if (busyReason !== undefined) {
+        return {
+          kind: 'blocked',
+          commandName: inline.name,
+          reason: busyReason,
+        };
+      }
+      return {
+        kind: 'skill',
+        commandName: inline.name,
+        skillName,
+        args: inline.surroundingText,
+      };
+    }
+
+    if (options.pluginCommandMap.has(inline.name)) {
+      const busyReason = slashCommandBusyReason(options);
+      if (busyReason !== undefined) {
+        return {
+          kind: 'blocked',
+          commandName: inline.name,
+          reason: busyReason,
+        };
+      }
+      const separator = inline.name.indexOf(':');
+      const pluginId = separator === -1 ? inline.name : inline.name.slice(0, separator);
+      const commandName = separator === -1 ? '' : inline.name.slice(separator + 1);
+      return {
+        kind: 'plugin-command',
+        commandName,
+        pluginId,
+        args: inline.surroundingText,
+      };
+    }
+  }
+
+  return { kind: 'not-command' };
+}
+
+function resolveParsedSlashCommand(
+  parsed: { name: string; args: string },
+  options: ResolveSlashCommandInput,
+  leadingInput: string,
+): SlashCommandIntent {
   const command = findBuiltInSlashCommand(parsed.name);
   // `command` is a literal union where only some members carry `experimentalFlag`; widen to read it.
   if (
@@ -121,7 +183,7 @@ export function resolveSlashCommandInput(options: ResolveSlashCommandInput): Sla
 
   return {
     kind: 'message',
-    input: options.input,
+    input: leadingInput,
   };
 }
 

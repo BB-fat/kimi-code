@@ -139,6 +139,7 @@ export const BUILTIN_SLASH_COMMANDS = [
     description: 'Toggle YOLO mode: auto-approve tool actions, but the agent may still ask questions.',
     priority: 101,
     availability: 'always',
+    midPrompt: true,
   },
   {
     name: 'auto',
@@ -146,6 +147,7 @@ export const BUILTIN_SLASH_COMMANDS = [
     description: 'Toggle Auto mode: fully autonomous, agent decides everything without asking.',
     priority: 99,
     availability: 'always',
+    midPrompt: true,
   },
   {
     name: 'permission',
@@ -153,6 +155,7 @@ export const BUILTIN_SLASH_COMMANDS = [
     description: 'Select permission mode',
     priority: 100,
     availability: 'always',
+    midPrompt: true,
   },
   {
     name: 'settings',
@@ -167,6 +170,7 @@ export const BUILTIN_SLASH_COMMANDS = [
     description: 'Toggle plan mode',
     priority: 100,
     availability: (args) => (args.trim().toLowerCase() === 'clear' ? 'idle-only' : 'always'),
+    midPrompt: true,
   },
   {
     name: 'swarm',
@@ -183,6 +187,7 @@ export const BUILTIN_SLASH_COMMANDS = [
     description: 'Switch LLM model',
     priority: 100,
     availability: 'always',
+    midPrompt: true,
   },
   {
     name: 'secondary_model',
@@ -191,6 +196,7 @@ export const BUILTIN_SLASH_COMMANDS = [
     priority: 90,
     availability: 'always',
     experimentalFlag: 'secondary-model',
+    midPrompt: true,
   },
   {
     name: 'effort',
@@ -198,6 +204,7 @@ export const BUILTIN_SLASH_COMMANDS = [
     description: 'Switch thinking effort',
     priority: 95,
     availability: 'always',
+    midPrompt: true,
   },
   {
     name: 'provider',
@@ -332,6 +339,7 @@ export const BUILTIN_SLASH_COMMANDS = [
     description: 'Show session tokens + context window + plan quotas',
     priority: 60,
     availability: 'always',
+    midPrompt: true,
   },
   {
     name: 'status',
@@ -339,6 +347,7 @@ export const BUILTIN_SLASH_COMMANDS = [
     description: 'Show current session and runtime status',
     priority: 60,
     availability: 'always',
+    midPrompt: true,
   },
   {
     name: 'feedback',

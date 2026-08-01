@@ -42,6 +42,7 @@ export function buildSkillSlashCommands(skills: readonly SkillSummary[]): SkillS
       name: commandName,
       aliases: [],
       description: skill.description ?? '',
+      midPrompt: true,
     };
   });
   return { commands, commandMap };
