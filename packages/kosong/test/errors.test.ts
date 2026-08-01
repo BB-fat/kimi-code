@@ -139,6 +139,24 @@ describe('isRetryableGenerateError', () => {
     expect(isRetryableGenerateError(new APIEmptyResponseError('empty'))).toBe(true);
   });
 
+  it('does not retry a content-filtered empty response', () => {
+    // Safety filters are deterministic for the same prompt — the retry budget
+    // would only postpone the dedicated `provider.filtered` failure path.
+    expect(
+      isRetryableGenerateError(
+        new APIEmptyResponseError('empty', {
+          finishReason: 'filtered',
+          rawFinishReason: 'content_filter',
+        }),
+      ),
+    ).toBe(false);
+    // Any other stop detail keeps the transient empty-response retry.
+    expect(
+      isRetryableGenerateError(new APIEmptyResponseError('empty', { finishReason: 'truncated' })),
+    ).toBe(true);
+    expect(isRetryableGenerateError(new APIEmptyResponseError('empty'))).toBe(true);
+  });
+
   it.each([408, 409, 429, 500, 502, 503, 504, 529])('treats HTTP %i as retryable', (statusCode) => {
     expect(isRetryableGenerateError(new APIStatusError(statusCode, 'retryable'))).toBe(true);
   });

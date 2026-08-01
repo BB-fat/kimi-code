@@ -210,7 +210,10 @@ export function isRetryableGenerateError(error: unknown): boolean {
     return true;
   }
   if (error instanceof APIEmptyResponseError) {
-    return true;
+    // Safety / content filters are deterministic for the same prompt — retrying
+    // only burns the budget and can collapse the final error into a generic
+    // empty-response failure path that loses `provider.filtered`.
+    return error.finishReason !== 'filtered';
   }
   if (error instanceof APIProviderOverloadedError) {
     return true;

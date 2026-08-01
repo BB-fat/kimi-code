@@ -135,6 +135,24 @@ describe('isRetryableGenerateError', () => {
     expect(isRetryableGenerateError(new APIStatusError(400, 'Bad request'))).toBe(false);
     expect(isRetryableGenerateError(new APIStatusError(401, 'Unauthorized'))).toBe(false);
   });
+
+  it('does not retry a content-filtered empty response', () => {
+    // Safety filters are deterministic for the same prompt — the retry budget
+    // would only postpone the dedicated `provider.filtered` failure path.
+    expect(
+      isRetryableGenerateError(
+        new APIEmptyResponseError('empty', {
+          finishReason: 'filtered',
+          rawFinishReason: 'content_filter',
+        }),
+      ),
+    ).toBe(false);
+    // Any other stop detail keeps the transient empty-response retry.
+    expect(
+      isRetryableGenerateError(new APIEmptyResponseError('empty', { finishReason: 'truncated' })),
+    ).toBe(true);
+    expect(isRetryableGenerateError(new APIEmptyResponseError('empty'))).toBe(true);
+  });
 });
 
 describe('classifyApiError', () => {
