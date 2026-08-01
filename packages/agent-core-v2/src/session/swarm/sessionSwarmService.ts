@@ -40,7 +40,10 @@ import {
 } from '#/session/agentLifecycle/subagentMetadata';
 import { emitAgentRunSpawned, mirrorAgentRun } from '#/session/subagent/mirrorAgentRun';
 import { ISessionSubagentService } from '#/session/subagent/subagent';
-import { wrapSubagentModelError } from '#/session/subagent/configSection';
+import {
+  wrapSubagentModelError,
+  type SubagentModelBinding,
+} from '#/session/subagent/configSection';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionMetadata, type AgentMeta } from '#/session/sessionMetadata/sessionMetadata';
 import { ISessionProcessRunner } from '#/session/process/processRunner';
@@ -151,9 +154,10 @@ export class SessionSwarmService implements ISessionSwarmService {
     if (callerData.modelAlias === undefined) {
       throw new Error('Caller agent has no model bound');
     }
-    const binding = options.binding ?? {
+    const binding: SubagentModelBinding = options.binding ?? {
       model: callerData.modelAlias,
       thinking: callerData.thinkingLevel,
+      source: 'inherit',
     };
     let child: IAgentScopeHandle;
     try {
@@ -167,7 +171,7 @@ export class SessionSwarmService implements ISessionSwarmService {
         labels: subagentLabels(callerAgentId, { swarmItem: options.swarmItem }),
       });
     } catch (error) {
-      throw wrapSubagentModelError(error, binding.model, callerData.modelAlias);
+      throw wrapSubagentModelError(error, binding.model, binding.source);
     }
     child.accessor
       .get(IAgentPermissionModeService)

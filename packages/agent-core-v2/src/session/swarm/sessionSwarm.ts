@@ -7,6 +7,7 @@
  */
 
 import type { TokenUsage } from '#/kosong/contract/usage';
+import type { SubagentModelBinding } from '#/session/subagent/configSection';
 
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';
 
@@ -27,7 +28,7 @@ type SessionSwarmTaskBase<T> = {
 export type SessionSwarmSpawnTask<T = unknown> = SessionSwarmTaskBase<T> & {
   readonly kind: 'spawn';
   readonly resumeAgentId?: undefined;
-  readonly binding?: { readonly model: string; readonly thinking?: string };
+  readonly binding?: SubagentModelBinding;
 };
 
 export type SessionSwarmResumeTask<T = unknown> = SessionSwarmTaskBase<T> & {

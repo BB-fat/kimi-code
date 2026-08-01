@@ -834,7 +834,7 @@ export class Session {
     try {
       this.options.providerManager?.resolveProviderConfig(secondary.model);
     } catch (error) {
-      throw wrapSubagentModelError(error, secondary.model, undefined);
+      throw wrapSubagentModelError(error, secondary.model, 'secondary');
     }
     const models = { ...base.models };
     delete models[SECONDARY_DERIVED_MODEL_ALIAS];
@@ -891,7 +891,7 @@ export class Session {
           });
         }
       } catch (error) {
-        const wrapped = wrapSubagentModelError(error, boundAlias, undefined);
+        const wrapped = wrapSubagentModelError(error, boundAlias, 'secondary');
         warnings.push({
           code: 'secondary-model-invalid',
           message: `${wrapped instanceof Error ? wrapped.message : String(wrapped)} Subagent spawns will fail until this is fixed.`,

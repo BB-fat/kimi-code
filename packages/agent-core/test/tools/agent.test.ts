@@ -136,28 +136,18 @@ describe('AgentTool', () => {
     expect(tool.description).toContain('Default to a foreground subagent');
   });
 
-  it('exposes a primary/secondary model parameter in the JSON schema when the experiment is enabled', () => {
+  it('exposes a free-form model parameter in the JSON schema', () => {
     const host = mockSubagentHost({ spawn: vi.fn() });
-    const tool = agentTool(host, createBackgroundManager().manager, undefined, {
-      modelChoiceEnabled: true,
-    });
+    const tool = agentTool(host);
     const properties = (
       tool.parameters as {
-        properties: Record<string, { description?: string; enum?: string[] }>;
+        properties: Record<string, { description?: string; enum?: string[]; type?: string }>;
       }
     ).properties;
 
-    expect(properties['model']?.enum).toEqual(['primary', 'secondary']);
-    expect(properties['model']?.description).toContain('secondary');
-  });
-
-  it('strips the model parameter from the JSON schema by default', () => {
-    const host = mockSubagentHost({ spawn: vi.fn() });
-    const tool = agentTool(host);
-    const properties = (tool.parameters as { properties: Record<string, unknown> }).properties;
-
-    expect(properties).not.toHaveProperty('model');
-    expect(properties).toHaveProperty('prompt');
+    expect(properties['model']?.enum).toBeUndefined();
+    expect(properties['model']?.type).toBe('string');
+    expect(properties['model']?.description).toContain('configured model alias');
   });
 
   it('appends the subagent model description only when provided', () => {

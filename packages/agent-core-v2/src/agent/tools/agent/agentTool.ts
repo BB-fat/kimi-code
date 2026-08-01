@@ -10,13 +10,14 @@
  * under TaskList/TaskOutput/TaskStop when `run_in_background=true` or after
  * detach), and terminal text formatting.
  *
- * Spawn bindings use an explicit tool choice first, then the target profile's
- * symbolic model preference, before `resolveSubagentBinding` falls back to the
- * configured secondary model or the caller's model. The selected alias is
- * resolved through the model catalog before lifecycle allocation. A resumed
- * agent keeps the model recorded in its own wire journal — with per-subagent
- * models there is no "child follows the parent's current model" invariant to
- * enforce.
+ * Spawn bindings use an explicit tool `model` choice first (any configured
+ * model alias, or the shortcuts `"primary"` / `"secondary"`), then the target
+ * profile's symbolic model preference, before `resolveSubagentBinding` falls
+ * back to the configured secondary model or the caller's model. The selected
+ * alias is resolved through the model catalog before lifecycle allocation. A
+ * resumed agent keeps the model recorded in its own wire journal — with
+ * per-subagent models there is no "child follows the parent's current model"
+ * invariant to enforce.
  *
  * Registered via the module-level `registerAgentToolService(ISubagentTool,
  * SubagentTool)` at the bottom of this file — the same "import = register"
@@ -83,10 +84,11 @@ import {
   formatSubagentTimeoutDescription,
   resolveSubagentBinding,
   resolveSubagentTimeoutMs,
-  stripSubagentModelParameter,
   wrapSubagentModelError,
 } from '#/session/subagent/configSection';
 import { SECONDARY_MODEL_FLAG_ID } from '#/session/subagent/flag';
+import { IModelService } from '#/kosong/model/model';
+import { SECONDARY_DERIVED_MODEL_ID } from '#/app/kosongConfig/secondaryModelOverlay';
 import {
   BACKGROUND_AGENT_UNAVAILABLE,
   DEFAULT_PROFILE_NAME,
@@ -105,22 +107,11 @@ import AGENT_BACKGROUND_DESCRIPTION from './agent-background-enabled.md?raw';
 import AGENT_DESCRIPTION_BASE from './agent.md?raw';
 
 const SUBAGENT_TOOL_PARAMETERS = toInputJsonSchema(SubagentToolInputSchema);
-const SUBAGENT_TOOL_PARAMETERS_NO_MODEL = stripSubagentModelParameter(SUBAGENT_TOOL_PARAMETERS);
 
 export class SubagentTool implements ISubagentTool {
   declare readonly _serviceBrand: undefined;
   readonly name: string = 'Agent';
-
-  /**
-   * The `model` choice only exists while the `secondary-model` experiment is
-   * on; off, the advertised schema drops it so the concept never enters the
-   * prompt. Read live per request (same as `description`).
-   */
-  get parameters(): Record<string, unknown> {
-    return this.flags.enabled(SECONDARY_MODEL_FLAG_ID)
-      ? SUBAGENT_TOOL_PARAMETERS
-      : SUBAGENT_TOOL_PARAMETERS_NO_MODEL;
-  }
+  readonly parameters: Record<string, unknown> = SUBAGENT_TOOL_PARAMETERS;
 
   private readonly callerAgentId: string;
   private readonly canRunInBackground: () => boolean;
@@ -142,6 +133,7 @@ export class SubagentTool implements ISubagentTool {
     @IConfigService private readonly config: IConfigService,
     @IFlagService private readonly flags: IFlagService,
     @IModelCatalog private readonly modelCatalog: IModelCatalog,
+    @IModelService private readonly models: IModelService,
   ) {
     this.callerAgentId = scopeContext.agentId;
     this.canRunInBackground = () =>
@@ -170,11 +162,21 @@ export class SubagentTool implements ISubagentTool {
     if (typeLines) {
       description += `\n\nAvailable agent types (pass via subagent_type):\n${typeLines}`;
     }
-    const modelLines = buildSubagentModelDescriptions(
-      this.config,
-      this.flags,
-      this.profile.data().modelAlias,
-    );
+    const configuredModels = this.models.list();
+    const modelLines = buildSubagentModelDescriptions({
+      config: this.config,
+      flags: this.flags,
+      callerModelAlias: this.profile.data().modelAlias,
+      availableModelIds: Object.keys(configuredModels).filter(
+        (id) => id !== SECONDARY_DERIVED_MODEL_ID,
+      ),
+      modelLabels: Object.fromEntries(
+        Object.entries(configuredModels).map(([id, record]) => [
+          id,
+          record.displayName ?? record.name ?? record.model,
+        ]),
+      ),
+    });
     if (modelLines !== undefined) {
       description += `\n\n${modelLines}`;
     }
@@ -293,7 +295,7 @@ export class SubagentTool implements ISubagentTool {
           labels: subagentLabels(this.callerAgentId),
         });
       } catch (error) {
-        throw wrapSubagentModelError(error, binding.model, own.modelAlias);
+        throw wrapSubagentModelError(error, binding.model, binding.source);
       }
       created.accessor.get(IAgentPermissionModeService).setMode(this.permissionMode.mode);
       created.accessor

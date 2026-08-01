@@ -783,8 +783,13 @@ describe('Session secondary-model live config', () => {
       const descriptionsBefore = Object.fromEntries(
         agent.tools.loopTools.map((tool) => [tool.name, tool.description]),
       );
-      expect(descriptionsBefore['Agent']).not.toContain('Available models');
-      expect(descriptionsBefore['AgentSwarm']).not.toContain('Available models');
+      // Catalog models are always listed; the secondary shortcut appears only
+      // after a secondary recipe is applied.
+      expect(descriptionsBefore['Agent']).toContain('Available models');
+      expect(descriptionsBefore['Agent']).toContain(`- ${MOCK_PROVIDER.model}`);
+      expect(descriptionsBefore['Agent']).not.toContain('- secondary:');
+      expect(descriptionsBefore['AgentSwarm']).toContain('Available models');
+      expect(descriptionsBefore['AgentSwarm']).not.toContain('- secondary:');
 
       session.setSecondaryModelConfig(SECONDARY_POINTER_CONFIG);
 

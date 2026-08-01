@@ -1208,7 +1208,7 @@ describe('SessionSubagentHost', () => {
       config?: KimiConfig;
       experimentalFlags?: FlagResolver;
       providerManager?: Session['options']['providerManager'];
-      modelChoice?: 'primary' | 'secondary';
+      modelChoice?: string;
       profilePreference?: 'primary' | 'secondary';
     }) {
       const parent = testAgent();
@@ -1290,6 +1290,15 @@ describe('SessionSubagentHost', () => {
         modelChoice: 'primary',
       });
       expect(child.agent.config.modelAlias).toBe(parent.agent.config.modelAlias);
+    });
+
+    it('binds an explicit free-form model alias', async () => {
+      const { child } = await spawnChild({
+        experimentalFlags: secondaryFlags(),
+        config: { providers: {}, secondaryModel: { model: 'other-model' } },
+        modelChoice: 'cheap-model',
+      });
+      expect(child.agent.config.modelAlias).toBe('cheap-model');
     });
 
     it('honors the profile model_preference over the configured secondary model', async () => {

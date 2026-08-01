@@ -458,27 +458,16 @@ describe('current builtin collaboration tools', () => {
     expect(description.toLowerCase()).toContain('distinct');
   });
 
-  it('AgentSwarm strips the model parameter from the JSON schema by default', () => {
+  it('AgentSwarm always exposes the free-form model parameter in the JSON schema', () => {
     const tool = new AgentSwarmTool(mockSubagentHost({}), mockSwarmMode());
-    const properties = (tool.parameters as { properties: Record<string, unknown> }).properties;
-
-    expect(properties).not.toHaveProperty('model');
-    expect(properties).toHaveProperty('prompt_template');
-  });
-
-  it('AgentSwarm exposes the model parameter in the JSON schema when the experiment is enabled', () => {
-    const tool = new AgentSwarmTool(
-      mockSubagentHost({}),
-      mockSwarmMode(),
-      undefined,
-      undefined,
-      true,
-    );
     const properties = (
-      tool.parameters as { properties: Record<string, { enum?: string[] }> }
+      tool.parameters as { properties: Record<string, { type?: string; enum?: string[] }> }
     ).properties;
 
-    expect(properties['model']?.enum).toEqual(['primary', 'secondary']);
+    expect(properties).toHaveProperty('model');
+    expect(properties['model']?.type).toBe('string');
+    expect(properties['model']?.enum).toBeUndefined();
+    expect(properties).toHaveProperty('prompt_template');
   });
 
   it('AgentSwarm rejects more than 128 subagents at execution time', async () => {

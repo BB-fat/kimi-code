@@ -7,30 +7,40 @@ import {
 } from '../config';
 import { ErrorCodes, KimiError } from '../errors';
 import type { ExperimentalFlagResolver } from '../flags';
-import type { AgentModelPreference } from '../profile';
 
 /**
- * Subagent model binding — the secondary-model half of the spawn decision.
+ * Subagent model binding — per-spawn model selection for newly created
+ * subagents.
  *
- * When the `secondary-model` experiment is enabled and `[secondary_model]` is
+ * The parent model (through the `Agent` / `AgentSwarm` tool `model` parameter)
+ * or the spawned profile (via `model_preference`) can request any configured
+ * model alias, or the shortcuts `"primary"` / `"secondary"`. When the
+ * `secondary-model` experiment is enabled and `[secondary_model]` is
  * configured, newly spawned subagents bind to it by default instead of
- * inheriting the caller's model. The caller (the parent model, through the
- * `Agent` / `AgentSwarm` tool `model` parameter) or the spawned profile (via
- * `model_preference`) can force `primary`. A recipe with patch fields binds
- * the synthesized derived entry ({@link SECONDARY_DERIVED_MODEL_ALIAS},
+ * inheriting the caller's model. A recipe with patch fields binds the
+ * synthesized derived entry ({@link SECONDARY_DERIVED_MODEL_ALIAS},
  * materialized by `applySecondaryModelConfig`); a pointer-only recipe binds
  * the pointed entry directly. `default_effort` is passed as the explicit
- * subagent thinking effort; without it the child resolves thinking naturally
- * (global thinking config → the bound model's default effort) rather than
- * inheriting the caller's level. When unset, spawning behavior is unchanged:
- * subagents inherit the caller's model and effort.
+ * subagent thinking effort; free-form aliases and recipes without
+ * `default_effort` leave thinking unset so the child resolves it naturally
+ * (global thinking config → the bound model's default effort). When secondary
+ * is unset, spawning behavior is unchanged: subagents inherit the caller's
+ * model and effort.
  */
 
-export type SubagentModelChoice = AgentModelPreference;
+/**
+ * Per-spawn model choice from the tool argument or a profile preference.
+ * Free-form strings are treated as configured model aliases; the shortcuts
+ * `"primary"` / `"secondary"` keep their symbolic meaning.
+ */
+export type SubagentModelChoice = string;
+
+export type SubagentBindingSource = 'primary' | 'secondary' | 'explicit' | 'inherit';
 
 export interface SubagentModelBinding {
   readonly modelAlias: string | undefined;
   readonly thinkingEffort?: string;
+  readonly source: SubagentBindingSource;
 }
 
 export function resolveSecondaryModel(
@@ -52,78 +62,108 @@ export function resolveSubagentBinding(
   own: { readonly modelAlias: string | undefined; readonly thinkingEffort: string },
   requested?: SubagentModelChoice,
 ): SubagentModelBinding {
+  if (requested === 'primary') {
+    return {
+      modelAlias: own.modelAlias,
+      thinkingEffort: own.thinkingEffort,
+      source: 'primary',
+    };
+  }
+
+  // Free-form alias (anything other than the secondary shortcut / omit).
+  if (requested !== undefined && requested !== 'secondary') {
+    return { modelAlias: requested, thinkingEffort: undefined, source: 'explicit' };
+  }
+
+  // requested is undefined | 'secondary' — secondary default when available.
   const secondary = resolveSecondaryModel(config, flags);
-  if (requested !== 'primary' && secondary?.model !== undefined) {
+  if (secondary?.model !== undefined) {
     return {
       modelAlias:
         secondaryModelPatch(secondary) === undefined
           ? secondary.model
           : SECONDARY_DERIVED_MODEL_ALIAS,
       thinkingEffort: secondary.defaultEffort,
+      source: 'secondary',
     };
   }
-  return { modelAlias: own.modelAlias, thinkingEffort: own.thinkingEffort };
+
+  return {
+    modelAlias: own.modelAlias,
+    thinkingEffort: own.thinkingEffort,
+    source: 'inherit',
+  };
+}
+
+export interface BuildSubagentModelDescriptionsOptions {
+  readonly config: KimiConfig | undefined;
+  readonly flags: ExperimentalFlagResolver;
+  readonly callerModelAlias: string | undefined;
+  /**
+   * Configured model ids from `[models]`. Reserved runtime ids (e.g. the
+   * secondary derived entry) are filtered out. When empty/omitted and no
+   * secondary shortcut is available, the description block is omitted.
+   */
+  readonly availableModelIds?: readonly string[];
+  /**
+   * Optional display labels keyed by model id (displayName / wire name).
+   * Falls back to the id when missing.
+   */
+  readonly modelLabels?: Readonly<Record<string, string | undefined>>;
 }
 
 /**
  * The "Available models" block appended to the `Agent` / `AgentSwarm` tool
- * descriptions so the parent model knows it can pick. `undefined` when the
- * secondary model is not configured or the caller's model is not bound yet.
+ * descriptions so the parent model knows it can pick. `undefined` when there
+ * is nothing useful to list (no configured models and no secondary shortcut).
  */
 export function buildSubagentModelDescriptions(
-  config: KimiConfig | undefined,
-  flags: ExperimentalFlagResolver,
-  callerModelAlias: string | undefined,
+  options: BuildSubagentModelDescriptionsOptions,
 ): string | undefined {
+  const { config, flags, callerModelAlias, availableModelIds = [], modelLabels = {} } = options;
   const secondaryModel = resolveSecondaryModel(config, flags)?.model;
-  if (secondaryModel === undefined || callerModelAlias === undefined) return undefined;
-  return [
-    'Available models (pass via model):',
-    `- secondary: ${secondaryModel} (default) — the configured secondary model; prefer it for routine subagent tasks`,
-    `- primary: ${callerModelAlias} — the main model you are running on; use it for hard, quality-sensitive subagent tasks`,
-  ].join('\n');
-}
+  const catalogIds = availableModelIds.filter((id) => id !== SECONDARY_DERIVED_MODEL_ALIAS);
 
-/**
- * Strip the `model` property from a subagent collaboration tool's advertised
- * JSON schema. While the `secondary-model` experiment is off the parameter is
- * a silent no-op, so the schema the model sees (and the args validator
- * compiled from the same advertised schema) drops it entirely — the
- * secondary-model concept never enters the prompt, and a stray `model`
- * argument is rejected instead of silently inheriting the caller's model.
- * Returns the input unchanged when there is no `model` property; otherwise a
- * shallow copy — the input is never mutated, so callers can keep both
- * variants as shared constants.
- */
-export function stripSubagentModelParameter(
-  parameters: Record<string, unknown>,
-): Record<string, unknown> {
-  const properties = parameters['properties'];
-  if (typeof properties !== 'object' || properties === null || !('model' in properties)) {
-    return parameters;
+  if (catalogIds.length === 0 && secondaryModel === undefined) return undefined;
+
+  const lines = ['Available models (pass via model):'];
+  if (callerModelAlias !== undefined) {
+    lines.push(
+      `- primary: ${callerModelAlias} — the main model you are running on; use it for hard, quality-sensitive subagent tasks`,
+    );
   }
-  const nextProperties = { ...(properties as Record<string, unknown>) };
-  delete nextProperties['model'];
-  const next: Record<string, unknown> = { ...parameters, properties: nextProperties };
-  const required = parameters['required'];
-  if (Array.isArray(required) && required.includes('model')) {
-    next['required'] = required.filter((entry) => entry !== 'model');
+  if (secondaryModel !== undefined) {
+    lines.push(
+      `- secondary: ${secondaryModel} (default) — the configured secondary model; prefer it for routine subagent tasks`,
+    );
   }
-  return next;
+  for (const id of catalogIds) {
+    const label = modelLabels[id];
+    lines.push(
+      label !== undefined && label.length > 0 && label !== id
+        ? `- ${id}: ${label}`
+        : `- ${id}`,
+    );
+  }
+  lines.push(
+    'Pass a configured model alias from the list above, or the shortcuts "primary" / "secondary". This explicit choice overrides the selected agent type\'s model_preference; without either, secondary is the default when configured, otherwise the subagent inherits your model. Ignored when resuming — resumed subagents keep their own model.',
+  );
+  return lines.join('\n');
 }
 
 /**
  * Point a spawn-time model resolution failure at the secondary-model
- * configuration when the bound model is not the caller's own — otherwise the
- * parent model sees a bare "model not configured" error with no hint that it
- * comes from `[secondary_model]`.
+ * configuration when the bound model came from `[secondary_model]`. Free-alias
+ * failures keep their plain error so the parent model is not misled.
  */
 export function wrapSubagentModelError(
   error: unknown,
   boundModel: string,
-  callerModelAlias: string | undefined,
+  source: SubagentBindingSource,
 ): unknown {
-  if (boundModel === callerModelAlias) return error;
+  if (source !== 'secondary') {
+    return error;
+  }
   if (!(error instanceof KimiError) || error.code !== ErrorCodes.CONFIG_INVALID) return error;
   // ProviderManager tags only the missing-alias failure with details.model;
   // malformed aliases and providers must keep their own actionable errors.

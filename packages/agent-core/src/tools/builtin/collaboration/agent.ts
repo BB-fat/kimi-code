@@ -29,7 +29,6 @@ import {
   type SessionSubagentHost,
   type SubagentHandle,
 } from '../../../session/subagent-host';
-import { stripSubagentModelParameter } from '../../../session/subagent-binding';
 import { isUserCancellation } from '../../../utils/abort';
 import { AgentBackgroundTask, type BackgroundManager } from '../../../agent/background';
 import { toInputJsonSchema } from '../../support/input-schema';
@@ -68,10 +67,10 @@ export const AgentToolInputSchema = z.preprocess(
         'One of the available agent types (see "Available agent types" in this tool description). Defaults to "coder" when omitted.',
       ),
     model: z
-      .enum(['primary', 'secondary'])
+      .string()
       .optional()
       .describe(
-        'Model for the new subagent: "secondary" uses the configured secondary model (the default when one is set), "primary" uses the model you are running on. Only applies when spawning a new agent — a resumed agent keeps its bound model.',
+        'Model for the new subagent. Pass a configured model alias from the Available models list, or the shortcuts "primary" / "secondary". This explicit choice overrides the selected agent type\'s model_preference; without either, secondary is the default when configured, otherwise the subagent inherits your model. Only applies when spawning a new agent — a resumed agent keeps its bound model.',
       ),
     resume: z
       .string()
@@ -112,12 +111,11 @@ const BACKGROUND_AGENT_UNAVAILABLE =
 // ── AgentTool class ──────────────────────────────────────────────────
 
 const AGENT_TOOL_PARAMETERS = toInputJsonSchema(AgentToolInputSchema);
-const AGENT_TOOL_PARAMETERS_NO_MODEL = stripSubagentModelParameter(AGENT_TOOL_PARAMETERS);
 
 export class AgentTool implements BuiltinTool<AgentToolInput> {
   readonly name: string = 'Agent';
   readonly description: string;
-  readonly parameters: Record<string, unknown>;
+  readonly parameters: Record<string, unknown> = AGENT_TOOL_PARAMETERS;
   constructor(
     private readonly subagentHost: SessionSubagentHost,
     private readonly backgroundManager: BackgroundManager,
@@ -128,10 +126,6 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
       subagentTimeoutMs?: number | undefined;
       subagentModelDescription?: string;
       showModelPreferences?: boolean;
-      // Mirrors the `secondary-model` experiment: off (the default), the
-      // no-op `model` parameter is stripped from the advertised schema so the
-      // secondary-model concept never enters the prompt.
-      modelChoiceEnabled?: boolean;
     },
   ) {
     const log = options?.log;
@@ -139,10 +133,6 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
     // `0` is preserved (not normalized): `0 ?? DEFAULT_SUBAGENT_TIMEOUT_MS`
     // stays `0`, and the BackgroundManager arms no timer for it.
     this.subagentTimeoutMs = options?.subagentTimeoutMs;
-    this.parameters =
-      options?.modelChoiceEnabled === true
-        ? AGENT_TOOL_PARAMETERS
-        : AGENT_TOOL_PARAMETERS_NO_MODEL;
     const typeLines = buildSubagentDescriptions(
       subagents,
       options?.showModelPreferences ?? false,

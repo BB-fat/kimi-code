@@ -43,9 +43,10 @@ import {
   buildSubagentModelDescriptions,
   resolveSubagentBinding,
   resolveSubagentTimeoutMs,
-  stripSubagentModelParameter,
+  type SubagentModelBinding,
 } from '#/session/subagent/configSection';
-import { SECONDARY_MODEL_FLAG_ID } from '#/session/subagent/flag';
+import { IModelService } from '#/kosong/model/model';
+import { SECONDARY_DERIVED_MODEL_ID } from '#/app/kosongConfig/secondaryModelOverlay';
 import {
   AgentSwarmToolInputSchema,
   IAgentSwarmTool,
@@ -58,7 +59,6 @@ import AGENT_SWARM_DESCRIPTION from './agent-swarm.md?raw';
 const DEFAULT_SUBAGENT_TYPE = 'coder';
 
 const AGENT_SWARM_PARAMETERS = toInputJsonSchema(AgentSwarmToolInputSchema);
-const AGENT_SWARM_PARAMETERS_NO_MODEL = stripSubagentModelParameter(AGENT_SWARM_PARAMETERS);
 
 interface AgentSwarmSpawnSpec {
   readonly kind: 'spawn';
@@ -89,17 +89,7 @@ interface SwarmRunResult {
 export class AgentSwarmTool implements IAgentSwarmTool {
   declare readonly _serviceBrand: undefined;
   readonly name = 'AgentSwarm' as const;
-
-  /**
-   * The `model` choice only exists while the `secondary-model` experiment is
-   * on; off, the advertised schema drops it so the concept never enters the
-   * prompt. Read live per request (same as `description`).
-   */
-  get parameters(): Record<string, unknown> {
-    return this.flags.enabled(SECONDARY_MODEL_FLAG_ID)
-      ? AGENT_SWARM_PARAMETERS
-      : AGENT_SWARM_PARAMETERS_NO_MODEL;
-  }
+  readonly parameters: Record<string, unknown> = AGENT_SWARM_PARAMETERS;
 
   private readonly callerAgentId: string;
 
@@ -111,16 +101,27 @@ export class AgentSwarmTool implements IAgentSwarmTool {
     @IFlagService private readonly flags: IFlagService,
     @ISessionAgentProfileCatalog private readonly catalog: ISessionAgentProfileCatalog,
     @IAgentProfileService private readonly profile: IAgentProfileService,
+    @IModelService private readonly models: IModelService,
   ) {
     this.callerAgentId = scopeContext.agentId;
   }
 
   get description(): string {
-    const modelLines = buildSubagentModelDescriptions(
-      this.config,
-      this.flags,
-      this.profile.data().modelAlias,
-    );
+    const configuredModels = this.models.list();
+    const modelLines = buildSubagentModelDescriptions({
+      config: this.config,
+      flags: this.flags,
+      callerModelAlias: this.profile.data().modelAlias,
+      availableModelIds: Object.keys(configuredModels).filter(
+        (id) => id !== SECONDARY_DERIVED_MODEL_ID,
+      ),
+      modelLabels: Object.fromEntries(
+        Object.entries(configuredModels).map(([id, record]) => [
+          id,
+          record.displayName ?? record.name ?? record.model,
+        ]),
+      ),
+    });
     return modelLines === undefined
       ? AGENT_SWARM_DESCRIPTION
       : `${AGENT_SWARM_DESCRIPTION}\n\n${modelLines}`;
@@ -165,7 +166,7 @@ export class AgentSwarmTool implements IAgentSwarmTool {
     toolCallId: string,
   ): Promise<string> {
     const profileName = normalizeOptionalString(args.subagent_type) ?? DEFAULT_SUBAGENT_TYPE;
-    let binding: { model: string; thinking?: string } | undefined;
+    let binding: SubagentModelBinding | undefined;
     if ((args.items?.length ?? 0) > 0) {
       await this.catalog.ready;
       const own = this.profile.data();

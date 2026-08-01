@@ -9,6 +9,7 @@
 
 import { isProviderRateLimitError } from '#/kosong/contract/errors';
 import { type TokenUsage } from '#/kosong/contract/usage';
+import type { SubagentModelBinding } from '#/session/subagent/configSection';
 import * as retry from 'retry';
 
 import { isUserCancellation } from '#/_base/utils/abort';
@@ -30,7 +31,7 @@ export interface AgentRunAttemptOptions {
 export interface AgentSpawnAttemptOptions extends AgentRunAttemptOptions {
   readonly profileName: string;
   readonly swarmItem?: string;
-  readonly binding?: { readonly model: string; readonly thinking?: string };
+  readonly binding?: SubagentModelBinding;
 }
 
 export type AgentRunAttemptHandle = {

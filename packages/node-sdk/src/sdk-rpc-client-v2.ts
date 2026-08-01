@@ -1367,7 +1367,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     try {
       this.engineAccessor.get(IModelCatalog).get(secondary.model);
     } catch (error) {
-      throw wrapSubagentModelError(error, secondary.model, undefined);
+      throw wrapSubagentModelError(error, secondary.model, 'secondary');
     }
     session.accessor
       .get(ISessionSecondaryModelWarningService)

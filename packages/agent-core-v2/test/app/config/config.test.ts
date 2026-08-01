@@ -1435,10 +1435,21 @@ describe('subagent config section', () => {
     expect(resolveSubagentBinding(noModel.config, secondaryModelFlags(), own)).toEqual({
       model: 'provider/main',
       thinking: 'medium',
+      source: 'inherit',
     });
     expect(resolveSubagentBinding(noModel.config, secondaryModelFlags(), own, 'secondary')).toEqual({
       model: 'provider/main',
       thinking: 'medium',
+      source: 'inherit',
+    });
+    // A free-form alias binds explicitly and leaves thinking to resolve
+    // naturally, regardless of the secondary config.
+    expect(
+      resolveSubagentBinding(noModel.config, secondaryModelFlags(), own, 'provider/other'),
+    ).toEqual({
+      model: 'provider/other',
+      thinking: undefined,
+      source: 'explicit',
     });
     noModel.disposables.dispose();
 
@@ -1448,10 +1459,12 @@ describe('subagent config section', () => {
     expect(resolveSubagentBinding(withModel.config, secondaryModelFlags(), own)).toEqual({
       model: 'provider/secondary',
       thinking: undefined,
+      source: 'secondary',
     });
     expect(resolveSubagentBinding(withModel.config, secondaryModelFlags(), own, 'primary')).toEqual({
       model: 'provider/main',
       thinking: 'medium',
+      source: 'primary',
     });
     withModel.disposables.dispose();
 
@@ -1464,11 +1477,13 @@ describe('subagent config section', () => {
     expect(resolveSubagentBinding(withEffort.config, secondaryModelFlags(), own)).toEqual({
       model: SECONDARY_DERIVED_MODEL_ID,
       thinking: 'low',
+      source: 'secondary',
     });
     // default_effort only applies together with the secondary model.
     expect(resolveSubagentBinding(withEffort.config, secondaryModelFlags(), own, 'primary')).toEqual({
       model: 'provider/main',
       thinking: 'medium',
+      source: 'primary',
     });
     withEffort.disposables.dispose();
 
@@ -1479,6 +1494,7 @@ describe('subagent config section', () => {
     expect(resolveSubagentBinding(withFactPatch.config, secondaryModelFlags(), own)).toEqual({
       model: SECONDARY_DERIVED_MODEL_ID,
       thinking: undefined,
+      source: 'secondary',
     });
     withFactPatch.disposables.dispose();
   });
@@ -1493,6 +1509,7 @@ describe('subagent config section', () => {
     expect(resolveSubagentBinding(config, secondaryModelFlags(false), own)).toEqual({
       model: 'provider/main',
       thinking: 'medium',
+      source: 'inherit',
     });
 
     disposables.dispose();
@@ -1505,7 +1522,7 @@ describe('subagent config section', () => {
       { details: { model: 'provider/bad' } },
     );
 
-    const result = wrapSubagentModelError(cause, 'provider/bad', 'provider/main');
+    const result = wrapSubagentModelError(cause, 'provider/bad', 'secondary');
 
     expect(toErrorPayload(result)).toMatchObject({
       code: ErrorCodes.CONFIG_INVALID,
@@ -1531,7 +1548,7 @@ describe('subagent config section', () => {
       ErrorCodes.CONFIG_INVALID,
       'Model "provider/secondary" must declare a wire protocol (config: models.<id>.protocol).',
     );
-    expect(wrapSubagentModelError(malformed, 'provider/secondary', 'provider/main')).toBe(malformed);
+    expect(wrapSubagentModelError(malformed, 'provider/secondary', 'secondary')).toBe(malformed);
 
     // A missing alias that is not the bound model.
     const unrelated = new Error2(
@@ -1539,7 +1556,7 @@ describe('subagent config section', () => {
       'Model "provider/other" is not configured in config.toml.',
       { details: { model: 'provider/other' } },
     );
-    expect(wrapSubagentModelError(unrelated, 'provider/secondary', 'provider/main')).toBe(unrelated);
+    expect(wrapSubagentModelError(unrelated, 'provider/secondary', 'secondary')).toBe(unrelated);
   });
 });
 

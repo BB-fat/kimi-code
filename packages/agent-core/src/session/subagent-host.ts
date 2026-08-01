@@ -127,9 +127,10 @@ export interface SpawnSubagentOptions extends RunSubagentOptions {
   readonly profileName: string;
   readonly swarmItem?: string;
   /**
-   * Explicit per-spawn model choice from the tool call. The profile's own
-   * `modelPreference` applies when this is omitted; both only take effect
-   * with the `secondary-model` experiment enabled.
+   * Explicit per-spawn model choice from the tool call: a configured model
+   * alias, or the shortcuts `"primary"` / `"secondary"`. The profile's own
+   * `modelPreference` applies when this is omitted. The `"secondary"` shortcut
+   * and secondary-as-default still require the `secondary-model` experiment.
    */
   readonly modelChoice?: SubagentModelChoice;
 }
@@ -484,7 +485,7 @@ export class SessionSubagentHost {
       try {
         providerManager?.resolveProviderConfig(binding.modelAlias);
       } catch (error) {
-        throw wrapSubagentModelError(error, binding.modelAlias, parent.config.modelAlias);
+        throw wrapSubagentModelError(error, binding.modelAlias, binding.source);
       }
     }
     return binding;

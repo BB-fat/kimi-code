@@ -16,6 +16,7 @@ import { isMcpToolName, qualifyMcpToolName } from '../../mcp/tool-naming';
 import type { MCPClient, MCPToolDefinition } from '../../mcp/types';
 import { resolveSubagentTimeoutMs } from '../../session/subagent-host';
 import { buildSubagentModelDescriptions } from '../../session/subagent-binding';
+import { SECONDARY_DERIVED_MODEL_ALIAS } from '../../config';
 import { extendWorkspaceWithSkillRoots } from '../../skill';
 import { fingerprint } from '../llm-request-logger';
 import * as b from '../../tools/builtin';
@@ -848,12 +849,20 @@ export class ToolManager {
               log: this.agent.log,
               subagentTimeoutMs: resolveSubagentTimeoutMs(this.agent.kimiConfig?.subagent?.timeoutMs),
               showModelPreferences: this.agent.experimentalFlags.enabled('secondary-model'),
-              modelChoiceEnabled: this.agent.experimentalFlags.enabled('secondary-model'),
-              subagentModelDescription: buildSubagentModelDescriptions(
-                this.agent.kimiConfig,
-                this.agent.experimentalFlags,
-                this.agent.config.modelAlias,
-              ),
+              subagentModelDescription: buildSubagentModelDescriptions({
+                config: this.agent.kimiConfig,
+                flags: this.agent.experimentalFlags,
+                callerModelAlias: this.agent.config.modelAlias,
+                availableModelIds: Object.keys(this.agent.kimiConfig?.models ?? {}).filter(
+                  (id) => id !== SECONDARY_DERIVED_MODEL_ALIAS,
+                ),
+                modelLabels: Object.fromEntries(
+                  Object.entries(this.agent.kimiConfig?.models ?? {}).map(([id, record]) => [
+                    id,
+                    record.displayName ?? record.model,
+                  ]),
+                ),
+              }),
             },
           ),
         this.agent.subagentHost &&
@@ -861,12 +870,20 @@ export class ToolManager {
             this.agent.subagentHost,
             this.agent.swarmMode,
             resolveSubagentTimeoutMs(this.agent.kimiConfig?.subagent?.timeoutMs),
-            buildSubagentModelDescriptions(
-              this.agent.kimiConfig,
-              this.agent.experimentalFlags,
-              this.agent.config.modelAlias,
-            ),
-            this.agent.experimentalFlags.enabled('secondary-model'),
+            buildSubagentModelDescriptions({
+              config: this.agent.kimiConfig,
+              flags: this.agent.experimentalFlags,
+              callerModelAlias: this.agent.config.modelAlias,
+              availableModelIds: Object.keys(this.agent.kimiConfig?.models ?? {}).filter(
+                (id) => id !== SECONDARY_DERIVED_MODEL_ALIAS,
+              ),
+              modelLabels: Object.fromEntries(
+                Object.entries(this.agent.kimiConfig?.models ?? {}).map(([id, record]) => [
+                  id,
+                  record.displayName ?? record.model,
+                ]),
+              ),
+            }),
           ),
         toolServices?.webSearcher && new b.WebSearchTool(toolServices.webSearcher),
         toolServices?.urlFetcher && new b.FetchURLTool(toolServices.urlFetcher),

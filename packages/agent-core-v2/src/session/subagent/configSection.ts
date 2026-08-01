@@ -10,31 +10,26 @@
  * timeouts resolve through `resolveSubagentTimeoutMs`, and the timeout
  * message renders with `formatSubagentTimeoutDescription`.
  *
- * The model half of the spawn binding is the secondary model (the
- * `[secondary_model]` section on disk): when its
- * experiment is enabled and the model is set, newly spawned subagents bind to
- * it by default instead of inheriting the caller's model, and the
- * `Agent`/`AgentSwarm` tools let the parent model pick per spawn via their
- * `model` parameter. When unset, spawning behavior is unchanged (subagents
- * inherit the caller's model). A recipe with patch fields binds the
- * synthesized derived entry (`SECONDARY_DERIVED_MODEL_ID`); a pointer-only
- * recipe binds the pointed entry directly. `default_effort` is passed as the
- * explicit subagent thinking; without it the subagent resolves thinking
- * naturally (global thinking config → the bound model's default effort)
- * rather than inheriting the caller's level. Both tools resolve spawn
- * bindings through `resolveSubagentBinding`, advertise the pair via
- * `buildSubagentModelDescriptions`, and wrap spawn failures with
- * `wrapSubagentModelError`; while the experiment is off they also strip the
- * no-op `model` parameter from their advertised schemas via
- * `stripSubagentModelParameter`. Self-registered at module load via
+ * The model half of the spawn binding lets the parent pick any configured
+ * model alias via the `Agent`/`AgentSwarm` `model` parameter (or the
+ * shortcuts `"primary"` / `"secondary"`). When the secondary-model experiment
+ * is enabled and `[secondary_model]` is set, newly spawned subagents bind to
+ * it by default instead of inheriting the caller's model. A recipe with patch
+ * fields binds the synthesized derived entry (`SECONDARY_DERIVED_MODEL_ID`);
+ * a pointer-only recipe binds the pointed entry directly. `default_effort` is
+ * passed as the explicit subagent thinking; without it the subagent resolves
+ * thinking naturally (global thinking config → the bound model's default
+ * effort) rather than inheriting the caller's level. Free-form aliases leave
+ * thinking unset for the same reason. Both tools resolve spawn bindings
+ * through `resolveSubagentBinding`, advertise available models via
+ * `buildSubagentModelDescriptions`, and wrap secondary-model spawn failures
+ * with `wrapSubagentModelError`. Self-registered at module load via
  * `registerConfigSection`.
  */
 
 import { z } from 'zod';
 
 import { Error2, ErrorCodes, isError2 } from '#/errors';
-import type { AgentModelPreference } from '#/app/agentProfileCatalog/agentProfileCatalog';
-import { isPlainObject } from '#/app/config/toml';
 import type { IFlagService } from '#/app/flag/flag';
 import {
   SECONDARY_MODEL_ENV,
@@ -94,7 +89,20 @@ export function resolveSubagentTimeoutMs(config: IConfigService): number {
   );
 }
 
-export type SubagentModelChoice = AgentModelPreference;
+/**
+ * Per-spawn model choice from the tool argument or a profile preference.
+ * Free-form strings are treated as configured model aliases; the shortcuts
+ * `"primary"` / `"secondary"` keep their symbolic meaning.
+ */
+export type SubagentModelChoice = string;
+
+export type SubagentBindingSource = 'primary' | 'secondary' | 'explicit' | 'inherit';
+
+export interface SubagentModelBinding {
+  readonly model: string;
+  readonly thinking?: string;
+  readonly source: SubagentBindingSource;
+}
 
 export function resolveSecondaryModel(
   config: IConfigService,
@@ -109,66 +117,98 @@ export function resolveSubagentBinding(
   flags: IFlagService,
   own: { modelAlias: string; thinkingLevel: string },
   requested?: SubagentModelChoice,
-): { model: string; thinking?: string } {
+): SubagentModelBinding {
+  if (requested === 'primary') {
+    return { model: own.modelAlias, thinking: own.thinkingLevel, source: 'primary' };
+  }
+
+  // Free-form alias (anything other than the secondary shortcut / omit).
+  if (requested !== undefined && requested !== 'secondary') {
+    return { model: requested, thinking: undefined, source: 'explicit' };
+  }
+
+  // requested is undefined | 'secondary' — secondary default when available.
   const secondary = resolveSecondaryModel(config, flags);
-  if (requested !== 'primary' && secondary?.model !== undefined) {
+  if (secondary?.model !== undefined) {
     return {
       model:
         secondaryModelPatch(secondary) === undefined
           ? secondary.model
           : SECONDARY_DERIVED_MODEL_ID,
       thinking: secondary.defaultEffort,
+      source: 'secondary',
     };
   }
-  return { model: own.modelAlias, thinking: own.thinkingLevel };
+
+  return { model: own.modelAlias, thinking: own.thinkingLevel, source: 'inherit' };
 }
 
-export function buildSubagentModelDescriptions(
-  config: IConfigService,
-  flags: IFlagService,
-  callerModelAlias: string | undefined,
-): string | undefined {
-  const secondaryModel = resolveSecondaryModel(config, flags)?.model;
-  if (secondaryModel === undefined || callerModelAlias === undefined) return undefined;
-  return [
-    'Available models (pass via model):',
-    `- secondary: ${secondaryModel} (default) — the configured secondary model; prefer it for routine subagent tasks`,
-    `- primary: ${callerModelAlias} — the main model you are running on; use it for hard, quality-sensitive subagent tasks`,
-  ].join('\n');
+export interface BuildSubagentModelDescriptionsOptions {
+  readonly config: IConfigService;
+  readonly flags: IFlagService;
+  readonly callerModelAlias: string | undefined;
+  /**
+   * Configured model ids from `[models]`. Reserved runtime ids (e.g. the
+   * secondary derived entry) are filtered out. When empty/omitted and no
+   * secondary shortcut is available, the description block is omitted.
+   */
+  readonly availableModelIds?: readonly string[];
+  /**
+   * Optional display labels keyed by model id (displayName / wire name).
+   * Falls back to the id when missing.
+   */
+  readonly modelLabels?: Readonly<Record<string, string | undefined>>;
 }
 
 /**
- * Strip the `model` property from a subagent collaboration tool's advertised
- * JSON schema. While the `secondary-model` experiment is off the parameter is
- * a silent no-op, so the schema the model sees (and the args validator
- * compiled from the same advertised schema) drops it entirely — the
- * secondary-model concept never enters the prompt, and a stray `model`
- * argument is rejected instead of silently inheriting the caller's model.
- * Returns the input unchanged when there is no `model` property; otherwise a
- * shallow copy — the input is never mutated, so callers can keep both
- * variants as shared constants.
+ * The "Available models" block appended to the `Agent` / `AgentSwarm` tool
+ * descriptions so the parent model knows it can pick. `undefined` when there
+ * is nothing useful to list (no configured models and no secondary shortcut).
  */
-export function stripSubagentModelParameter(
-  parameters: Record<string, unknown>,
-): Record<string, unknown> {
-  const properties = parameters['properties'];
-  if (!isPlainObject(properties) || !('model' in properties)) return parameters;
-  const nextProperties = { ...properties };
-  delete nextProperties['model'];
-  const next: Record<string, unknown> = { ...parameters, properties: nextProperties };
-  const required = parameters['required'];
-  if (Array.isArray(required) && required.includes('model')) {
-    next['required'] = required.filter((entry) => entry !== 'model');
+export function buildSubagentModelDescriptions(
+  options: BuildSubagentModelDescriptionsOptions,
+): string | undefined {
+  const { config, flags, callerModelAlias, availableModelIds = [], modelLabels = {} } = options;
+  const secondaryModel = resolveSecondaryModel(config, flags)?.model;
+  const catalogIds = availableModelIds.filter((id) => id !== SECONDARY_DERIVED_MODEL_ID);
+
+  if (catalogIds.length === 0 && secondaryModel === undefined) return undefined;
+
+  const lines = ['Available models (pass via model):'];
+  if (callerModelAlias !== undefined) {
+    lines.push(
+      `- primary: ${callerModelAlias} — the main model you are running on; use it for hard, quality-sensitive subagent tasks`,
+    );
   }
-  return next;
+  if (secondaryModel !== undefined) {
+    lines.push(
+      `- secondary: ${secondaryModel} (default) — the configured secondary model; prefer it for routine subagent tasks`,
+    );
+  }
+  for (const id of catalogIds) {
+    const label = modelLabels[id];
+    lines.push(
+      label !== undefined && label.length > 0 && label !== id
+        ? `- ${id}: ${label}`
+        : `- ${id}`,
+    );
+  }
+  lines.push(
+    'Pass a configured model alias from the list above, or the shortcuts "primary" / "secondary". This explicit choice overrides the selected agent type\'s model_preference; without either, secondary is the default when configured, otherwise the subagent inherits your model. Ignored when resuming — resumed subagents keep their own model.',
+  );
+  return lines.join('\n');
 }
 
 export function wrapSubagentModelError(
   error: unknown,
   boundModel: string,
-  callerModelAlias: string | undefined,
+  source: SubagentBindingSource,
 ): unknown {
-  if (boundModel === callerModelAlias) return error;
+  // Only rewrite secondary-model resolution failures so free-alias errors keep
+  // their plain "model not configured" message.
+  if (source !== 'secondary') {
+    return error;
+  }
   if (!isError2(error) || error.code !== ErrorCodes.CONFIG_INVALID) return error;
   if (error.details?.['model'] !== boundModel) return error;
   const displayModel =
