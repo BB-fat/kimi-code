@@ -84,11 +84,15 @@ export class ExitPlanModeReview {
         : `Selected approach: ${selected.label}\nExecute ONLY the selected approach. Do not execute any unselected alternatives.\n\n`;
     const savedTo = display.path !== undefined ? `Plan saved to: ${display.path}\n\n` : '';
     const formattedPlan = `Plan mode deactivated. All tools are now available.\n${savedTo}## Approved Plan:\n${display.plan}`;
+    const additionalInstructions =
+      result.feedback?.trim().length === 0 || result.feedback === undefined
+        ? ''
+        : `\n\n## Additional User Instructions:\n${result.feedback}`;
     return {
       kind: 'result',
       result: {
         isError: false,
-        output: `Exited plan mode. ${optionPrefix}${formattedPlan}`,
+        output: `Exited plan mode. ${optionPrefix}${formattedPlan}${additionalInstructions}`,
       },
     };
   }

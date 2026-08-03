@@ -480,4 +480,96 @@ describe('ApprovalPanelComponent', () => {
       { response: 'rejected', feedback: 'no', selected_label: 'Revise' },
     ]);
   });
+
+  it('keeps Enter and numeric approval immediate for optional instructions', () => {
+    const responses: Array<{ response: string; feedback?: string | undefined }> = [];
+    const pending = makePending();
+    pending.data.choices[0] = {
+      label: 'Approve once',
+      response: 'approved',
+      accepts_optional_feedback: true,
+    };
+    const dialog = new ApprovalPanelComponent(pending, (response) => responses.push(response));
+
+    dialog.handleInput('\r');
+    expect(responses).toEqual([{ response: 'approved', feedback: undefined }]);
+  });
+
+  it('enters optional instructions with Tab and preserves a leading digit', () => {
+    const responses: Array<{ response: string; feedback?: string | undefined }> = [];
+    const pending = makePending();
+    pending.data.choices[0] = {
+      label: 'Approve once',
+      response: 'approved',
+      accepts_optional_feedback: true,
+    };
+    const dialog = new ApprovalPanelComponent(pending, (response) => responses.push(response));
+
+    dialog.handleInput('\t');
+    dialog.handleInput('2');
+    dialog.handleInput('\r');
+    expect(responses).toEqual([{ response: 'approved', feedback: '2' }]);
+  });
+
+  it('enters optional instructions directly on a printable character', () => {
+    const responses: Array<{ response: string; feedback?: string | undefined }> = [];
+    const pending = makePending();
+    pending.data.choices[0] = {
+      label: 'Approve once',
+      response: 'approved',
+      accepts_optional_feedback: true,
+    };
+    const dialog = new ApprovalPanelComponent(pending, (response) => responses.push(response));
+
+    dialog.handleInput('x');
+    dialog.handleInput('\r');
+    expect(responses).toEqual([{ response: 'approved', feedback: 'x' }]);
+  });
+
+  it('uses Esc in two stages and clears optional instructions', () => {
+    const responses: Array<{ response: string; feedback?: string | undefined }> = [];
+    const pending = makePending();
+    pending.data.choices[0] = {
+      label: 'Approve once',
+      response: 'approved',
+      accepts_optional_feedback: true,
+    };
+    const dialog = new ApprovalPanelComponent(pending, (response) => responses.push(response));
+
+    dialog.handleInput('\t');
+    dialog.handleInput('x');
+    dialog.handleInput('\u001B');
+    expect(responses).toEqual([]);
+    dialog.handleInput('\u001B');
+    expect(responses).toEqual([{ response: 'rejected' }]);
+  });
+
+  it('clears unsubmitted instructions when changing choices', () => {
+    const responses: Array<{ response: string; feedback?: string | undefined }> = [];
+    const pending = makePending();
+    pending.data.choices[0] = {
+      label: 'Approve once',
+      response: 'approved',
+      accepts_optional_feedback: true,
+    };
+    const dialog = new ApprovalPanelComponent(pending, (response) => responses.push(response));
+
+    dialog.handleInput('\t');
+    dialog.handleInput('x');
+    dialog.handleInput('\u001B[B');
+    dialog.handleInput('\u001B[A');
+    dialog.handleInput('\t');
+    dialog.handleInput('\r');
+    expect(responses).toEqual([{ response: 'approved', feedback: undefined }]);
+  });
+
+  it('uses Esc in two stages for required feedback without rejecting first', () => {
+    const { dialog, responses } = makeDialog();
+    dialog.handleInput('4');
+    dialog.handleInput('x');
+    dialog.handleInput('\u001B');
+    expect(responses).toEqual([]);
+    dialog.handleInput('\u001B');
+    expect(responses).toEqual([{ response: 'rejected' }]);
+  });
 });

@@ -407,6 +407,32 @@ describe('AgentPlanService plan-guard listener', () => {
       expect(await svc.status()).toBeNull();
     });
 
+    it('appends approved feedback as additional user instructions', async () => {
+      const svc = await enterPlan();
+      approvalResponse = {
+        decision: 'approved',
+        feedback: '  Keep the API unchanged.  ',
+      };
+      const decision = await run(
+        hookContext('ExitPlanMode', { display: planReviewDisplay() }),
+      );
+
+      expect(decision?.veto?.output).toContain(
+        '## Additional User Instructions:\n  Keep the API unchanged.  ',
+      );
+      expect(await svc.status()).toBeNull();
+    });
+
+    it('does not append whitespace-only approved feedback', async () => {
+      await enterPlan();
+      approvalResponse = { decision: 'approved', feedback: '  \n\t' };
+      const decision = await run(
+        hookContext('ExitPlanMode', { display: planReviewDisplay() }),
+      );
+
+      expect(decision?.veto?.output).not.toContain('## Additional User Instructions:');
+    });
+
     it('approves without a selected label and saves the plan path into the output', async () => {
       const svc = await enterPlan();
       const decision = await run(

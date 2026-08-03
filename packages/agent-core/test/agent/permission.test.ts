@@ -1960,6 +1960,47 @@ describe('ExitPlanMode permission policy', () => {
     });
   });
 
+  it('appends approved feedback as additional user instructions', async () => {
+    const { manager, exit } = makePlanPermissionManager({
+      mode: 'manual',
+      plan: '# Draft Plan',
+      approval: { decision: 'approved', feedback: '  Keep the API unchanged.  ' },
+    });
+
+    const result = await manager.beforeToolCall(
+      hookContext({
+        id: 'call_exit_feedback',
+        toolName: 'ExitPlanMode',
+        args: {},
+        execution: planReviewExecution({ plan: '# Draft Plan' }),
+      }),
+    );
+
+    expect(exit).toHaveBeenCalled();
+    expect(result?.syntheticResult?.output).toContain(
+      '## Additional User Instructions:\n  Keep the API unchanged.  ',
+    );
+  });
+
+  it('does not append whitespace-only approved feedback', async () => {
+    const { manager } = makePlanPermissionManager({
+      mode: 'manual',
+      plan: '# Draft Plan',
+      approval: { decision: 'approved', feedback: '  \n\t' },
+    });
+
+    const result = await manager.beforeToolCall(
+      hookContext({
+        id: 'call_exit_blank_feedback',
+        toolName: 'ExitPlanMode',
+        args: {},
+        execution: planReviewExecution({ plan: '# Draft Plan' }),
+      }),
+    );
+
+    expect(result?.syntheticResult?.output).not.toContain('## Additional User Instructions:');
+  });
+
   it('reuses session approval for ExitPlanMode without re-prompting plan review', async () => {
     const { manager, requestApproval, exit } = makePlanPermissionManager({
       mode: 'manual',

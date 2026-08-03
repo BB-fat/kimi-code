@@ -56,6 +56,8 @@ In Plan mode the agent first outputs an action plan and waits for your approval 
 
 After producing a plan the agent pauses for your review — you can approve it, reject it, or ask for revisions. Exiting Plan mode requires your confirmation even if YOLO mode is also active. Auto mode is the exception: plan exits are approved automatically and marked as "Auto-approved" in the transcript.
 
+In the TUI, approving a plan remains a one-step action with `Enter` or a number key. To send an additional prompt along with the approval, select an approved option and press `Tab`, then type your instructions and press `Enter`; you can also start typing a non-numeric character directly. Press `Esc` while editing to discard the prompt and return to the choices.
+
 ### YOLO / Auto mode
 
 **YOLO mode** (`/yolo`) auto-approves regular tool calls, making it suitable for batch tasks you know are safe. It still asks before sensitive actions — accessing sensitive files such as `.env` or SSH keys, or exiting Plan mode — and the agent can still ask you questions.

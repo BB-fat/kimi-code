@@ -382,8 +382,16 @@ function adaptPlanReviewChoices(display: ToolInputDisplay): ApprovalPanelChoice[
           label: option.label,
           response: 'approved' as const,
           selected_label: option.label,
+          accepts_optional_feedback: true,
         }))
-      : [{ label: 'Approve', response: 'approved' as const, selected_label: 'Approve' }];
+      : [
+          {
+            label: 'Approve',
+            response: 'approved' as const,
+            selected_label: 'Approve',
+            accepts_optional_feedback: true,
+          },
+        ];
   return [...optionChoices, ...PLAN_REJECT_CHOICES].map((choice) => cloneChoice(choice));
 }
 

@@ -9,7 +9,6 @@ import {
   Input,
   matchesKey,
   Key,
-  decodeKittyPrintable,
   type Focusable,
   truncateToWidth,
   visibleWidth,
@@ -18,6 +17,7 @@ import {
 import { currentTheme } from '#/tui/theme';
 import { highlightLines, langFromPath } from '#/tui/components/media/code-highlight';
 import { renderDiffLinesClustered } from '#/tui/components/media/diff-preview';
+import { isPrintableChar, printableChar } from '#/tui/utils/printable-key';
 import type {
   ApprovalPanelChoice,
   DiffDisplayBlock,
@@ -232,9 +232,18 @@ export class ApprovalPanelComponent extends Container implements Focusable {
       this.submit(this.selectedIndex, value);
     };
     this.feedbackInput.onEscape = () => {
-      this.feedbackMode = false;
-      this.feedbackInput.setValue('');
+      this.leaveFeedbackMode();
     };
+  }
+
+  private leaveFeedbackMode(): void {
+    this.feedbackMode = false;
+    this.feedbackInput.setValue('');
+  }
+
+  private enterFeedbackMode(initialInput?: string): void {
+    this.feedbackMode = true;
+    if (initialInput !== undefined) this.feedbackInput.setValue(initialInput);
   }
 
   private submit(index: number, feedback: string = ''): void {
@@ -252,13 +261,18 @@ export class ApprovalPanelComponent extends Container implements Focusable {
     if (!option) return;
     if (option.requires_feedback === true) {
       this.selectedIndex = index;
-      this.feedbackMode = true;
+      this.enterFeedbackMode();
     } else {
       this.submit(index);
     }
   }
 
   handleInput(data: string): void {
+    if (this.feedbackMode && matchesKey(data, Key.escape)) {
+      this.leaveFeedbackMode();
+      return;
+    }
+
     if (
       matchesKey(data, Key.escape) ||
       matchesKey(data, Key.ctrl('c')) ||
@@ -283,12 +297,12 @@ export class ApprovalPanelComponent extends Container implements Focusable {
 
     if (this.feedbackMode) {
       if (matchesKey(data, Key.up)) {
-        this.feedbackMode = false;
+        this.leaveFeedbackMode();
         this.selectedIndex = (this.selectedIndex - 1 + this.choiceCount()) % this.choiceCount();
         return;
       }
       if (matchesKey(data, Key.down)) {
-        this.feedbackMode = false;
+        this.leaveFeedbackMode();
         this.selectedIndex = (this.selectedIndex + 1) % this.choiceCount();
         return;
       }
@@ -309,11 +323,23 @@ export class ApprovalPanelComponent extends Container implements Focusable {
       this.selectAndSubmit(this.selectedIndex);
       return;
     }
+    if (matchesKey(data, Key.tab) && this.choiceAt(this.selectedIndex)?.accepts_optional_feedback === true) {
+      this.enterFeedbackMode();
+      return;
+    }
 
-    const printable = decodeKittyPrintable(data) ?? data;
+    const printable = printableChar(data);
     const numericIndex = Number(printable) - 1;
     if (Number.isInteger(numericIndex) && numericIndex >= 0 && numericIndex < this.choiceCount()) {
       this.selectAndSubmit(numericIndex);
+      return;
+    }
+    if (
+      this.choiceAt(this.selectedIndex)?.accepts_optional_feedback === true &&
+      isPrintableChar(printable) &&
+      !/^\d$/.test(printable)
+    ) {
+      this.enterFeedbackMode(printable);
     }
   }
 
@@ -372,7 +398,11 @@ export class ApprovalPanelComponent extends Container implements Focusable {
       const num = idx + 1;
 
       const labelWithNum = `${String(num)}. ${option.label}`;
-      if (this.feedbackMode && option.requires_feedback === true && isSelected) {
+      if (
+        this.feedbackMode &&
+        (option.requires_feedback === true || option.accepts_optional_feedback === true) &&
+        isSelected
+      ) {
         lines.push(indent(this.renderInlineFeedbackLine(width - 2, labelWithNum)));
       } else if (isSelected) {
         lines.push(indent(`${selectColorBold('▶')} ${selectColorBold(labelWithNum)}`));
@@ -385,7 +415,11 @@ export class ApprovalPanelComponent extends Container implements Focusable {
       if (
         option.description !== undefined &&
         option.description.length > 0 &&
-        !(this.feedbackMode && option.requires_feedback === true && isSelected)
+        !(
+          this.feedbackMode &&
+          (option.requires_feedback === true || option.accepts_optional_feedback === true) &&
+          isSelected
+        )
       ) {
         for (const descLine of wrapTextWithAnsi(option.description, Math.max(20, width - 7))) {
           lines.push(indent(`     ${dim(descLine)}`));
@@ -395,13 +429,20 @@ export class ApprovalPanelComponent extends Container implements Focusable {
 
     lines.push('');
     if (this.feedbackMode) {
-      lines.push(indent(dim('Type feedback · ↵ submit.')));
+      const feedbackKind = this.choiceAt(this.selectedIndex)?.requires_feedback === true
+        ? 'Required feedback'
+        : 'Optional instructions';
+      lines.push(indent(dim(`${feedbackKind} · Enter submit · Esc cancel`)));
     } else {
       const expandHint = hasPreviewable ? ' · ctrl+e preview' : '';
+      const optionalHint =
+        this.choiceAt(this.selectedIndex)?.accepts_optional_feedback === true
+          ? ' · Tab optional instructions'
+          : '';
       lines.push(
         indent(
           dim(
-            `↑/↓ select · ${buildNumericHint(data.choices.length)} choose · ↵ confirm${expandHint}`,
+            `↑↓ navigate · ${buildNumericHint(data.choices.length)} choose · Enter select${optionalHint} · Esc reject${expandHint}`,
           ),
         ),
       );
