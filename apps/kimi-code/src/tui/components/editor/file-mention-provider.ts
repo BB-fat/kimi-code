@@ -10,7 +10,7 @@ import {
   type SlashCommand,
 } from '@moonshot-ai/pi-tui';
 
-import { extractSlashTokenAtCursor } from '#/tui/commands/parse';
+import { extractSlashTokenAtCursor, isLeadingSlashInEditor } from '#/tui/commands/parse';
 
 const PATH_DELIMITERS = new Set([' ', '\t', '"', "'", '=']);
 const MAX_FALLBACK_SCAN = 2000;
@@ -128,12 +128,15 @@ export class FileMentionProvider implements AutocompleteProvider {
     if (!options.force && this.getInputMode() !== 'bash') {
       const slashToken = extractSlashTokenAtCursor(textBeforeCursor);
       if (slashToken !== null) {
+        // Per-line isLeading misses content on earlier lines; fold them in so
+        // `hello\n/` is mid-prompt (midPrompt-only), not a full leading menu.
+        const isLeading = isLeadingSlashInEditor(lines, cursorLine, slashToken);
         const tokens = slashToken.token
           .slice(1)
           .split(/\s+/)
           .filter((t) => t.length > 0);
 
-        const candidates = slashToken.isLeading
+        const candidates = isLeading
           ? this.slashCommands
           : this.slashCommands.filter((cmd) => cmd.midPrompt === true);
 
@@ -181,9 +184,7 @@ export class FileMentionProvider implements AutocompleteProvider {
               // Mid-prompt immediate commands run on selection instead of
               // inserting text — say so in the menu.
               const note =
-                !slashToken.isLeading && m.cmd.immediate === true
-                  ? 'runs immediately'
-                  : undefined;
+                !isLeading && m.cmd.immediate === true ? 'runs immediately' : undefined;
               return {
                 value: m.cmd.name,
                 label: m.label,
@@ -199,7 +200,7 @@ export class FileMentionProvider implements AutocompleteProvider {
         }
         // No command matched: fall through so path completion can still run
         // for mid-prompt tokens that look like paths.
-        if (slashToken.isLeading) return null;
+        if (isLeading) return null;
       }
     }
 
@@ -262,10 +263,11 @@ export class FileMentionProvider implements AutocompleteProvider {
       const slashToken = extractSlashTokenAtCursor(textBeforeCursor);
       const command = this.slashCommands.find((cmd) => cmd.name === item.value);
       if (slashToken !== null && slashToken.token === prefix && command !== undefined) {
+        const isLeading = isLeadingSlashInEditor(lines, cursorLine, slashToken);
         // Mid-prompt selection of an immediate command runs it in place: the
         // `/token` is dropped from the draft, and Enter must not fall through
         // to submit (pi-tui submits slash-prefix completions on confirm).
-        if (!slashToken.isLeading && command.immediate === true) {
+        if (!isLeading && command.immediate === true) {
           this.onImmediateCommand?.(command.name);
           const beforePrefix = currentLine.slice(0, slashToken.startIndex);
           const afterCursor = currentLine.slice(cursorCol);

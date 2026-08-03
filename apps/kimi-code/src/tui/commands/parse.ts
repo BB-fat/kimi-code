@@ -34,7 +34,9 @@ export function extractSlashTokenAtCursor(textBeforeCursor: string): SlashTokenA
   let tokenStart = 0;
   for (let i = textBeforeCursor.length - 1; i >= 0; i -= 1) {
     const ch = textBeforeCursor[i];
-    if (ch === ' ' || ch === '\t') {
+    // Treat newlines as token boundaries too so multi-line drafts (full-text
+    // or joined lines) still resolve a `/token` that starts a later line.
+    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') {
       tokenStart = i + 1;
       break;
     }
@@ -51,8 +53,26 @@ export function extractSlashTokenAtCursor(textBeforeCursor: string): SlashTokenA
   const name = token.slice(1);
   // Incomplete bare `/` is a valid slash-command prefix.
   if (name.includes('/') && !name.includes(':')) return null;
+  // Whitespace-only prefix (spaces, tabs, or prior blank lines) → leading.
   const isLeading = before.trim().length === 0;
   return { token, startIndex: tokenStart, isLeading };
+}
+
+/**
+ * Whether a slash token on `cursorLine` is the leading command of the whole
+ * multi-line input (optional indent / blank lines above), not a mid-prompt embed.
+ * `slashToken.isLeading` alone is per-line; this folds in prior lines.
+ */
+export function isLeadingSlashInEditor(
+  lines: readonly string[],
+  cursorLine: number,
+  slashToken: SlashTokenAtCursor,
+): boolean {
+  if (!slashToken.isLeading) return false;
+  for (let i = 0; i < cursorLine; i += 1) {
+    if ((lines[i] ?? '').trim().length > 0) return false;
+  }
+  return true;
 }
 
 export interface InlineSlashMatch {

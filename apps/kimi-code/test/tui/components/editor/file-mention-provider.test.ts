@@ -270,6 +270,54 @@ describe('FileMentionProvider', () => {
     expect(values).not.toContain('help');
   });
 
+  it('offers only midPrompt commands after a newline (not the full leading menu)', async () => {
+    const provider = new FileMentionProvider(
+      [NEW_COMMAND, YOLO_COMMAND, LARK_CALENDAR_COMMAND, HELP_COMMAND],
+      workDir,
+      NO_FD,
+    );
+    // Multi-line draft: content on line 0, `/` at the start of line 1.
+    const result = await provider.getSuggestions(['please fix this', '/'], 1, 1, { signal: ctrl() });
+
+    expect(result).not.toBeNull();
+    expect(result!.prefix).toBe('/');
+    const values = result!.items.map((item) => item.value);
+    expect(values).toContain('yolo');
+    expect(values).toContain('skill:lark-calendar');
+    expect(values).not.toContain('new');
+    expect(values).not.toContain('help');
+  });
+
+  it('still treats a slash after blank lines as leading', async () => {
+    const provider = new FileMentionProvider(
+      [NEW_COMMAND, YOLO_COMMAND, HELP_COMMAND],
+      workDir,
+      NO_FD,
+    );
+    const result = await provider.getSuggestions(['', '  /'], 1, 3, { signal: ctrl() });
+
+    expect(result).not.toBeNull();
+    const values = result!.items.map((item) => item.value);
+    expect(values).toEqual(expect.arrayContaining(['new', 'yolo', 'help']));
+  });
+
+  it('runs immediate mid-prompt commands when the token is on a later line', () => {
+    const triggered: string[] = [];
+    const provider = new FileMentionProvider([PLAN_COMMAND], workDir, NO_FD, [], () => 'prompt', (name) => {
+      triggered.push(name);
+    });
+    const applied = provider.applyCompletion(['draft text', '/pl'], 1, 3, {
+      value: 'plan',
+      label: 'plan',
+    }, '/pl');
+
+    expect(triggered).toEqual(['plan']);
+    expect(applied.lines).toEqual(['draft text', '']);
+    expect(applied.cursorLine).toBe(1);
+    expect(applied.cursorCol).toBe(0);
+    expect(applied.preventSubmit).toBe(true);
+  });
+
   it('still offers all commands at the leading slash', async () => {
     const provider = new FileMentionProvider(
       [NEW_COMMAND, YOLO_COMMAND, HELP_COMMAND],

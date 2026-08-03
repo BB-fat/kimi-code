@@ -2761,6 +2761,39 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.isShowingAutocomplete(), false);
 		});
 
+		it("auto-triggers slash autocomplete after a newline", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let lastCursorLine = -1;
+
+			const mockProvider: AutocompleteProvider = {
+				getSuggestions: async (lines, cursorLine, cursorCol) => {
+					lastCursorLine = cursorLine;
+					const text = lines[cursorLine] || "";
+					const prefix = text.slice(0, cursorCol);
+					if (prefix.startsWith("/")) {
+						return {
+							items: [{ value: "/help", label: "help", description: "Show help" }],
+							prefix,
+						};
+					}
+					return null;
+				},
+				applyCompletion,
+			};
+
+			editor.setAutocompleteProvider(mockProvider);
+
+			// First line of free text, then newline, then `/` on the next line.
+			editor.handleInput("hello");
+			editor.handleInput("\n");
+			editor.handleInput("/");
+			await flushAutocomplete();
+
+			assert.strictEqual(editor.getText(), "hello\n/");
+			assert.ok(lastCursorLine >= 1, `expected cursor on line >= 1, got ${lastCursorLine}`);
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+		});
+
 		it("does not submit when a slash completion returns preventSubmit", async () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 

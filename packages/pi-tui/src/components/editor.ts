@@ -1222,8 +1222,10 @@ export class Editor implements Component, Focusable {
 
 		// Check if we should trigger or update autocomplete
 		if (!this.autocompleteState) {
-			// Auto-trigger for "/" at a token boundary (leading or mid-prompt slash commands)
-			if (char === "/" && this.isSlashMenuAllowed()) {
+			// Auto-trigger for "/" at a token boundary (leading or mid-prompt slash
+			// commands). Allowed on any editor line so a `/` after a newline still
+			// opens the menu — the provider decides leading vs mid-prompt candidates.
+			if (char === "/") {
 				const currentLine = this.state.lines[this.state.cursorLine] || "";
 				const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
 				const charBeforeSlash = textBeforeCursor[textBeforeCursor.length - 2];
@@ -2162,14 +2164,10 @@ export class Editor implements Component, Focusable {
 		);
 	}
 
-	// Slash menu only allowed on the first line of the editor
-	private isSlashMenuAllowed(): boolean {
-		return this.state.cursorLine === 0;
-	}
-
 	private isInSlashCommandContext(textBeforeCursor: string): boolean {
-		if (!this.isSlashMenuAllowed()) return false;
 		// Leading slash command (optional indent), including argument typing.
+		// Uses the current line only — multi-line drafts still offer the menu
+		// when `/` starts (or continues) a token on a later line.
 		if (textBeforeCursor.trimStart().startsWith("/")) return true;
 		// Mid-prompt slash token at a word boundary (name portion only).
 		return /(?:^|[\t ])\/\S*$/.test(textBeforeCursor);
@@ -2224,7 +2222,7 @@ export class Editor implements Component, Focusable {
 		const beforeCursor = currentLine.slice(0, this.state.cursorCol);
 
 		// Name completion when the current token is `/…` (leading or mid-prompt).
-		if (this.isSlashMenuAllowed() && /(?:^|[\t ])\/[^\s]*$/.test(beforeCursor)) {
+		if (/(?:^|[\t ])\/[^\s]*$/.test(beforeCursor)) {
 			this.handleSlashCommandCompletion();
 		} else {
 			this.forceFileAutocomplete(true);

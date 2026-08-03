@@ -1,6 +1,8 @@
 import {
   BUILTIN_SLASH_COMMANDS,
+  extractSlashTokenAtCursor,
   findBuiltInSlashCommand,
+  isLeadingSlashInEditor,
   parseSlashInput,
   resolveSlashCommandAvailability,
   addDirArgumentCompletions,
@@ -25,6 +27,36 @@ describe('parseSlashInput', () => {
     expect(parseSlashInput('/   ')).toBeNull();
     expect(parseSlashInput('/some/path')).toBeNull();
     expect(parseSlashInput('/some/path with args')).toBeNull();
+  });
+});
+
+describe('extractSlashTokenAtCursor', () => {
+  it('treats a slash after a newline as a token boundary', () => {
+    expect(extractSlashTokenAtCursor('hello\n/pl')).toEqual({
+      token: '/pl',
+      startIndex: 'hello\n'.length,
+      isLeading: false,
+    });
+  });
+
+  it('still marks whitespace-only prefixes as leading', () => {
+    expect(extractSlashTokenAtCursor('\n  /help')).toEqual({
+      token: '/help',
+      startIndex: '\n  '.length,
+      isLeading: true,
+    });
+  });
+});
+
+describe('isLeadingSlashInEditor', () => {
+  it('is false when prior lines have content', () => {
+    const token = extractSlashTokenAtCursor('/')!;
+    expect(isLeadingSlashInEditor(['please', '/'], 1, token)).toBe(false);
+  });
+
+  it('is true when prior lines are blank', () => {
+    const token = extractSlashTokenAtCursor('  /')!;
+    expect(isLeadingSlashInEditor(['', '  /'], 1, token)).toBe(true);
   });
 });
 
