@@ -10,7 +10,7 @@ export default {
   auto: { desc: 'Fully autonomous — the agent never asks questions' },
   thinking: { desc: 'Set the thinking level' },
   compact: { desc: 'Compact the conversation history' },
-  fork: { desc: 'Fork this session into a new one' },
+  fork: { desc: 'Fork this session; /fork <prompt> sends the prompt in the fork' },
   export: {
     desc: 'Download this session and troubleshooting logs as a ZIP',
     noSession: 'Open a session before exporting it.',

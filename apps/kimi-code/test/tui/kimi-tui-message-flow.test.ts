@@ -5260,7 +5260,7 @@ command = "vim"
 
     try {
       process.title = 'kimi-test-runner';
-      driver.handleUserInput('/fork ignored args');
+      driver.handleUserInput('/fork');
 
       await vi.waitFor(() => {
         expect(forkSession).toHaveBeenCalledWith({
@@ -5274,12 +5274,44 @@ command = "vim"
       expect(source.close).toHaveBeenCalledOnce();
       expect(forked.onEvent).toHaveBeenCalledOnce();
       expect(harness.resumeSession).not.toHaveBeenCalled();
+      expect(forked.prompt).not.toHaveBeenCalled();
       expect(driver.state.transcriptContainer.render(120).join('\n')).toContain(
         'Session forked (ses-fork). To return to the original session: kimi -r ses-source',
       );
     } finally {
       process.title = originalTitle;
     }
+  });
+
+  it('forks the active session and sends a follow-up prompt in the fork', async () => {
+    const source = makeSession({
+      id: 'ses-source',
+      summary: { title: 'Source title' },
+    });
+    const forked = makeSession({
+      id: 'ses-fork',
+      summary: { title: 'Fork: Source title' },
+    });
+    const forkSession = vi.fn(async () => forked);
+    const { driver } = await makeDriver(source, { forkSession });
+
+    driver.handleUserInput('/fork try the alternative approach');
+
+    await vi.waitFor(() => {
+      expect(forkSession).toHaveBeenCalledWith({
+        id: 'ses-source',
+        title: 'Fork: Source title',
+      });
+      expect(driver.getCurrentSessionId()).toBe('ses-fork');
+      expect(forked.prompt).toHaveBeenCalledWith('try the alternative approach');
+    });
+    expect(source.prompt).not.toHaveBeenCalled();
+    expect(driver.state.transcriptContainer.render(120).join('\n')).toContain(
+      'Session forked (ses-fork). To return to the original session: kimi -r ses-source',
+    );
+    expect(driver.state.transcriptContainer.render(120).join('\n')).toContain(
+      'try the alternative approach',
+    );
   });
 
   it('keeps the current session when fork fails', async () => {

@@ -537,15 +537,19 @@ function handleCommand(cmd: string): void {
     }
     return;
   }
+  // `/fork` forks the active session; `/fork <prompt>` forks then sends the
+  // prompt in the new session (TUI parity).
+  if (cmd === '/fork' || cmd.startsWith('/fork ')) {
+    const arg = cmd.slice('/fork'.length).trim();
+    void client.forkSession(undefined, arg || undefined);
+    return;
+  }
   switch (cmd) {
     // `/new` and `/clear` are aliases: both open the onboarding composer. The
     // session is only created when the user sends the first message.
     case '/new':
     case '/clear':
       handleCreateSession();
-      break;
-    case '/fork':
-      void client.forkSession();
       break;
     case '/export':
       void client.exportSession();

@@ -40,7 +40,7 @@ Activating a Skill or plugin command while the session is streaming output or co
 | `/new` | `/clear` | Start a fresh session, discarding the current context | No |
 | `/sessions` | `/resume` | Browse historical sessions and switch to / restore one | No |
 | `/tasks` | `/task` | Browse the background task list | Yes |
-| `/fork` | — | Fork a new session from the current one, preserving the full conversation history | No |
+| `/fork [<prompt>]` | — | Fork a new session from the current one, preserving the full conversation history. With a prompt, the text is sent in the forked session after switching | No |
 | `/title [<text>]` | `/rename` | Without arguments, display the current session title; with an argument, set a new title (max 200 characters) | Yes |
 | `/compact [<instruction>]` | — | Compact the current conversation context to free up token usage; an optional custom instruction can hint to the model what to preserve | No |
 | `/undo [<count>]` | — | Undo recent prompts from the active context. Without a count, opens a selector; with a count, undoes that many prompts. Prompts before the last compaction cannot be undone. Undoing also rolls back the todo list and plan mode state produced by those prompts (code changes are not reverted) | No |

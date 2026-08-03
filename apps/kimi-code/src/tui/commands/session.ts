@@ -47,10 +47,17 @@ export async function handleTitleCommand(host: SlashCommandHost, args: string): 
 }
 
 export async function handleForkCommand(host: SlashCommandHost, args: string): Promise<void> {
-  void args;
+  const prompt = args.trim();
   const session = host.session;
   if (session === undefined) {
     host.showError(NO_ACTIVE_SESSION_MESSAGE);
+    return;
+  }
+
+  // A follow-up prompt is sent in the forked session; refuse early if no model
+  // is configured rather than forking into a dead-end send failure.
+  if (prompt.length > 0 && host.state.appState.model.trim().length === 0) {
+    host.showError(LLM_NOT_SET_MESSAGE);
     return;
   }
 
@@ -75,6 +82,11 @@ export async function handleForkCommand(host: SlashCommandHost, args: string): P
   } catch (error) {
     const msg = formatErrorMessage(error);
     host.showError(`Failed to switch to forked session: ${msg}`);
+    return;
+  }
+
+  if (prompt.length > 0) {
+    host.sendQueuedMessage(forked, { text: prompt });
   }
 }
 

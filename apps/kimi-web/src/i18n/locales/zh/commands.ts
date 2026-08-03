@@ -10,7 +10,7 @@ export default {
   auto: { desc: '完全自主，Agent 不再提问' },
   thinking: { desc: '设置思考强度' },
   compact: { desc: '压缩会话历史' },
-  fork: { desc: '把当前会话 fork 出一个新会话' },
+  fork: { desc: 'Fork 当前会话；/fork <prompt> 会在新会话中直接发送' },
   export: {
     desc: '将当前会话和排障日志下载为 ZIP 压缩包',
     noSession: '请先打开一个会话再导出。',

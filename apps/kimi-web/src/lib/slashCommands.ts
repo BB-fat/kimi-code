@@ -34,7 +34,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: '/thinking',   desc: 'commands.thinking.desc' },
   { name: '/compact',    desc: 'commands.compact.desc', acceptsInput: true },
   { name: '/undo',       desc: 'commands.undo.desc' },
-  { name: '/fork',       desc: 'commands.fork.desc' },
+  { name: '/fork',       desc: 'commands.fork.desc', acceptsInput: true },
   { name: '/export',     desc: 'commands.export.desc' },
   { name: '/status',     desc: 'commands.status.desc' },
 ];

@@ -2520,14 +2520,19 @@ export function useWorkspaceState(rawState: ExtendedState, deps: UseWorkspaceSta
   /**
    * forkSession() — fork the active session into a new child session via
    * POST /sessions/{id}:fork, then add it to the list and select it.
+   * When `prompt` is provided, send it in the forked session after selection.
    */
-  async function forkSession(sessionId?: string): Promise<void> {
+  async function forkSession(sessionId?: string, prompt?: string): Promise<void> {
     const sid = sessionId ?? rawState.activeSessionId;
     if (!sid) return;
     try {
       const forked = await getKimiWebApi().forkSession(sid);
       upsertSessionFront(forked);
       await selectSession(forked.id);
+      const trimmed = prompt?.trim();
+      if (trimmed !== undefined && trimmed.length > 0) {
+        await sendPrompt(trimmed);
+      }
     } catch (err) {
       pushOperationFailure('fork', err, { sessionId: sid });
     }

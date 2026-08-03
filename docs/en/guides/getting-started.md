@@ -145,7 +145,7 @@ For a first-time user, the following is all you need to know:
 | `/sessions` | Browse session history and choose one to resume |
 | `/model` | Switch the current model |
 | `/compact` | Manually compress the context to free up tokens |
-| `/fork` | Fork the current session, keeping history but continuing independently |
+| `/fork [<prompt>]` | Fork the current session, keeping history but continuing independently; with a prompt, send it in the forked session |
 
 **Most-used keyboard shortcuts**
 
