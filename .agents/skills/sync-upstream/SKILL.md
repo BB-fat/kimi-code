@@ -73,21 +73,48 @@ git push fork main
 
 Report the pushed range (`git log --oneline <old>..fork/main`).
 
-## Step 5 — Restart the kimi-web service
+## Step 5 — Restart the kimi-web service (detached — do not Ctrl-C inline)
 
-The dev server in tmux is still running the old code. Restart it:
+The dev server in tmux is still running the old code and must be restarted.
+**Never restart it synchronously from the agent.** The Web UI agent session is
+hosted by that same `kimi-fork web` process: a live `tmux send-keys … C-c`
+kills the host mid-turn, so the follow-up start never runs and the agent dies
+with the work unfinished.
+
+Always hand the restart to the detached helper next to this skill. It
+`sleep`s briefly (so the agent can finish its final message), then stops and
+starts the server. It does **not** write a result file — the source of truth
+is the tmux pane banner.
 
 ```bash
-tmux send-keys -t kimi-web:0 C-c
-sleep 2
-tmux send-keys -t kimi-web:0 'kimi-fork web --host' Enter
+SKILL_DIR=".agents/skills/sync-upstream"   # repo-relative; use absolute if cwd differs
+setsid bash "$SKILL_DIR/restart-kimi-web.sh" </dev/null >/dev/null 2>&1 &
+echo "restart pid=$!"
 ```
 
-Wait a few seconds, then verify with `tmux capture-pane -t kimi-web:0 -p | tail -20`:
+Then:
 
-- Expect the `Kimi server ready` banner with fresh `Local:` / `Network:` URLs.
-- The access token is regenerated on each start — report the new URL (including token) to the user, since old bookmarks stop working.
-- If the banner does not appear, capture more of the pane, diagnose the startup error, and fix or report.
+1. **Immediately tell the user** that restart is scheduled out-of-process:
+   - If they are on the Web UI, this session will disconnect in a few seconds —
+     that is expected. Re-open after ~10s from the new URL shown in the
+     `kimi-web` tmux pane (`tmux capture-pane -t kimi-web:0 -p | tail -20`).
+2. **If this agent is still alive** (CLI / TUI path, not hosted by the web
+   server), poll the pane for up to ~50s:
+   `tmux capture-pane -t kimi-web:0 -p | tail -30`.
+   On `Kimi server ready`, report the new `Local:` / `Network:` URLs and token.
+   If the banner never appears, capture more of the pane and diagnose.
+3. **If this agent is about to die with the web server**, do not wait — the
+   helper continues independently. End the turn after the user-facing notice
+   in (1); do not issue further tool calls that depend on the server.
+
+Notes:
+
+- Token is regenerated on every start — old bookmarks stop working.
+- Helper knobs (optional env): `KIMI_WEB_TMUX_TARGET` (default `kimi-web:0`),
+  `KIMI_WEB_START_CMD` (default `kimi-fork web --host`),
+  `KIMI_WEB_RESTART_DELAY` (default `3`), `KIMI_WEB_READY_TIMEOUT` (default `45`).
+- Do **not** fall back to inline `tmux send-keys C-c` even when you believe the
+  agent is CLI-hosted — always use the detached path so one recipe covers both.
 
 ## Aborting
 
