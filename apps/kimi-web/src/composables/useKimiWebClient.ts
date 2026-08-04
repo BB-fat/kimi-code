@@ -2882,6 +2882,7 @@ export function useKimiWebClient() {
     openSideChat: sideChat.openSideChat,
     closeSideChat: sideChat.closeSideChat,
     sendSideChatPrompt: sideChat.sendSideChatPrompt,
+    undoSideChat: sideChat.undoSideChat,
     uploadImage: workspaceState.uploadImage,
     abortCurrentPrompt: workspaceState.abortCurrentPrompt,
     respondApproval: workspaceState.respondApproval,

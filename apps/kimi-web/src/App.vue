@@ -497,6 +497,12 @@ async function handleEditMessage(payload: {
   conversationPaneRef.value?.loadComposerForEdit(payload.text, payload.attachments);
 }
 
+// Side-chat undo: cut the BTW agent's last turn on the daemon. The panel refills
+// its own composer from the editMessage payload before this resolves.
+async function handleSideChatEditMessage(_payload: { text: string }): Promise<void> {
+  await client.undoSideChat(1);
+}
+
 // Handler for slash commands emitted by Composer (via ConversationPane)
 function handleCommand(cmd: string): void {
   // `/compact <text>` carries an optional free-text instruction steering what
@@ -934,6 +940,7 @@ function openPr(url: string): void {
         :running="client.sideChatRunning.value"
         :sending="client.sideChatSending.value"
         @send="client.sendSideChatPrompt($event)"
+        @edit-message="handleSideChatEditMessage"
         @close="closeSideChat"
       />
       <DiffView

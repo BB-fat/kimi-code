@@ -78,6 +78,7 @@
 import {
   ErrorCodes,
   IAgentContextMemoryService,
+  IAgentLifecycleService,
   IAgentProfileService,
   IAgentConversationUndoService,
   IAgentFullCompactionService,
@@ -95,6 +96,7 @@ import {
   ISessionLifecycleService,
   IWorkspaceLifecycleService,
   IWorkspaceService,
+  MAIN_AGENT_ID,
   getLiveSessionById,
   handlerForSession,
   resumeSessionById,
@@ -710,14 +712,19 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
 
         if (parsed.action === 'undo') {
           const body = undoSessionRequestSchema.parse(req.body);
-          const agent = await resolveMainAgent(core, parsed.id);
+          // Optional agent_id targets a non-main agent (e.g. BTW side chat);
+          // absent / "main" keeps the historical main-agent behaviour.
+          const agent = await resolveUndoAgent(core, parsed.id, body.agent_id);
           // The conversation undo service throws `session.undo_unavailable` (with a
           // structured `reason`) when fewer than `count` turns may be cut;
           // it quiesces the loop/compaction first, so the post-undo read
           // below always sees the cut applied.
           await agent.accessor.get(IAgentConversationUndoService).undo(body.count);
           const history = agent.accessor.get(IAgentContextMemoryService).get();
-          requestLog(req)?.info({ session_id: parsed.id, action: 'undo' }, 'session action completed');
+          requestLog(req)?.info(
+            { session_id: parsed.id, action: 'undo', agent_id: body.agent_id ?? MAIN_AGENT_ID },
+            'session action completed',
+          );
           const [summary, status] = await Promise.all([
             core.accessor.get(ISessionIndex).get(parsed.id),
             legacy.status(parsed.id),
@@ -1159,6 +1166,30 @@ async function resolveMainAgent(core: Scope, sessionId: string): Promise<IAgentS
     throw new Error2(ErrorCodes.SESSION_NOT_FOUND, `session ${sessionId} does not exist`);
   }
   return ensureMainAgent(session);
+}
+
+/**
+ * Resolve the agent targeted by `:undo`. Absent / `main` auto-creates the main
+ * agent (historical behaviour); any other id must already exist (e.g. a BTW
+ * side-channel forked beforehand), or it is reported as `agent.not_found`.
+ */
+async function resolveUndoAgent(
+  core: Scope,
+  sessionId: string,
+  agentId: string | undefined,
+): Promise<IAgentScopeHandle> {
+  if (agentId === undefined || agentId === MAIN_AGENT_ID) {
+    return resolveMainAgent(core, sessionId);
+  }
+  const session = await resumeSessionById(core.accessor, sessionId);
+  if (session === undefined) {
+    throw new Error2(ErrorCodes.SESSION_NOT_FOUND, `session ${sessionId} does not exist`);
+  }
+  const agent = session.accessor.get(IAgentLifecycleService).get(agentId);
+  if (agent === undefined) {
+    throw new Error2(ErrorCodes.AGENT_NOT_FOUND, `agent ${agentId} does not exist`);
+  }
+  return agent;
 }
 
 /** Trim a compaction instruction; treat an empty/blank value as absent. */

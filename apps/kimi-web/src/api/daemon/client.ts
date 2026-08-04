@@ -692,11 +692,14 @@ export class DaemonKimiWebApi implements KimiWebApi {
   // POST /sessions/{id}:undo — remove the last `count` turns from history. The
   // response carries the resulting messages + status, but we re-sync the session
   // afterwards for the authoritative (un-paginated) transcript, so we only need
-  // the call to succeed here.
-  async undoSession(sessionId: string, count = 1): Promise<void> {
+  // the call to succeed here. Optional `agentId` targets a non-main agent
+  // (e.g. BTW side chat); omitted undoes the main agent.
+  async undoSession(sessionId: string, count = 1, agentId?: string): Promise<void> {
+    const body: { count: number; agent_id?: string } = { count };
+    if (agentId !== undefined) body.agent_id = agentId;
     await this.http.post(
       `/sessions/${encodeURIComponent(sessionId)}:undo`,
-      { count },
+      body,
     );
   }
 

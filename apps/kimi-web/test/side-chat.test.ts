@@ -3,10 +3,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { createInitialState } from '../src/api/daemon/eventReducer';
 import { useSideChat } from '../src/composables/client/useSideChat';
 import type { ExtendedState } from '../src/composables/useKimiWebClient';
+import type { AppMessage } from '../src/api/types';
 
 const apiMock = vi.hoisted(() => ({
   startBtw: vi.fn(),
   submitPrompt: vi.fn(),
+  undoSession: vi.fn(),
 }));
 
 vi.mock('../src/api', () => ({
@@ -138,5 +140,95 @@ describe('useSideChat — sendSideChatPromptOn', () => {
       'sess_1',
       expect.objectContaining({ model: 'kimi-code', thinking: 'low' }),
     );
+  });
+});
+
+describe('useSideChat — undoSideChat', () => {
+  function msg(
+    id: string,
+    role: 'user' | 'assistant',
+    text: string,
+  ): AppMessage {
+    return {
+      id,
+      sessionId: 'sess_1',
+      role,
+      content: [{ type: 'text', text }],
+      createdAt: '2026-01-01T00:00:00.000Z',
+    };
+  }
+
+  it('calls :undo with the BTW agent_id and truncates the local transcript', async () => {
+    apiMock.undoSession.mockReset();
+    apiMock.undoSession.mockResolvedValue(undefined);
+
+    const state = createState();
+    state.sideChatMessagesByAgent = {
+      agent_btw_1: [
+        msg('u1', 'user', 'first'),
+        msg('a1', 'assistant', 'reply 1'),
+        msg('u2', 'user', 'second'),
+        msg('a2', 'assistant', 'reply 2'),
+      ],
+    };
+    state.sideChatUserMessageIdsBySession = {
+      sess_1: ['u1', 'u2'],
+    };
+
+    const sideChat = useSideChat(state, {
+      pushOperationFailure: vi.fn(),
+      nextOptimisticMsgId: () => 'msg_opt',
+      connectEventsIfNeeded: vi.fn(),
+      getEventConn: () => null,
+      resolveThinkingForPrompt: async () => undefined,
+    });
+    // Open the side chat against the existing agent without calling startBtw.
+    sideChat.sideChatTargetBySession.value = {
+      sess_1: { agentId: 'agent_btw_1' },
+    };
+
+    const undone = await sideChat.undoSideChat(1);
+
+    expect(undone).toBe('second');
+    expect(apiMock.undoSession).toHaveBeenCalledWith('sess_1', 1, 'agent_btw_1');
+    expect(state.sideChatMessagesByAgent['agent_btw_1']).toEqual([
+      msg('u1', 'user', 'first'),
+      msg('a1', 'assistant', 'reply 1'),
+    ]);
+    expect(state.sideChatUserMessageIdsBySession['sess_1']).toEqual(['u1']);
+  });
+
+  it('reports failure and leaves the transcript untouched when :undo rejects', async () => {
+    apiMock.undoSession.mockReset();
+    apiMock.undoSession.mockRejectedValue(new Error('busy'));
+
+    const state = createState();
+    const messages = [
+      msg('u1', 'user', 'hello'),
+      msg('a1', 'assistant', 'hi'),
+    ];
+    state.sideChatMessagesByAgent = { agent_btw_1: messages };
+
+    const pushOperationFailure = vi.fn();
+    const sideChat = useSideChat(state, {
+      pushOperationFailure,
+      nextOptimisticMsgId: () => 'msg_opt',
+      connectEventsIfNeeded: vi.fn(),
+      getEventConn: () => null,
+      resolveThinkingForPrompt: async () => undefined,
+    });
+    sideChat.sideChatTargetBySession.value = {
+      sess_1: { agentId: 'agent_btw_1' },
+    };
+
+    const undone = await sideChat.undoSideChat(1);
+
+    expect(undone).toBeNull();
+    expect(pushOperationFailure).toHaveBeenCalledWith(
+      'undoSideChat',
+      expect.any(Error),
+      { sessionId: 'sess_1' },
+    );
+    expect(state.sideChatMessagesByAgent['agent_btw_1']).toEqual(messages);
   });
 });

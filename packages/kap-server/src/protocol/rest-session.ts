@@ -169,6 +169,8 @@ export const undoSessionRequestSchema = z.preprocess(
   z.object({
     count: z.number().int().positive().default(1),
     page_size: z.number().int().min(1).max(100).optional(),
+    /** Optional non-main agent (e.g. BTW side chat). Defaults to main. */
+    agent_id: z.string().min(1).optional(),
   }),
 );
 export type UndoSessionRequest = z.infer<typeof undoSessionRequestSchema>;

@@ -23,6 +23,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   send: [text: string];
   close: [];
+  /** Undo the last side-chat exchange (parent calls daemon :undo with the BTW agent). */
+  editMessage: [payload: { text: string }];
 }>();
 
 const { t } = useI18n();
@@ -50,6 +52,16 @@ function submit(): void {
   void nextTick(() => {
     if (inputRef.value) inputRef.value.style.height = 'auto';
     scrollToBottom();
+  });
+}
+
+/** ChatPane's undo affordance: ask the parent to undo, then refill the composer. */
+function onEditMessage(payload: { text: string }): void {
+  emit('editMessage', { text: payload.text });
+  draft.value = payload.text;
+  void nextTick(() => {
+    autosize();
+    inputRef.value?.focus();
   });
 }
 
@@ -117,6 +129,7 @@ function autosize(): void {
         :approvals="[]"
         :turn-active="running"
         :working="sending || running"
+        @edit-message="onEditMessage"
       />
       <div v-if="showLoading" class="sc-loading" aria-hidden="true">
         <MoonSpinner />

@@ -723,7 +723,11 @@ export interface KimiWebApi {
   /** Cancel whatever is running in the session, including skill activations. */
   abortSession(sessionId: string): Promise<{ aborted: boolean }>;
   compactSession(sessionId: string, instruction?: string): Promise<void>;
-  undoSession(sessionId: string, count?: number): Promise<void>;
+  /**
+   * Undo the last `count` turns. Optional `agentId` targets a non-main agent
+   * (e.g. BTW side chat); omitted undoes the main agent.
+   */
+  undoSession(sessionId: string, count?: number, agentId?: string): Promise<void>;
   forkSession(sessionId: string, input?: { title?: string }): Promise<AppSession>;
   /** Create a child session under a parent — POST /sessions/{id}/children. */
   createChildSession(sessionId: string, input?: { title?: string }): Promise<AppSession>;

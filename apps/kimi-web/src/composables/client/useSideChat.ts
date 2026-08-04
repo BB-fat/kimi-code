@@ -264,6 +264,64 @@ export function useSideChat(rawState: ExtendedState, deps: UseSideChatDeps) {
     await sendSideChatPromptOn(target.parentId, text);
   }
 
+  /**
+   * Undo the last `count` turns of the active side chat (daemon :undo with the
+   * BTW agent_id), then truncate the local side-chat transcript so the panel
+   * matches. Returns the text of the most-recent user message that was undone,
+   * so the UI can refill the side-chat composer for edit + resend.
+   */
+  async function undoSideChat(count = 1): Promise<string | null> {
+    const target = activeSideChatTarget.value;
+    if (!target) return null;
+    const { parentId, agentId } = target;
+    const messages = rawState.sideChatMessagesByAgent[agentId] ?? [];
+    const lastUserText = (() => {
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const m = messages[i]!;
+        if (m.role !== 'user') continue;
+        return m.content
+          .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
+          .map((c) => c.text)
+          .join('\n');
+      }
+      return null;
+    })();
+    try {
+      await getKimiWebApi().undoSession(parentId, count, agentId);
+      truncateSideChatTurns(agentId, count);
+      // Drop the matching hidden-id entries so a re-projected prompt.submitted
+      // for a future BTW turn cannot collide with a stale hide list.
+      const hidden = rawState.sideChatUserMessageIdsBySession[parentId] ?? [];
+      if (hidden.length > 0) {
+        rawState.sideChatUserMessageIdsBySession = {
+          ...rawState.sideChatUserMessageIdsBySession,
+          [parentId]: hidden.slice(0, Math.max(0, hidden.length - count)),
+        };
+      }
+      return lastUserText;
+    } catch (err) {
+      pushOperationFailure('undoSideChat', err, { sessionId: parentId });
+      return null;
+    }
+  }
+
+  /** Drop the last `count` user-anchored turns (user message + following
+   *  assistant messages) from the local side-chat transcript. */
+  function truncateSideChatTurns(agentId: string, count: number): void {
+    updateSideChatMessages(agentId, (messages) => {
+      let remaining = count;
+      let cutAt = 0;
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i]!.role !== 'user') continue;
+        remaining -= 1;
+        cutAt = i;
+        if (remaining === 0) return messages.slice(0, cutAt);
+      }
+      // Fewer user turns than requested — clear everything.
+      return [];
+    });
+  }
+
   // When a session is deleted, drop its side-chat target so it cannot leak into a
   // later session that happens to reuse the same id.
   function clearSideChatForSession(sessionId: string): void {
@@ -286,6 +344,7 @@ export function useSideChat(rawState: ExtendedState, deps: UseSideChatDeps) {
     openSideChatOn,
     closeSideChat,
     sendSideChatPrompt,
+    undoSideChat,
     clearSideChatForSession,
   };
 }
