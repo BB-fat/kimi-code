@@ -131,6 +131,7 @@ import { join } from 'node:path';
 import {
   ensureConfigFile,
   ErrorCodes,
+  HookDefSchema,
   KimiError,
   limitAgentReplayByTurns,
   noopTelemetryClient,
@@ -160,7 +161,6 @@ import {
   ensureMainAgent,
   IAgentActivityView,
   IAgentContextMemoryService,
-  IAgentContextSizeService,
   IAgentFullCompactionService,
   IAgentGoalService,
   IAgentLifecycleService,
@@ -173,6 +173,7 @@ import {
   IAgentSkillService,
   IAgentSwarmService,
   IAgentTaskService,
+  IAgentTokenCountingService,
   IBootstrapService,
   IConfigService,
   IEventService,
@@ -726,7 +727,22 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   }
 
   override async getPluginInfo(id: string): Promise<PluginInfo> {
-    return this.klient.global.plugins.info(id);
+    // The v2 engine's hook-event union is a superset of v1's (`TurnStarted`,
+    // `UserPromptQueued`, `TaskStarted`, `SessionHeartbeat` are v2-only). The
+    // SDK contract keeps the v1 `PluginInfo` shape, so hooks using v2-only
+    // events are dropped from the projection — mirroring how the config
+    // mapper drops config domains v1 does not know.
+    const info = await this.klient.global.plugins.info(id);
+    const manifest =
+      info.manifest === undefined
+        ? undefined
+        : {
+            ...info.manifest,
+            hooks: info.manifest.hooks?.filter((hook) =>
+              (HookDefSchema.shape.event.options as readonly string[]).includes(hook.event),
+            ) as NonNullable<PluginInfo['manifest']>['hooks'],
+          };
+    return { ...info, manifest };
   }
 
   /**
@@ -1401,9 +1417,9 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    * same wire shape as v1's — the cast only bridges the two packages' type
    * declarations (v2's origin union carries kinds a v1 client never sees in
    * practice); the data itself crossed the same JSON boundary on both sides.
-   * Token-count semantics differ by design: v1 reports the running estimate,
-   * v2 the provider-measured prefix (`0` until the first LLM round) — pinned
-   * in the parity KNOWN_DIFFS.
+   * Token-count reporting is estimate-inclusive under v2's default
+   * `[token_counting]` strategy (`measured+estimated` via statusSize), matching
+   * v1's running-estimate semantics.
    */
   override async getContext(input: SessionIdRpcInput): Promise<AgentContextData> {
     const agent = await this.agentFacade(input.sessionId);
@@ -1513,10 +1529,9 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    * behavior over v2 primitives: the same busy rejection
    * (`turn.agent_busy`), the byte-identical import message and validations
    * (`src/v2/import-context.ts`), the same overflow gate, then the same wire
-   * `context.append_message` Op v1 persists. Known gap: v1 also adopts the
-   * post-import estimate as its reported token count, while v2's reported
-   * count is provider-measured and has no public setter — post-import
-   * `getContext().tokenCount` diverges (pinned in the parity KNOWN_DIFFS).
+   * `context.append_message` Op v1 persists. Post-import
+   * `getContext().tokenCount` is estimate-inclusive on both engines under the
+   * default strategy (v1's running estimate; v2's measured+estimated statusSize).
    */
   override async importContext(input: ImportContextRpcInput): Promise<void> {
     const agent = await this.agentScope(input.sessionId);
@@ -1531,7 +1546,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     }
     const message = buildImportContextMessage(input.content, input.source);
     const capability = agent.accessor.get(IAgentProfileService).data().modelCapabilities;
-    const currentTokenCount = agent.accessor.get(IAgentContextSizeService).get().size;
+    const currentTokenCount = agent.accessor.get(IAgentTokenCountingService).get().size;
     assertImportFits(
       message,
       currentTokenCount,

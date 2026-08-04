@@ -232,21 +232,20 @@ const KNOWN_DIFFS = {
   // Both engines resume the session and now return the per-agent snapshot;
   // `agents` compares field-by-field after the projections documented on
   // `projectResumedAgent` (bind-time config_updated replay records,
-  // config.provider / systemPrompt rendering, the tokenCount
-  // estimate-vs-measured divergence, per-run times and random ids, and the
-  // engine-owned tool roster/description drift). `sessionMetadata` compares
-  // on the overlapping document fields after the same timestamp/title
-  // projection.
+  // config.provider / systemPrompt rendering, tokenCount projection,
+  // per-run times and random ids, and the engine-owned tool
+  // roster/description drift). `sessionMetadata` compares on the overlapping
+  // document fields after the same timestamp/title projection.
   resumeSession: (resumed: ResumedSessionSummary, home: HomePair): unknown =>
     projectResumedSession(resumed, home),
   reloadSession: (resumed: ResumedSessionSummary, home: HomePair): unknown =>
     projectResumedSession(resumed, home),
-  // Agent context: v1 reports the running token ESTIMATE (an import adopts
-  // it wholesale); v2 reports the provider-MEASURED prefix, which an
-  // in-memory append never touches — post-import counts diverge by design
-  // (v1 > 0, v2 === 0, asserted explicitly at the call site). Histories
-  // compare in full; the count compares only in the pre-import state where
-  // both are 0.
+  // Agent context: both engines report an estimate-inclusive count under the
+  // default strategy (v1's running estimate; v2's `[token_counting]` default
+  // `measured+estimated` via statusSize). Histories compare in full; the
+  // count is still projected away on non-empty contexts so minor estimate
+  // algorithm drift does not break resume/import parity, and is asserted
+  // explicitly at the import call site.
   getContext: (context: { readonly history: readonly unknown[] }): unknown =>
     context.history.length === 0 ? context : { history: context.history },
   // Plan ids are random per engine (hero slugs) and the plan path embeds
@@ -392,9 +391,10 @@ function projectResumedAgents(
  *   delegatable subagent roster (custom agent files are a v1-engine feature);
  *   v2's resumed agent state has no equivalent field. Engine-owned profile
  *   data, not resume data.
- * - `context.tokenCount`: the KNOWN_DIFFS.getContext divergence (v1's running
- *   estimate vs v2's provider-measured prefix) — the history compares in
- *   full, the count only in the empty state.
+ * - `context.tokenCount`: projected away on non-empty contexts so minor
+ *   estimate drift does not break resume/import parity (both engines report
+ *   an estimate-inclusive count under the default strategy); the empty state
+ *   still compares in full (both 0).
  * - replay `config_updated` records: v1 persists the profile BIND as
  *   `config.update` records (which restore maps to config_updated entries);
  *   v2 persists it as a `profile.bind` op the replay fold deliberately does
@@ -1927,11 +1927,10 @@ describe('v1↔v2 agent interaction parity', () => {
       expect(normalize(v2Context.history, '')).toEqual(normalize(v1Context.history, ''));
       expect(v1Context.history).toHaveLength(1);
       expect(v1Context.history[0]).toMatchObject({ role: 'user', origin: { kind: 'user' } });
-      // The pinned divergence (KNOWN_DIFFS.getContext): v1 adopts the import
-      // estimate as its reported count; v2's reported count is
-      // provider-measured and stays 0 until the first LLM round.
+      // Both engines adopt a post-import estimate as the reported count (v1's
+      // running estimate; v2's default measured+estimated statusSize).
       expect(v1Context.tokenCount).toBeGreaterThan(0);
-      expect(v2Context.tokenCount).toBe(0);
+      expect(v2Context.tokenCount).toBeGreaterThan(0);
       // v1's validations, replicated on the v2 side.
       await expect(
         pair.v1.importContext({ ...input, content: ' \n\t ', source: "file 'empty.md'" }),
