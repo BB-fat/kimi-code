@@ -5,11 +5,12 @@ import {
   emptyUsage,
   isRetryableGenerateError,
 } from '@moonshot-ai/kosong';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, beforeEach } from 'vitest';
 
 import type { KimiConfig } from '#/config';
 import { ErrorCodes, KimiError } from '#/errors';
 import type { LLM, LLMChatParams, LLMChatResponse } from '#/loop/llm';
+import { coworkRateLimiter } from '#/loop/rate-limiter';
 import { chatWithRetry, DEFAULT_MAX_RETRY_ATTEMPTS, retryBackoffDelays } from '#/loop/retry';
 import { ProviderManager } from '#/session/provider-manager';
 
@@ -301,3 +302,68 @@ function oauthConfig(): KimiConfig {
     },
   };
 }
+
+describe('chatWithRetry: adaptive rate limiter integration', () => {
+  beforeEach(() => {
+    coworkRateLimiter.reset();
+  });
+
+  it('shrinks the cowork spawn budget around inflight agents when an attempt is rate-limited', async () => {
+    // One running cowork agent: the 429 anchors the budget to (inflight − 1).
+    expect(coworkRateLimiter.acquire().ok).toBe(true);
+
+    let calls = 0;
+    const llm: LLM = {
+      systemPrompt: '',
+      modelName: 'mock',
+      isRetryableError: (e) => isRetryableGenerateError(e),
+      async chat(): Promise<LLMChatResponse> {
+        calls += 1;
+        if (calls === 1) throw new APIProviderRateLimitError('rate limited', null, 1);
+        return okResponse();
+      },
+    };
+    await chatWithRetry(makeInput(llm, new AbortController().signal));
+
+    const snapshot = coworkRateLimiter.snapshot();
+    expect(snapshot.budget).toBe(1);
+    expect(snapshot.inflight).toBe(1);
+    // The recovering second attempt succeeded, which lifts the pause early.
+    expect(snapshot.blockedUntil).toBeNull();
+    coworkRateLimiter.release();
+  });
+
+  it('does not touch the budget on quota exhaustion (billing, not congestion)', async () => {
+    const llm: LLM = {
+      systemPrompt: '',
+      modelName: 'mock',
+      isRetryableError: (e) => isRetryableGenerateError(e),
+      async chat(): Promise<LLMChatResponse> {
+        throw new APIProviderQuotaExhaustedError('insufficient balance', null, 1);
+      },
+    };
+    await expect(
+      chatWithRetry(makeInput(llm, new AbortController().signal)),
+    ).rejects.toMatchObject({ name: 'APIProviderQuotaExhaustedError' });
+
+    expect(coworkRateLimiter.snapshot().budget).toBe(16);
+    expect(coworkRateLimiter.snapshot().blockedUntil).toBeNull();
+  });
+
+  it('lifts the spawn pause early once a request succeeds', async () => {
+    coworkRateLimiter.reportRateLimited();
+    expect(coworkRateLimiter.snapshot().blockedUntil).not.toBeNull();
+
+    const llm: LLM = {
+      systemPrompt: '',
+      modelName: 'mock',
+      isRetryableError: (e) => isRetryableGenerateError(e),
+      async chat(): Promise<LLMChatResponse> {
+        return okResponse();
+      },
+    };
+    await chatWithRetry(makeInput(llm, new AbortController().signal));
+
+    expect(coworkRateLimiter.snapshot().blockedUntil).toBeNull();
+  });
+});

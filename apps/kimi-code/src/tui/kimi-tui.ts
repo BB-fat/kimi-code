@@ -1412,6 +1412,12 @@ export class KimiTUI {
       void this.runShellCommandFromInput(item.text);
       return;
     }
+    if (item.mode === 'skill' && item.skillName !== undefined) {
+      // sendSkillActivation re-checks the busy state, so a premature drain
+      // re-queues at the tail instead of racing the running turn.
+      this.sendSkillActivation(session, item.skillName, item.skillArgs ?? '');
+      return;
+    }
     this.harness.withInteractiveAgent(item.agentId ?? MAIN_AGENT_ID, () => {
       this.sendMessageInternal(session, item.text, {
         parts: item.parts,
@@ -1478,6 +1484,35 @@ export class KimiTUI {
       return;
     }
     if (!this.validateMediaCapabilities(rewrite)) return;
+    // Compacting (or deferred input): queue behind it — visible and recallable.
+    // Slash-skill items are not Ctrl-S steerable (steering would inject the
+    // literal text, not an activation) — see editor-keyboard.ts.
+    if (this.deferUserMessages || this.state.appState.isCompacting) {
+      const args = rewrite.text.trim();
+      this.state.queuedMessages.push({
+        text: `/${skillName}${args.length > 0 ? ` ${args}` : ''}`,
+        agentId: this.harness.interactiveAgentId,
+        mode: 'skill',
+        skillName,
+        skillArgs: rewrite.text,
+      });
+      this.track('input_queue');
+      this.updateQueueDisplay();
+      this.state.ui.requestRender();
+      return;
+    }
+    if (this.state.appState.streamingPhase !== 'idle') {
+      // A turn is running: fire immediately. The engine steers the activation
+      // into the running turn (see SkillManager.recordActivation), so slash
+      // commands like /cowork take effect at the next step boundary instead
+      // of waiting for the turn to end. No beginSessionRequest — the live
+      // pane belongs to the running turn.
+      void session.activateSkill(skillName, rewrite.text).catch((error: unknown) => {
+        const message = formatErrorMessage(error);
+        this.showError(`Skill "${skillName}" failed: ${message}`);
+      });
+      return;
+    }
     this.beginSessionRequest();
     void session.activateSkill(skillName, rewrite.text).catch((error: unknown) => {
       const message = formatErrorMessage(error);

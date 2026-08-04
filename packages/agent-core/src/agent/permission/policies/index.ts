@@ -3,6 +3,7 @@ import type { PermissionPolicy } from '../types';
 import { AgentSwarmExclusiveDenyPermissionPolicy } from './agent-swarm-exclusive-deny';
 import { AutoModeApprovePermissionPolicy } from './auto-mode-approve';
 import { AutoModeAskUserQuestionDenyPermissionPolicy } from './auto-mode-ask-user-question-deny';
+import { CoworkWorkerWriteGuardPermissionPolicy } from './cowork-worker-write-guard-deny';
 import { DefaultToolApprovePermissionPolicy } from './default-tool-approve';
 import { ExitPlanModeReviewAskPermissionPolicy } from './exit-plan-mode-review-ask';
 import { FallbackAskPermissionPolicy } from './fallback-ask';
@@ -35,6 +36,8 @@ export function createPermissionDecisionPolicies(agent: Agent): PermissionPolicy
     new AutoModeAskUserQuestionDenyPermissionPolicy(agent),
     // plan mode: Write/Edit outside the plan file, or TaskStop → deny.
     new PlanModeGuardDenyPermissionPolicy(agent),
+    // cowork-worker: Write/Edit outside the agent's worktree → deny.
+    new CoworkWorkerWriteGuardPermissionPolicy(agent),
     // User-configured deny rule matches → deny.
     new UserConfiguredDenyPermissionPolicy(agent),
     // auto mode → approve (any auto-mode block must be a deny rule above this).

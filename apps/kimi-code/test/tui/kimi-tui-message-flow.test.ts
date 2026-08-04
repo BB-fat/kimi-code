@@ -2567,6 +2567,75 @@ command = "vim"
     expect(harness.track).toHaveBeenCalledWith('input_queue', undefined);
   });
 
+  it('fires a slash-skill activation immediately while a turn is streaming (engine steers it in)', async () => {
+    const session = makeSession({
+      listSkills: vi.fn(async () => [
+        {
+          name: 'cowork',
+          description: 'multi-agent cowork mode',
+          path: 'builtin://cowork',
+          source: 'builtin',
+          type: 'inline',
+        },
+      ]),
+    });
+    const { driver } = await makeDriver(session);
+    await (
+      driver as unknown as { refreshSkillCommands(s: unknown): Promise<void> }
+    ).refreshSkillCommands(session);
+    driver.state.appState.streamingPhase = 'waiting';
+
+    driver.handleUserInput('/cowork refactor auth and ui');
+
+    expect(session.activateSkill).toHaveBeenCalledWith('cowork', 'refactor auth and ui');
+    expect(session.prompt).not.toHaveBeenCalled();
+    expect(driver.state.queuedMessages).toEqual([]);
+    // The live pane keeps belonging to the running turn — no fresh waiting phase.
+    expect(driver.state.appState.streamingPhase).toBe('waiting');
+  });
+
+  it('queues a slash-skill activation while compacting and activates it on drain', async () => {
+    const session = makeSession({
+      listSkills: vi.fn(async () => [
+        {
+          name: 'cowork',
+          description: 'multi-agent cowork mode',
+          path: 'builtin://cowork',
+          source: 'builtin',
+          type: 'inline',
+        },
+      ]),
+    });
+    const { driver, harness } = await makeDriver(session);
+    await (
+      driver as unknown as { refreshSkillCommands(s: unknown): Promise<void> }
+    ).refreshSkillCommands(session);
+    driver.state.appState.isCompacting = true;
+    harness.track.mockClear();
+
+    driver.handleUserInput('/cowork refactor auth and ui');
+
+    expect(session.activateSkill).not.toHaveBeenCalled();
+    expect(driver.state.queuedMessages).toEqual([
+      {
+        text: '/cowork refactor auth and ui',
+        agentId: 'main',
+        mode: 'skill',
+        skillName: 'cowork',
+        skillArgs: 'refactor auth and ui',
+      },
+    ]);
+    expect(driver.state.queueContainer.children.length).toBeGreaterThan(0);
+    expect(harness.track).toHaveBeenCalledWith('input_queue', undefined);
+
+    driver.state.appState.isCompacting = false;
+    const queued = driver.state.queuedMessages[0]!;
+    driver.state.queuedMessages = [];
+    driver.sendQueuedMessage(session, queued);
+
+    expect(session.activateSkill).toHaveBeenCalledWith('cowork', 'refactor auth and ui');
+  });
+
   it('steers fresh input while a goal is active even when the streaming phase is idle', async () => {
     const { driver, session } = await makeDriver();
     driver.state.appState.goal = makeActiveGoalSnapshot();

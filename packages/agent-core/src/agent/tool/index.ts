@@ -552,6 +552,11 @@ export class ToolManager {
     }
   }
 
+  /** Current allowlist: exact builtin/user tool names plus MCP glob patterns. */
+  getActiveToolNames(): readonly string[] {
+    return [...this.enabledTools, ...this.mcpAccessPatterns];
+  }
+
   copyLoopToolsFrom(source: ToolManager): void {
     this.loopToolsOverride = source.loopTools;
   }
@@ -828,6 +833,22 @@ export class ToolManager {
         goalToolsEnabled && new b.GetGoalTool(this.agent),
         goalToolsEnabled && new b.SetGoalBudgetTool(this.agent),
         goalToolsEnabled && new b.UpdateGoalTool(this.agent),
+        // Cowork comms tools are shared: the tower profile enables them via
+        // CoworkInit, workers/reviewers via the cowork-worker profile. The
+        // tower-only tools follow the goal tools' main-agent gating.
+        new b.CoworkSendTool(this.agent),
+        new b.CoworkInboxTool(this.agent),
+        new b.CoworkFindingTool(this.agent),
+        new b.CoworkReviewTool(this.agent),
+        new b.CoworkMissionTool(this.agent),
+        new b.CoworkStatusTool(this.agent),
+        goalToolsEnabled && new b.CoworkInitTool(this.agent),
+        goalToolsEnabled && new b.CoworkPlanTool(this.agent),
+        goalToolsEnabled &&
+          this.agent.subagentHost &&
+          new b.CoworkSpawnTool(this.agent, this.agent.subagentHost, background),
+        goalToolsEnabled && new b.CoworkMergeTool(this.agent),
+        goalToolsEnabled && new b.CoworkTeardownTool(this.agent),
         this.agent.rpc?.requestQuestion && new b.AskUserQuestionTool(this.agent),
         new b.TodoListTool(this.toolStore),
         new b.TaskListTool(background),

@@ -32,6 +32,7 @@ tools:
   - GetGoal
   - SetGoalBudget
   - UpdateGoal
+  - CoworkInit
   - mcp__*
 
 subagents:
@@ -41,3 +42,5 @@ subagents:
     description: Fast codebase exploration with prompt-enforced read-only behavior.
   plan:
     description: Read-only implementation planning and architecture design.
+  cowork-worker:
+    description: Cowork worker/reviewer agent — executes one cowork mission in its own git worktree (or reviews one branch), coordinating only through Cowork* tools. Spawned via the CoworkSpawn tool.

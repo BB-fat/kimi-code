@@ -116,6 +116,32 @@ describe('default agent profiles', () => {
     expect(prompt).not.toContain('# Plugin Instructions');
   });
 
+  it('wires the cowork-worker profile into the default set', () => {
+    const agent = DEFAULT_AGENT_PROFILES['agent'];
+    expect(agent?.tools).toContain('CoworkInit');
+    expect(Object.keys(agent?.subagents ?? {})).toContain('cowork-worker');
+
+    const tools = DEFAULT_AGENT_PROFILES['cowork-worker']?.tools ?? [];
+    expect(tools).toEqual(
+      expect.arrayContaining([
+        'CoworkSend',
+        'CoworkInbox',
+        'CoworkFinding',
+        'CoworkReview',
+        'CoworkMission',
+        'CoworkStatus',
+      ]),
+    );
+    // Tower tools stay with the main agent; workers get the shared set only.
+    for (const name of ['CoworkInit', 'CoworkPlan', 'CoworkSpawn', 'CoworkMerge', 'CoworkTeardown']) {
+      expect(tools).not.toContain(name);
+    }
+
+    const prompt = DEFAULT_AGENT_PROFILES['cowork-worker']?.systemPrompt(promptContext) ?? '';
+    expect(prompt).toContain('cowork worker/reviewer');
+    expect(prompt).toContain('Cowork* tools ONLY');
+  });
+
   it('keeps optional-tool guidance out of the shared system prompt entirely', () => {
     // Tool-coupled guidance now lives in each tool's own description, which the schema
     // layer ships ONLY when the tool is registered — that is the availability gate, for
