@@ -22,9 +22,14 @@
  * effort) rather than inheriting the caller's level. Free-form aliases leave
  * thinking unset for the same reason. Both tools resolve spawn bindings
  * through `resolveSubagentBinding`, advertise available models via
- * `buildSubagentModelDescriptions`, and wrap secondary-model spawn failures
- * with `wrapSubagentModelError`. Self-registered at module load via
- * `registerConfigSection`.
+ * `buildSubagentModelDescriptions` (each line suffixed with the entry's
+ * resolved capability flags when an `IModelCatalog` is provided, so the parent
+ * can route multimodal or thinking-heavy subagent tasks instead of guessing
+ * from the model id), and wrap secondary-model spawn failures with
+ * `wrapSubagentModelError`; while the experiment is off they also strip the
+ * no-op `model` parameter from their advertised schemas via
+ * `stripSubagentModelParameter` when callers opt into that path.
+ * Self-registered at module load via `registerConfigSection`.
  */
 
 import { z } from 'zod';
@@ -47,6 +52,9 @@ import {
   type IConfigService,
 } from '#/app/config/config';
 import { registerConfigSection } from '#/app/config/configSectionContributions';
+import { isPlainObject } from '#/app/config/toml';
+import type { ModelCapability } from '#/kosong/contract/capability';
+import type { IModelCatalog } from '#/kosong/model/catalog';
 
 import { SECONDARY_MODEL_FLAG_ID } from './flag';
 
@@ -158,6 +166,37 @@ export interface BuildSubagentModelDescriptionsOptions {
    * Falls back to the id when missing.
    */
   readonly modelLabels?: Readonly<Record<string, string | undefined>>;
+  /**
+   * Optional catalog used to append capability suffixes (`image_in`,
+   * `thinking`, …) so the parent can route multimodal or thinking-heavy
+   * subagent tasks. When omitted, lines are emitted without suffixes.
+   */
+  readonly modelCatalog?: IModelCatalog;
+}
+
+const ADVERTISED_CAPABILITY_FLAGS = [
+  'image_in',
+  'video_in',
+  'audio_in',
+  'thinking',
+  'tool_use',
+  'dynamically_loaded_tools',
+] as const satisfies readonly (keyof ModelCapability)[];
+
+function capabilitiesSuffix(
+  modelCatalog: IModelCatalog | undefined,
+  model: string | undefined,
+): string {
+  if (modelCatalog === undefined || model === undefined) return '';
+  let capability: ModelCapability | undefined;
+  try {
+    capability = modelCatalog.get(model).capabilities;
+  } catch {
+    return '';
+  }
+  if (capability === undefined) return '';
+  const names = ADVERTISED_CAPABILITY_FLAGS.filter((flag) => capability[flag] === true);
+  return `; capabilities: ${names.length === 0 ? 'none' : names.join(', ')}`;
 }
 
 /**
@@ -168,8 +207,22 @@ export interface BuildSubagentModelDescriptionsOptions {
 export function buildSubagentModelDescriptions(
   options: BuildSubagentModelDescriptionsOptions,
 ): string | undefined {
-  const { config, flags, callerModelAlias, availableModelIds = [], modelLabels = {} } = options;
-  const secondaryModel = resolveSecondaryModel(config, flags)?.model;
+  const {
+    config,
+    flags,
+    callerModelAlias,
+    availableModelIds = [],
+    modelLabels = {},
+    modelCatalog,
+  } = options;
+  const secondary = resolveSecondaryModel(config, flags);
+  const secondaryModel = secondary?.model;
+  const boundSecondary =
+    secondaryModel === undefined
+      ? undefined
+      : secondaryModelPatch(secondary) === undefined
+        ? secondaryModel
+        : SECONDARY_DERIVED_MODEL_ID;
   const catalogIds = availableModelIds.filter((id) => id !== SECONDARY_DERIVED_MODEL_ID);
 
   if (catalogIds.length === 0 && secondaryModel === undefined) return undefined;
@@ -177,26 +230,48 @@ export function buildSubagentModelDescriptions(
   const lines = ['Available models (pass via model):'];
   if (callerModelAlias !== undefined) {
     lines.push(
-      `- primary: ${callerModelAlias} — the main model you are running on; use it for hard, quality-sensitive subagent tasks`,
+      `- primary: ${callerModelAlias} — the main model you are running on; use it for hard, quality-sensitive subagent tasks${capabilitiesSuffix(modelCatalog, callerModelAlias)}`,
     );
   }
   if (secondaryModel !== undefined) {
     lines.push(
-      `- secondary: ${secondaryModel} (default) — the configured secondary model; prefer it for routine subagent tasks`,
+      `- secondary: ${secondaryModel} (default) — the configured secondary model; prefer it for routine subagent tasks${capabilitiesSuffix(modelCatalog, boundSecondary)}`,
     );
   }
   for (const id of catalogIds) {
     const label = modelLabels[id];
-    lines.push(
-      label !== undefined && label.length > 0 && label !== id
-        ? `- ${id}: ${label}`
-        : `- ${id}`,
-    );
+    const base =
+      label !== undefined && label.length > 0 && label !== id ? `- ${id}: ${label}` : `- ${id}`;
+    lines.push(`${base}${capabilitiesSuffix(modelCatalog, id)}`);
   }
   lines.push(
     'Pass a configured model alias from the list above, or the shortcuts "primary" / "secondary". This explicit choice overrides the selected agent type\'s model_preference; without either, secondary is the default when configured, otherwise the subagent inherits your model. Ignored when resuming — resumed subagents keep their own model.',
   );
   return lines.join('\n');
+}
+
+/**
+ * Strip the `model` property from a subagent collaboration tool's advertised
+ * JSON schema. While the `secondary-model` experiment is off the parameter is
+ * a silent no-op on the official primary/secondary path, so callers that only
+ * expose that pair can drop it from the schema. Free-form alias routing keeps
+ * the parameter advertised regardless. Returns the input unchanged when there
+ * is no `model` property; otherwise a shallow copy — the input is never
+ * mutated.
+ */
+export function stripSubagentModelParameter(
+  parameters: Record<string, unknown>,
+): Record<string, unknown> {
+  const properties = parameters['properties'];
+  if (!isPlainObject(properties) || !('model' in properties)) return parameters;
+  const nextProperties = { ...properties };
+  delete nextProperties['model'];
+  const next: Record<string, unknown> = { ...parameters, properties: nextProperties };
+  const required = parameters['required'];
+  if (Array.isArray(required) && required.includes('model')) {
+    next['required'] = required.filter((entry) => entry !== 'model');
+  }
+  return next;
 }
 
 export function wrapSubagentModelError(

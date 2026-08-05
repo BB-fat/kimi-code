@@ -177,6 +177,7 @@ export class SubagentTool implements ISubagentTool {
           record.displayName ?? record.name ?? record.model,
         ]),
       ),
+      modelCatalog: this.modelCatalog,
     });
     if (modelLines !== undefined) {
       description += `\n\n${modelLines}`;

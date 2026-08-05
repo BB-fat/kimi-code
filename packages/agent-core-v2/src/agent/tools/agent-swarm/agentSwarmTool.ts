@@ -46,6 +46,7 @@ import {
   resolveSubagentTimeoutMs,
   type SubagentModelBinding,
 } from '#/session/subagent/configSection';
+import { IModelCatalog } from '#/kosong/model/catalog';
 import { IModelService } from '#/kosong/model/model';
 import { SECONDARY_DERIVED_MODEL_ID } from '#/app/kosongConfig/secondaryModelOverlay';
 import {
@@ -103,6 +104,7 @@ export class AgentSwarmTool implements IAgentSwarmTool {
     @ISessionAgentProfileCatalog private readonly catalog: ISessionAgentProfileCatalog,
     @IAgentProfileService private readonly profile: IAgentProfileService,
     @IModelService private readonly models: IModelService,
+    @IModelCatalog private readonly modelCatalog: IModelCatalog,
   ) {
     this.callerAgentId = scopeContext.agentId;
   }
@@ -122,6 +124,7 @@ export class AgentSwarmTool implements IAgentSwarmTool {
           record.displayName ?? record.name ?? record.model,
         ]),
       ),
+      modelCatalog: this.modelCatalog,
     });
     return modelLines === undefined
       ? AGENT_SWARM_DESCRIPTION

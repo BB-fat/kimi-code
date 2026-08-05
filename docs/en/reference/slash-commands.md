@@ -1,22 +1,12 @@
 # Slash Commands
 
-Slash commands are built-in control commands provided by Kimi Code CLI in the interactive TUI, covering account configuration, session management, mode switching, information queries, and more. Type `/` in the input box to trigger command completion — the candidate list filters in real time as you continue typing; command aliases are also matched. Completion also works while you are writing a prompt; see [Mid-prompt commands](#mid-prompt-commands).
+Slash commands are built-in control commands provided by Kimi Code CLI in the interactive TUI, covering account configuration, session management, mode switching, information queries, and more. Type `/` in the input box to trigger command completion — the candidate list filters in real time as you continue typing; command aliases are also matched.
 
 After typing the full command name, press `Enter` to execute. If the `/`-prefixed input does not match any built-in or Skill command, it is sent to the Agent as a regular message.
 
 ::: tip
 Some commands are only available in the idle state. Executing these commands while a session is streaming output or compacting context will be blocked — press `Esc` or `Ctrl-C` to interrupt first. The "Always available" column in the tables below indicates commands that are also available during streaming.
 :::
-
-## Mid-prompt commands
-
-Commands also work while you are writing a prompt: typing `/` after existing text (at a word boundary) opens completion for Skill commands, plugin commands, and a set of quick built-in commands. Other built-ins stay available only at the start of the input.
-
-Skill and plugin commands selected mid-prompt are inserted into the text and activate when you submit — the surrounding words become the command's input. For example, sending `check this diff /skill:code-style with care` activates the `code-style` Skill with `check this diff with care` as its input. Only exact command names activate, so path-like text such as `/tmp` stays plain text.
-
-Quick built-in commands instead run immediately when selected — the menu labels them "runs immediately", the typed `/…` fragment is removed, and the rest of the draft stays in place. The set covers mode toggles and panels: `/plan`, `/yolo`, `/auto`, `/permission`, `/model`, `/effort`, `/usage`, `/status`, `/settings`, `/help`, `/tasks`, `/mcp`, `/plugins`, and `/provider`.
-
-Activating a Skill or plugin command while the session is streaming output or compacting context is blocked, and the draft is restored so nothing is lost.
 
 ## Account & Configuration
 
@@ -40,7 +30,7 @@ Activating a Skill or plugin command while the session is streaming output or co
 | `/new` | `/clear` | Start a fresh session, discarding the current context | No |
 | `/sessions` | `/resume` | Browse historical sessions and switch to / restore one | No |
 | `/tasks` | `/task` | Browse the background task list | Yes |
-| `/fork [<prompt>]` | — | Fork a new session from the current one, preserving the full conversation history. With a prompt, the text is sent in the forked session after switching | No |
+| `/fork` | — | Fork a new session from the current one, preserving the full conversation history; you stay in the current session | No |
 | `/title [<text>]` | `/rename` | Without arguments, display the current session title; with an argument, set a new title (max 200 characters) | Yes |
 | `/compact [<instruction>]` | — | Compact the current conversation context to free up token usage; an optional custom instruction can hint to the model what to preserve | No |
 | `/undo [<count>]` | — | Undo recent prompts from the active context. Without a count, opens a selector; with a count, undoes that many prompts. Prompts before the last compaction cannot be undone. Undoing also rolls back the todo list and plan mode state produced by those prompts (code changes are not reverted) | No |
@@ -118,7 +108,7 @@ Prompt mode exits with code `0` when the goal completes, `3` when it blocks, and
 | `/mcp` | — | List MCP servers and their connection status in the current session | Yes |
 | `/plugins` | — | Open the interactive plugin manager | Yes |
 | `/version` | — | Display the Kimi Code CLI version number | Yes |
-| `/feedback` | — | Submit feedback with optional diagnostic logs and codebase context | Yes |
+| `/feedback` | `/bug` | Submit feedback with optional diagnostic logs and codebase context | Yes |
 
 ## Exit
 
@@ -162,8 +152,6 @@ For example, a child Skill named `review` inside a parent Skill named `code-styl
 For convenience, external Skill commands also support a shorthand form that omits the `skill:` prefix — `/<name>` — as long as the name is not taken by a system slash command. That is, `/code-style` falls back to matching `/skill:code-style`.
 
 Built-in Skills shipped with Kimi Code CLI appear directly as `/<name>` in the slash command panel. For example, `/mcp-config` helps configure MCP servers and handle MCP OAuth login, and `/custom-theme [extra text]` invokes the custom-theme workflow to create or edit a TUI theme.
-
-Skill commands can also be embedded anywhere in a prompt — they activate on submit with the surrounding text as input. See [Mid-prompt commands](#mid-prompt-commands).
 
 ::: info
 All Skill commands are only available in the idle state. `flow`-type Skills are also exposed via `/skill:<name>` — there is no separate `/flow:` namespace.

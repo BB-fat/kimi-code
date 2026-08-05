@@ -240,12 +240,12 @@ const KNOWN_DIFFS = {
     projectResumedSession(resumed, home),
   reloadSession: (resumed: ResumedSessionSummary, home: HomePair): unknown =>
     projectResumedSession(resumed, home),
-  // Agent context: both engines report an estimate-inclusive count under the
-  // default strategy (v1's running estimate; v2's `[token_counting]` default
-  // `measured+estimated` via statusSize). Histories compare in full; the
-  // count is still projected away on non-empty contexts so minor estimate
-  // algorithm drift does not break resume/import parity, and is asserted
-  // explicitly at the import call site.
+  // Agent context: v1 reports the running token ESTIMATE; v2 reports the
+  // provider-MEASURED prefix. In-memory appends (e.g. importContext) count
+  // identically on both engines via the shared `estimateTokensForMessages`,
+  // but once the provider reports measured usage the counts diverge by
+  // design. Histories compare in full; the count compares only in the
+  // pre-LLM state where both sides still estimate.
   getContext: (context: { readonly history: readonly unknown[] }): unknown =>
     context.history.length === 0 ? context : { history: context.history },
   // Plan ids are random per engine (hero slugs) and the plan path embeds
@@ -391,10 +391,10 @@ function projectResumedAgents(
  *   delegatable subagent roster (custom agent files are a v1-engine feature);
  *   v2's resumed agent state has no equivalent field. Engine-owned profile
  *   data, not resume data.
- * - `context.tokenCount`: projected away on non-empty contexts so minor
- *   estimate drift does not break resume/import parity (both engines report
- *   an estimate-inclusive count under the default strategy); the empty state
- *   still compares in full (both 0).
+ * - `context.tokenCount`: the KNOWN_DIFFS.getContext divergence (v1's running
+ *   estimate vs v2's provider-measured prefix once the provider reports
+ *   usage) — the history compares in full, the count only where both sides
+ *   still estimate.
  * - replay `config_updated` records: v1 persists the profile BIND as
  *   `config.update` records (which restore maps to config_updated entries);
  *   v2 persists it as a `profile.bind` op the replay fold deliberately does
@@ -1927,10 +1927,12 @@ describe('v1↔v2 agent interaction parity', () => {
       expect(normalize(v2Context.history, '')).toEqual(normalize(v1Context.history, ''));
       expect(v1Context.history).toHaveLength(1);
       expect(v1Context.history[0]).toMatchObject({ role: 'user', origin: { kind: 'user' } });
-      // Both engines adopt a post-import estimate as the reported count (v1's
-      // running estimate; v2's default measured+estimated statusSize).
+      // Both engines estimate an in-memory import with the same
+      // `estimateTokensForMessages`, so post-import counts match exactly.
+      // (They diverge again once the provider reports measured usage — see
+      // KNOWN_DIFFS.getContext.)
       expect(v1Context.tokenCount).toBeGreaterThan(0);
-      expect(v2Context.tokenCount).toBeGreaterThan(0);
+      expect(v2Context.tokenCount).toBe(v1Context.tokenCount);
       // v1's validations, replicated on the v2 side.
       await expect(
         pair.v1.importContext({ ...input, content: ' \n\t ', source: "file 'empty.md'" }),
