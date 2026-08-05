@@ -1,6 +1,6 @@
 /**
- * CoworkStore tests against real on-disk git repositories (mkdtemp fixture).
- * The store is the code-enforced half of the cowork protocol — these tests
+ * TowerStore tests against real on-disk git repositories (mkdtemp fixture).
+ * The store is the code-enforced half of the tower protocol — these tests
  * pin the file layout, frontmatter shape, visibility rules, and the merge
  * gate's refusal matrix.
  */
@@ -13,13 +13,13 @@ import { promisify } from 'node:util';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { CoworkProtocolError, CoworkStore, parseFrontmatter } from '../../src/agent/cowork';
+import { TowerProtocolError, TowerStore, parseFrontmatter } from '../../src/agent/tower';
 import type {
-  CoworkFindingType,
-  CoworkMission,
-  CoworkRosterEntry,
-  CoworkState,
-} from '../../src/agent/cowork';
+  TowerFindingType,
+  TowerMission,
+  TowerRosterEntry,
+  TowerState,
+} from '../../src/agent/tower';
 
 const execFileAsync = promisify(execFile);
 
@@ -42,22 +42,22 @@ async function commitFile(
 }
 
 let repo: string;
-let store: CoworkStore;
+let store: TowerStore;
 
 beforeEach(async () => {
-  repo = await mkdtemp(join(tmpdir(), 'cowork-store-test-'));
+  repo = await mkdtemp(join(tmpdir(), 'tower-store-test-'));
   await git(repo, 'init', '-b', 'main');
-  await git(repo, 'config', 'user.email', 'cowork-test@example.com');
-  await git(repo, 'config', 'user.name', 'Cowork Test');
+  await git(repo, 'config', 'user.email', 'tower-test@example.com');
+  await git(repo, 'config', 'user.name', 'Tower Test');
   await commitFile(repo, 'README.md', '# fixture\n', 'initial');
-  store = new CoworkStore(repo);
+  store = new TowerStore(repo);
 });
 
 afterEach(async () => {
   await rm(repo, { recursive: true, force: true });
 });
 
-function rosterEntry(partial: Partial<CoworkRosterEntry> & Pick<CoworkRosterEntry, 'name' | 'kind'>): CoworkRosterEntry {
+function rosterEntry(partial: Partial<TowerRosterEntry> & Pick<TowerRosterEntry, 'name' | 'kind'>): TowerRosterEntry {
   return {
     agentId: `agent-${partial.name}`,
     spawnedAt: new Date().toISOString(),
@@ -72,7 +72,7 @@ async function setupMission(input: {
   file: string;
   content: string;
   deps?: string[];
-}): Promise<CoworkMission> {
+}): Promise<TowerMission> {
   const missions = await store.plan([
     { title: input.title, scope: [input.scope], deps: input.deps },
   ]);
@@ -83,8 +83,8 @@ async function setupMission(input: {
   return mission;
 }
 
-function worktreeOf(mission: CoworkMission): string {
-  return store.abs(join('.cowork/worktrees', mission.worktree));
+function worktreeOf(mission: TowerMission): string {
+  return store.abs(join('.tower/worktrees', mission.worktree));
 }
 
 async function cleanReview(reviewer: string, target: string): Promise<void> {
@@ -104,22 +104,22 @@ describe('init', () => {
     expect(result).toEqual({ base: 'main', created: true });
 
     for (const sub of ['inbox', 'findings', 'reviews', 'missions', 'log']) {
-      expect((await stat(join(repo, '.cowork/comms', sub))).isDirectory()).toBe(true);
+      expect((await stat(join(repo, '.tower/comms', sub))).isDirectory()).toBe(true);
     }
-    expect((await stat(join(repo, '.cowork/worktrees'))).isDirectory()).toBe(true);
-    expect((await stat(join(repo, '.cowork/comms/log/activity.log'))).isFile()).toBe(true);
-    expect((await stat(join(repo, '.cowork/comms/MISSIONS.md'))).isFile()).toBe(true);
+    expect((await stat(join(repo, '.tower/worktrees'))).isDirectory()).toBe(true);
+    expect((await stat(join(repo, '.tower/comms/log/activity.log'))).isFile()).toBe(true);
+    expect((await stat(join(repo, '.tower/comms/MISSIONS.md'))).isFile()).toBe(true);
 
     const state = JSON.parse(
-      await readFile(join(repo, '.cowork/comms/state.json'), 'utf8'),
-    ) as CoworkState;
+      await readFile(join(repo, '.tower/comms/state.json'), 'utf8'),
+    ) as TowerState;
     expect(state.version).toBe(1);
     expect(state.base).toBe('main');
     expect(state.roster.agents).toEqual([]);
     expect(state.missions).toEqual([]);
 
     const exclude = await readFile(join(repo, '.git/info/exclude'), 'utf8');
-    expect(exclude.split('\n').map((line) => line.trim())).toContain('.cowork/');
+    expect(exclude.split('\n').map((line) => line.trim())).toContain('.tower/');
   });
 
   it('is idempotent — a second init reports created:false and preserves state', async () => {
@@ -152,14 +152,14 @@ describe('plan', () => {
     });
     expect(missions[1]!.deps).toEqual(['M1']);
 
-    const index = await readFile(join(repo, '.cowork/comms/MISSIONS.md'), 'utf8');
+    const index = await readFile(join(repo, '.tower/comms/MISSIONS.md'), 'utf8');
     expect(index).toContain('| M1 | Build engine | feat/build-engine | wt-1 |');
     expect(index).toContain('| M2 | Build UI | feat/build-ui | wt-2 |');
     expect(index).toContain('M1 → M2');
     expect(index).toContain('- M1: src/engine/**');
 
     const missionFile = await readFile(
-      join(repo, '.cowork/comms/missions/M1-build-engine.md'),
+      join(repo, '.tower/comms/missions/M1-build-engine.md'),
       'utf8',
     );
     expect(missionFile).toContain('# Mission M1: Build engine');
@@ -172,7 +172,7 @@ describe('plan', () => {
       { title: 'outer', scope: ['src/a/**'] },
       { title: 'inner', scope: ['src/a/b/**'] },
     ]);
-    await expect(attempt).rejects.toThrow(CoworkProtocolError);
+    await expect(attempt).rejects.toThrow(TowerProtocolError);
     await expect(attempt).rejects.toThrow(/scopes overlap/);
   });
 
@@ -239,7 +239,7 @@ describe('inbox send', () => {
       subject: 'get started',
       body: 'please start on M1',
     });
-    expect(rel).toMatch(/^\.cowork[/\\]comms[/\\]inbox[/\\]/);
+    expect(rel).toMatch(/^\.tower[/\\]comms[/\\]inbox[/\\]/);
 
     const text = await readFile(join(repo, rel), 'utf8');
     const { fields, body } = parseFrontmatter(text);
@@ -251,7 +251,7 @@ describe('inbox send', () => {
     expect(fields['sent_at']).toBeTruthy();
     expect(body).toBe('please start on M1');
 
-    const log = await readFile(join(repo, '.cowork/comms/log/activity.log'), 'utf8');
+    const log = await readFile(join(repo, '.tower/comms/log/activity.log'), 'utf8');
     const sendLine = log.split('\n').find((line) => line.includes('inbox.send'));
     expect(sendLine).toBeTruthy();
     const ref = /ref=(\S+)/.exec(sendLine ?? '')?.[1];
@@ -298,13 +298,13 @@ describe('findings', () => {
   it('rejects invalid finding types', async () => {
     await expect(
       store.fileFinding('w1', {
-        type: 'nonsense' as CoworkFindingType,
+        type: 'nonsense' as TowerFindingType,
         title: 'x',
         summary: 's',
         details: 'd',
         suggestedFix: 'f',
       }),
-    ).rejects.toThrow(CoworkProtocolError);
+    ).rejects.toThrow(TowerProtocolError);
   });
 
   it('writes the finding file under comms/findings', async () => {
@@ -317,7 +317,7 @@ describe('findings', () => {
       details: 'no eviction path exists',
       suggestedFix: 'add a ttl',
     });
-    expect(rel).toMatch(/^\.cowork[/\\]comms[/\\]findings[/\\]/);
+    expect(rel).toMatch(/^\.tower[/\\]comms[/\\]findings[/\\]/);
     const text = await readFile(join(repo, rel), 'utf8');
     expect(text).toContain('# Finding: leaky cache');
     expect(text).toContain('**Agent**: w1');
@@ -375,7 +375,7 @@ describe('merge gate', () => {
     expect(mergeCommit).toBe(await git(repo, 'rev-parse', 'HEAD'));
     const state = await store.load();
     expect(state.missions.find((m) => m.id === mission.id)?.status).toBe('merged');
-    const index = await readFile(join(repo, '.cowork/comms/MISSIONS.md'), 'utf8');
+    const index = await readFile(join(repo, '.tower/comms/MISSIONS.md'), 'utf8');
     expect(index).toContain('✅');
   });
 
@@ -637,9 +637,9 @@ describe('updateMission', () => {
     );
     const updated = await store.updateMission('tower', 'M1', { owner: 'w1' });
     expect(updated.owner).toBe('w1');
-    const file = await readFile(join(repo, '.cowork/comms/missions/M1-alpha.md'), 'utf8');
+    const file = await readFile(join(repo, '.tower/comms/missions/M1-alpha.md'), 'utf8');
     expect(file).toContain('| feat/alpha | wt-1 | 🟡 | src/alpha/** | w1 |');
-    const index = await readFile(join(repo, '.cowork/comms/MISSIONS.md'), 'utf8');
+    const index = await readFile(join(repo, '.tower/comms/MISSIONS.md'), 'utf8');
     expect(index).toContain('| M1 | alpha | feat/alpha | wt-1 | 🟡 | w1 |');
   });
 });
@@ -661,7 +661,7 @@ describe('roster', () => {
     const state = await store.load();
     expect(store.resolveCallerName(state, 'main')).toBe('tower');
     expect(store.resolveCallerName(state, 'agent-w1')).toBe('w1');
-    expect(() => store.resolveCallerName(state, 'agent-99')).toThrow(CoworkProtocolError);
+    expect(() => store.resolveCallerName(state, 'agent-99')).toThrow(TowerProtocolError);
   });
 });
 
@@ -681,11 +681,11 @@ describe('teardown', () => {
     await writeFile(join(wt, 'uncommitted.txt'), 'dirty\n');
 
     const report = await store.teardown();
-    expect(report.join('\n')).toContain(`kept .cowork/worktrees/${mission.worktree}`);
+    expect(report.join('\n')).toContain(`kept .tower/worktrees/${mission.worktree}`);
     expect((await stat(wt)).isDirectory()).toBe(true);
 
     const forced = await store.teardown({ force: true });
-    expect(forced.join('\n')).toContain(`removed .cowork/worktrees/${mission.worktree}`);
+    expect(forced.join('\n')).toContain(`removed .tower/worktrees/${mission.worktree}`);
     await expect(stat(wt)).rejects.toThrow();
   });
 
@@ -698,7 +698,7 @@ describe('teardown', () => {
     });
     const wt = worktreeOf(mission);
     const report = await store.teardown();
-    expect(report.join('\n')).toContain(`removed .cowork/worktrees/${mission.worktree}`);
+    expect(report.join('\n')).toContain(`removed .tower/worktrees/${mission.worktree}`);
     await expect(stat(wt)).rejects.toThrow();
   });
 });

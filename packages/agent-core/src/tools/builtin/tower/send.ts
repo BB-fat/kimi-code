@@ -1,7 +1,7 @@
 /**
- * CoworkSendTool — deliver an inbox message to a roster agent, the tower, or
+ * TowerSendTool — deliver an inbox message to a roster agent, the tower, or
  * everyone ("all"). The store builds the file name and frontmatter; agents
- * never write `.cowork/comms/inbox/` by hand.
+ * never write `.tower/comms/inbox/` by hand.
  */
 
 import type { Agent } from '#/agent';
@@ -10,9 +10,9 @@ import { z } from 'zod';
 import type { BuiltinTool } from '../../../agent/tool';
 import type { ToolExecution } from '../../../loop/types';
 import { toInputJsonSchema } from '../../support/input-schema';
-import { callerName, newStore, runCoworkTool } from './support';
+import { callerName, newStore, runTowerTool } from './support';
 
-export const CoworkSendToolInputSchema = z
+export const TowerSendToolInputSchema = z
   .object({
     to: z
       .string()
@@ -28,23 +28,23 @@ export const CoworkSendToolInputSchema = z
   })
   .strict();
 
-export type CoworkSendToolInput = z.infer<typeof CoworkSendToolInputSchema>;
+export type TowerSendToolInput = z.infer<typeof TowerSendToolInputSchema>;
 
-export class CoworkSendTool implements BuiltinTool<CoworkSendToolInput> {
-  readonly name = 'CoworkSend' as const;
-  readonly description: string = `Send an inbox message to a cowork participant: a roster agent by name, "tower" (the control tower), or "all" (broadcast).
+export class TowerSendTool implements BuiltinTool<TowerSendToolInput> {
+  readonly name = 'TowerSend' as const;
+  readonly description: string = `Send an inbox message to a tower participant: a roster agent by name, "tower" (the control tower), or "all" (broadcast).
 
-Recipients read it with CoworkInbox. Sending to yourself or to an unknown name is rejected — the error lists the known names.`;
-  readonly parameters: Record<string, unknown> = toInputJsonSchema(CoworkSendToolInputSchema);
+Recipients read it with TowerInbox. Sending to yourself or to an unknown name is rejected — the error lists the known names.`;
+  readonly parameters: Record<string, unknown> = toInputJsonSchema(TowerSendToolInputSchema);
 
   constructor(private readonly agent: Agent) {}
 
-  resolveExecution(args: CoworkSendToolInput): ToolExecution {
+  resolveExecution(args: TowerSendToolInput): ToolExecution {
     return {
-      description: `Sending cowork message to ${args.to}: ${args.subject}`,
+      description: `Sending tower message to ${args.to}: ${args.subject}`,
       approvalRule: this.name,
       execute: () =>
-        runCoworkTool(async () => {
+        runTowerTool(async () => {
           const store = newStore(this.agent);
           const state = await store.load();
           const caller = callerName(this.agent, state);

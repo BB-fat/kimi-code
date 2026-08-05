@@ -1,5 +1,5 @@
 /**
- * CoworkFindingTool — file a structured finding (bug / improve / vuln / idea)
+ * TowerFindingTool — file a structured finding (bug / improve / vuln / idea)
  * for the tower to route. Workers use this for anything notable outside
  * their mission scope instead of fixing it directly.
  */
@@ -10,9 +10,9 @@ import { z } from 'zod';
 import type { BuiltinTool } from '../../../agent/tool';
 import type { ToolExecution } from '../../../loop/types';
 import { toInputJsonSchema } from '../../support/input-schema';
-import { callerName, newStore, runCoworkTool } from './support';
+import { callerName, newStore, runTowerTool } from './support';
 
-export const CoworkFindingToolInputSchema = z
+export const TowerFindingToolInputSchema = z
   .object({
     type: z.enum(['bug', 'improve', 'vuln', 'idea']).describe('Finding category'),
     title: z.string().describe('Short finding title'),
@@ -24,23 +24,23 @@ export const CoworkFindingToolInputSchema = z
   })
   .strict();
 
-export type CoworkFindingToolInput = z.infer<typeof CoworkFindingToolInputSchema>;
+export type TowerFindingToolInput = z.infer<typeof TowerFindingToolInputSchema>;
 
-export class CoworkFindingTool implements BuiltinTool<CoworkFindingToolInput> {
-  readonly name = 'CoworkFinding' as const;
-  readonly description: string = `File a structured finding (bug / improve / vuln / idea) into .cowork/comms/findings/ for the tower to route.
+export class TowerFindingTool implements BuiltinTool<TowerFindingToolInput> {
+  readonly name = 'TowerFinding' as const;
+  readonly description: string = `File a structured finding (bug / improve / vuln / idea) into .tower/comms/findings/ for the tower to route.
 
 Use this for anything notable OUTSIDE your mission scope — fixing it directly would violate scope isolation. Include enough detail that another agent can act on it without re-discovering the context.`;
-  readonly parameters: Record<string, unknown> = toInputJsonSchema(CoworkFindingToolInputSchema);
+  readonly parameters: Record<string, unknown> = toInputJsonSchema(TowerFindingToolInputSchema);
 
   constructor(private readonly agent: Agent) {}
 
-  resolveExecution(args: CoworkFindingToolInput): ToolExecution {
+  resolveExecution(args: TowerFindingToolInput): ToolExecution {
     return {
-      description: `Filing cowork ${args.type} finding: ${args.title}`,
+      description: `Filing tower ${args.type} finding: ${args.title}`,
       approvalRule: this.name,
       execute: () =>
-        runCoworkTool(async () => {
+        runTowerTool(async () => {
           const store = newStore(this.agent);
           const state = await store.load();
           const caller = callerName(this.agent, state);

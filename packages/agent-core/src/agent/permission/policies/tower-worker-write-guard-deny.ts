@@ -8,23 +8,23 @@ import type {
 import { writeFileAccesses } from './file-access-ask';
 
 /**
- * cowork-worker agents are confined to their own worktree: CoworkSpawn sets
+ * tower-worker agents are confined to their own worktree: TowerSpawn sets
  * the agent's cwd to the worktree, and this guard denies any Write/Edit whose
  * target escapes it — including absolute paths, which the workspace guard
  * otherwise lets through to the ask fallback. The main checkout and sibling
  * agents' slots are therefore unreachable for edits; out-of-scope changes go
- * through CoworkFinding / the tower instead.
+ * through TowerFinding / the tower instead.
  *
  * Bash commands with absolute escape paths remain a briefing-level rule (the
  * Bash tool reports no file accesses to match against).
  */
-export class CoworkWorkerWriteGuardPermissionPolicy implements PermissionPolicy {
-  readonly name = 'cowork-worker-write-guard-deny';
+export class TowerWorkerWriteGuardPermissionPolicy implements PermissionPolicy {
+  readonly name = 'tower-worker-write-guard-deny';
 
   constructor(private readonly agent: Agent) {}
 
   evaluate(context: PermissionPolicyContext): PermissionPolicyResult | undefined {
-    if (this.agent.config.profileName !== 'cowork-worker') return;
+    if (this.agent.config?.profileName !== 'tower-worker') return;
     const toolName = context.toolCall.name;
     if (toolName !== 'Write' && toolName !== 'Edit') return;
 
@@ -36,9 +36,9 @@ export class CoworkWorkerWriteGuardPermissionPolicy implements PermissionPolicy 
     return {
       kind: 'deny',
       message:
-        `cowork workers may only write inside their own worktree (${cwd}) — denied: ` +
+        `tower workers may only write inside their own worktree (${cwd}) — denied: ` +
         `${escapes.map((access) => access.path).join(', ')}. ` +
-        'Out-of-scope changes are not yours to make: file them with CoworkFinding or ask the tower via CoworkSend.',
+        'Out-of-scope changes are not yours to make: file them with TowerFinding or ask the tower via TowerSend.',
     };
   }
 }

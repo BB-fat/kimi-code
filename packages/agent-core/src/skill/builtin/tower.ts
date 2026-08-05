@@ -1,17 +1,17 @@
 import { parseSkillText } from '../parser';
 import type { SkillDefinition } from '../types';
-import COWORK_BODY from './cowork.md?raw';
+import TOWER_BODY from './tower.md?raw';
 
-const PSEUDO_PATH = 'builtin://cowork';
+const PSEUDO_PATH = 'builtin://tower';
 
 const parsed = parseSkillText({
-  skillMdPath: '/builtin/skills/cowork.md',
-  skillDirName: 'cowork',
+  skillMdPath: '/builtin/skills/tower.md',
+  skillDirName: 'tower',
   source: 'builtin',
-  text: COWORK_BODY,
+  text: TOWER_BODY,
 });
 
-export const COWORK_SKILL: SkillDefinition = {
+export const TOWER_SKILL: SkillDefinition = {
   ...parsed,
   path: PSEUDO_PATH,
   dir: PSEUDO_PATH,

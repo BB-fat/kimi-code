@@ -1,5 +1,5 @@
 /**
- * CoworkReviewTool — a reviewer's verdict on a branch. The store assigns the
+ * TowerReviewTool — a reviewer's verdict on a branch. The store assigns the
  * round number, stamps the reviewed branch tip, and enforces that the caller
  * is an assigned reviewer for the target. Only a "clean" review of the exact
  * current tip passes the merge gate.
@@ -11,9 +11,9 @@ import { z } from 'zod';
 import type { BuiltinTool } from '../../../agent/tool';
 import type { ToolExecution } from '../../../loop/types';
 import { toInputJsonSchema } from '../../support/input-schema';
-import { callerName, newStore, runCoworkTool } from './support';
+import { callerName, newStore, runTowerTool } from './support';
 
-export const CoworkReviewToolInputSchema = z
+export const TowerReviewToolInputSchema = z
   .object({
     target: z.string().describe('The branch you were assigned to review'),
     status: z
@@ -34,23 +34,23 @@ export const CoworkReviewToolInputSchema = z
   })
   .strict();
 
-export type CoworkReviewToolInput = z.infer<typeof CoworkReviewToolInputSchema>;
+export type TowerReviewToolInput = z.infer<typeof TowerReviewToolInputSchema>;
 
-export class CoworkReviewTool implements BuiltinTool<CoworkReviewToolInput> {
-  readonly name = 'CoworkReview' as const;
-  readonly description: string = `Submit a review verdict for a branch you were assigned to review (via CoworkSpawn review_target).
+export class TowerReviewTool implements BuiltinTool<TowerReviewToolInput> {
+  readonly name = 'TowerReview' as const;
+  readonly description: string = `Submit a review verdict for a branch you were assigned to review (via TowerSpawn review_target).
 
 The review is stamped with the current branch tip — if the branch moves afterwards, the tower must ask for a re-review before merging. Only reviewers assigned to the target (or the tower) may submit; the round number is assigned automatically.`;
-  readonly parameters: Record<string, unknown> = toInputJsonSchema(CoworkReviewToolInputSchema);
+  readonly parameters: Record<string, unknown> = toInputJsonSchema(TowerReviewToolInputSchema);
 
   constructor(private readonly agent: Agent) {}
 
-  resolveExecution(args: CoworkReviewToolInput): ToolExecution {
+  resolveExecution(args: TowerReviewToolInput): ToolExecution {
     return {
-      description: `Submitting cowork review for ${args.target}: ${args.status}`,
+      description: `Submitting tower review for ${args.target}: ${args.status}`,
       approvalRule: this.name,
       execute: () =>
-        runCoworkTool(async () => {
+        runTowerTool(async () => {
           const store = newStore(this.agent);
           const state = await store.load();
           const caller = callerName(this.agent, state);
@@ -63,7 +63,7 @@ The review is stamped with the current branch tip — if the branch moves afterw
             decision: args.decision,
           });
           return {
-            output: `review submitted: ${rel}\nAlso notify the branch author (or the tower) with CoworkSend so the verdict is seen.`,
+            output: `review submitted: ${rel}\nAlso notify the branch author (or the tower) with TowerSend so the verdict is seen.`,
           };
         }),
     };

@@ -1,19 +1,19 @@
 /**
- * Cowork domain types — the machine-readable state behind `.cowork/`.
+ * Tower domain types — the machine-readable state behind `.tower/`.
  *
  * `state.json` (this file's shapes) is the single source of truth;
  * `MISSIONS.md` and `missions/*.md` are generated human views and must never
- * be edited by hand. All writes go through `CoworkStore`.
+ * be edited by hand. All writes go through `TowerStore`.
  */
 
-export type CoworkAgentKind = 'worker' | 'reviewer';
+export type TowerAgentKind = 'worker' | 'reviewer';
 
-export interface CoworkRosterEntry {
+export interface TowerRosterEntry {
   /** Display/route name, e.g. `agent-build`, `reviewer-a`. Unique per workspace. */
   readonly name: string;
   /** Engine agent id (e.g. `agent-3`); the tower is always `main`. */
   readonly agentId: string;
-  readonly kind: CoworkAgentKind;
+  readonly kind: TowerAgentKind;
   /** Workers: the mission they own. */
   readonly missionId?: string;
   /** Reviewers: the branch they are assigned to review. */
@@ -25,11 +25,11 @@ export interface CoworkRosterEntry {
   readonly spawnedAt: string;
 }
 
-export interface CoworkRoster {
-  readonly agents: CoworkRosterEntry[];
+export interface TowerRoster {
+  readonly agents: TowerRosterEntry[];
 }
 
-export type CoworkMissionStatus =
+export type TowerMissionStatus =
   | 'planned'
   | 'active'
   | 'completed'
@@ -44,48 +44,48 @@ export type CoworkMissionStatus =
  * informational only (reserves nothing), and their merge is a zero-diff
  * formality that closes the mission without a git merge.
  */
-export type CoworkMissionKind = 'build' | 'survey';
+export type TowerMissionKind = 'build' | 'survey';
 
-export interface CoworkMissionTask {
+export interface TowerMissionTask {
   text: string;
   done: boolean;
 }
 
-export interface CoworkMission {
+export interface TowerMission {
   readonly id: string;
   readonly title: string;
   readonly slug: string;
-  kind: CoworkMissionKind;
+  kind: TowerMissionKind;
   /** picomatch globs; mutable only through `updateMission` (tower, logged). */
   scope: string[];
   readonly branch: string;
   readonly worktree: string;
   readonly deps: readonly string[];
-  status: CoworkMissionStatus;
+  status: TowerMissionStatus;
   owner?: string;
-  tasks: CoworkMissionTask[];
+  tasks: TowerMissionTask[];
   /** Decision log, oldest first. */
   notes: string[];
   blockers: string[];
 }
 
-export interface CoworkState {
+export interface TowerState {
   readonly version: 1;
   readonly base: string;
   /** `pr` is reserved for a future gh-backed mode; v1 always runs `branch`. */
   readonly mode: 'branch' | 'pr';
   readonly createdAt: string;
-  roster: CoworkRoster;
-  missions: CoworkMission[];
+  roster: TowerRoster;
+  missions: TowerMission[];
 }
 
-export type CoworkFindingType = 'bug' | 'improve' | 'vuln' | 'idea';
-export type CoworkFindingSeverity = 'low' | 'medium' | 'high' | 'critical';
+export type TowerFindingType = 'bug' | 'improve' | 'vuln' | 'idea';
+export type TowerFindingSeverity = 'low' | 'medium' | 'high' | 'critical';
 
-export type CoworkReviewStatus = 'clean' | `p1-${number}items` | `p2-${number}items`;
-export type CoworkReviewMerge = 'merge' | 'fix-then-merge' | 'hold';
+export type TowerReviewStatus = 'clean' | `p1-${number}items` | `p2-${number}items`;
+export type TowerReviewMerge = 'merge' | 'fix-then-merge' | 'hold';
 
-export interface CoworkReviewInfo {
+export interface TowerReviewInfo {
   readonly reviewer: string;
   readonly target: string;
   readonly round: number;
@@ -97,7 +97,7 @@ export interface CoworkReviewInfo {
   readonly file: string;
 }
 
-export interface CoworkInboxItem {
+export interface TowerInboxItem {
   readonly file: string;
   readonly from: string;
   readonly to: string;

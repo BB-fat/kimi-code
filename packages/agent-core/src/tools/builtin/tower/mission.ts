@@ -1,5 +1,5 @@
 /**
- * CoworkMissionTool — read or update one mission file. Called with only an
+ * TowerMissionTool — read or update one mission file. Called with only an
  * id it returns the rendered mission view; with patch fields it applies them
  * through the store (workers may only patch their own mission; ownership
  * assignment stays with the tower).
@@ -11,14 +11,14 @@ import { join } from 'node:path';
 import type { Agent } from '#/agent';
 import { z } from 'zod';
 
-import { MISSIONS_DIR, missionFileName } from '../../../agent/cowork';
-import type { CoworkMission, CoworkStore } from '../../../agent/cowork';
+import { MISSIONS_DIR, missionFileName } from '../../../agent/tower';
+import type { TowerMission, TowerStore } from '../../../agent/tower';
 import type { BuiltinTool } from '../../../agent/tool';
 import type { ToolExecution } from '../../../loop/types';
 import { toInputJsonSchema } from '../../support/input-schema';
-import { callerName, newStore, runCoworkTool } from './support';
+import { callerName, newStore, runTowerTool } from './support';
 
-export const CoworkMissionToolInputSchema = z
+export const TowerMissionToolInputSchema = z
   .object({
     id: z.string().describe('Mission id (e.g. "M1")'),
     status: z
@@ -41,18 +41,18 @@ export const CoworkMissionToolInputSchema = z
   })
   .strict();
 
-export type CoworkMissionToolInput = z.infer<typeof CoworkMissionToolInputSchema>;
+export type TowerMissionToolInput = z.infer<typeof TowerMissionToolInputSchema>;
 
-export class CoworkMissionTool implements BuiltinTool<CoworkMissionToolInput> {
-  readonly name = 'CoworkMission' as const;
-  readonly description: string = `Read or update a cowork mission.
+export class TowerMissionTool implements BuiltinTool<TowerMissionToolInput> {
+  readonly name = 'TowerMission' as const;
+  readonly description: string = `Read or update a tower mission.
 
 With only an id, returns the mission view (status, tasks, blockers, notes). With patch fields, applies them: workers may only update the mission they own — the store rejects anything else. Use task_done to tick checklist items, note to log decisions, blocker when stuck (the tower watches for blocked missions).`;
-  readonly parameters: Record<string, unknown> = toInputJsonSchema(CoworkMissionToolInputSchema);
+  readonly parameters: Record<string, unknown> = toInputJsonSchema(TowerMissionToolInputSchema);
 
   constructor(private readonly agent: Agent) {}
 
-  resolveExecution(args: CoworkMissionToolInput): ToolExecution {
+  resolveExecution(args: TowerMissionToolInput): ToolExecution {
     const hasPatch =
       args.status !== undefined ||
       args.note !== undefined ||
@@ -62,11 +62,11 @@ With only an id, returns the mission view (status, tasks, blockers, notes). With
       args.scope !== undefined;
     return {
       description: hasPatch
-        ? `Updating cowork mission ${args.id}`
-        : `Reading cowork mission ${args.id}`,
+        ? `Updating tower mission ${args.id}`
+        : `Reading tower mission ${args.id}`,
       approvalRule: this.name,
       execute: () =>
-        runCoworkTool(async () => {
+        runTowerTool(async () => {
           const store = newStore(this.agent);
           const state = await store.load();
           const caller = callerName(this.agent, state);
@@ -101,7 +101,7 @@ With only an id, returns the mission view (status, tasks, blockers, notes). With
   }
 }
 
-async function renderMission(store: CoworkStore, mission: CoworkMission): Promise<string> {
+async function renderMission(store: TowerStore, mission: TowerMission): Promise<string> {
   return readFile(
     store.abs(join(MISSIONS_DIR, missionFileName(mission.id, mission.slug))),
     'utf8',

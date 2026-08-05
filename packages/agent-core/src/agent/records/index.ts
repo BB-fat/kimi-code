@@ -112,11 +112,11 @@ function restoreAgentRecord(agent: Agent, input: AgentRecord): void {
     case 'swarm_mode.exit':
       agent.swarmMode.exit();
       return;
-    case 'cowork_mode.enter':
-      agent.coworkMode.restoreEnter();
+    case 'tower_mode.enter':
+      agent.towerMode.restoreEnter();
       return;
-    case 'cowork_mode.exit':
-      agent.coworkMode.exit();
+    case 'tower_mode.exit':
+      agent.towerMode.exit();
       return;
     case 'context.append_message':
       agent.context.appendMessage(input.message);

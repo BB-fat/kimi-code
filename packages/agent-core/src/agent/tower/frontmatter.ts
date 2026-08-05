@@ -1,7 +1,7 @@
 /**
- * Minimal YAML-frontmatter codec for cowork comms files.
+ * Minimal YAML-frontmatter codec for tower comms files.
  *
- * Cowork files carry a flat string→string map between `---` fences, one
+ * Tower files carry a flat string→string map between `---` fences, one
  * `key: value` per line. The store is the only writer, so values are
  * guaranteed single-line (enforced here); parsing accepts exactly what
  * `renderFrontmatter` produces.

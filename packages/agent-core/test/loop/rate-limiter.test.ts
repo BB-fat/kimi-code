@@ -70,7 +70,7 @@ describe('RateLimitCapacityGovernor (swarm capacity machine)', () => {
   });
 });
 
-describe('RateLimiter (cowork face: pause + inflight + ceiling)', () => {
+describe('RateLimiter (tower face: pause + inflight + ceiling)', () => {
   let now: { current: number };
   let limiter: RateLimiter;
 

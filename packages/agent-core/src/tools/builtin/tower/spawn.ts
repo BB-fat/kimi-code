@@ -1,9 +1,9 @@
 /**
- * CoworkSpawnTool — the tower's worker/reviewer launcher. The prompt is
+ * TowerSpawnTool — the tower's worker/reviewer launcher. The prompt is
  * assembled here from the mission/review briefing (never by the tower LLM),
  * the agent runs detached in the background via SessionSubagentHost +
  * BackgroundManager (same pattern as the Agent tool), and the roster entry is
- * what lets the spawned agent use the cowork comms tools.
+ * what lets the spawned agent use the tower comms tools.
  */
 
 import { readFile } from 'node:fs/promises';
@@ -13,29 +13,29 @@ import type { Agent } from '#/agent';
 import { z } from 'zod';
 
 import { AgentBackgroundTask, type BackgroundManager } from '../../../agent/background';
-import { MISSIONS_DIR, TOWER_NAME, WORKTREES_DIR, missionFileName } from '../../../agent/cowork';
-import type { CoworkMission, CoworkState, CoworkStore } from '../../../agent/cowork';
+import { MISSIONS_DIR, TOWER_NAME, WORKTREES_DIR, missionFileName } from '../../../agent/tower';
+import type { TowerMission, TowerState, TowerStore } from '../../../agent/tower';
 import type { BuiltinTool } from '../../../agent/tool';
 import type {
   ExecutableToolContext,
   ExecutableToolResult,
   ToolExecution,
 } from '../../../loop/types';
-import { coworkRateLimiter } from '../../../loop/rate-limiter';
+import { towerRateLimiter } from '../../../loop/rate-limiter';
 import {
   DEFAULT_SUBAGENT_TIMEOUT_MS,
   type SessionSubagentHost,
   type SubagentHandle,
 } from '../../../session/subagent-host';
 import { toInputJsonSchema } from '../../support/input-schema';
-import { newStore, runCoworkTool } from './support';
+import { newStore, runTowerTool } from './support';
 
-export const CoworkSpawnToolInputSchema = z
+export const TowerSpawnToolInputSchema = z
   .object({
     name: z
       .string()
       .describe(
-        'Unique cowork name for the agent (e.g. "agent-build", "reviewer-a"). Used for inbox addressing and mission ownership.',
+        'Unique tower name for the agent (e.g. "agent-build", "reviewer-a"). Used for inbox addressing and mission ownership.',
       ),
     kind: z
       .enum(['worker', 'reviewer'])
@@ -43,7 +43,7 @@ export const CoworkSpawnToolInputSchema = z
     mission_id: z
       .string()
       .optional()
-      .describe('Required for workers: the mission id (e.g. "M1") from CoworkPlan'),
+      .describe('Required for workers: the mission id (e.g. "M1") from TowerPlan'),
     review_target: z
       .string()
       .optional()
@@ -71,16 +71,16 @@ export const CoworkSpawnToolInputSchema = z
     }
   });
 
-export type CoworkSpawnToolInput = z.infer<typeof CoworkSpawnToolInputSchema>;
+export type TowerSpawnToolInput = z.infer<typeof TowerSpawnToolInputSchema>;
 
-export class CoworkSpawnTool implements BuiltinTool<CoworkSpawnToolInput> {
-  readonly name = 'CoworkSpawn' as const;
-  readonly description: string = `Spawn a cowork worker or reviewer as a background subagent and register it in the cowork roster.
+export class TowerSpawnTool implements BuiltinTool<TowerSpawnToolInput> {
+  readonly name = 'TowerSpawn' as const;
+  readonly description: string = `Spawn a tower worker or reviewer as a background subagent and register it in the tower roster.
 
-Workers: pass mission_id — the tool creates the mission worktree, marks the mission active with this worker as owner, and briefs the agent with the full mission text. Reviewers: pass review_target — the agent gets a review checklist and must submit its verdict via CoworkReview.
+Workers: pass mission_id — the tool creates the mission worktree, marks the mission active with this worker as owner, and briefs the agent with the full mission text. Reviewers: pass review_target — the agent gets a review checklist and must submit its verdict via TowerReview.
 
 The briefing prompt is assembled by this tool (worktree path, scope, protocol rules); use instructions only for extra context. If the name is already registered, resume the existing agent with the Agent tool instead of spawning a duplicate.`;
-  readonly parameters: Record<string, unknown> = toInputJsonSchema(CoworkSpawnToolInputSchema);
+  readonly parameters: Record<string, unknown> = toInputJsonSchema(TowerSpawnToolInputSchema);
 
   constructor(
     private readonly agent: Agent,
@@ -88,22 +88,22 @@ The briefing prompt is assembled by this tool (worktree path, scope, protocol ru
     private readonly backgroundManager: BackgroundManager,
   ) {}
 
-  resolveExecution(args: CoworkSpawnToolInput): ToolExecution {
+  resolveExecution(args: TowerSpawnToolInput): ToolExecution {
     return {
-      description: `Spawning cowork ${args.kind} "${args.name}"`,
+      description: `Spawning tower ${args.kind} "${args.name}"`,
       approvalRule: this.name,
       execute: (ctx) => this.execution(args, ctx),
     };
   }
 
   private async execution(
-    args: CoworkSpawnToolInput,
+    args: TowerSpawnToolInput,
     { toolCallId }: ExecutableToolContext,
   ): Promise<ExecutableToolResult> {
-    return runCoworkTool(async () => {
-      if (!this.agent.coworkMode.isActive) {
+    return runTowerTool(async () => {
+      if (!this.agent.towerMode.isActive) {
         return {
-          output: 'cowork mode is not active — run CoworkInit first',
+          output: 'tower mode is not active — run TowerInit first',
           isError: true,
         };
       }
@@ -114,14 +114,14 @@ The briefing prompt is assembled by this tool (worktree path, scope, protocol ru
       if (existing !== undefined) {
         return {
           output:
-            `cowork agent "${args.name}" is already registered (agent_id: ${existing.agentId}, kind: ${existing.kind}) — ` +
+            `tower agent "${args.name}" is already registered (agent_id: ${existing.agentId}, kind: ${existing.kind}) — ` +
             `resume it instead of spawning a duplicate: Agent(resume="${existing.agentId}", prompt="...")`,
           isError: true,
         };
       }
 
       const notes: string[] = [];
-      let mission: CoworkMission | undefined;
+      let mission: TowerMission | undefined;
       let reviewTarget: string | undefined;
       if (args.kind === 'worker') {
         const missionId = args.mission_id;
@@ -163,13 +163,13 @@ The briefing prompt is assembled by this tool (worktree path, scope, protocol ru
       const prompt = await this.buildPrompt(args, store, state, mission, reviewTarget);
       const description =
         mission !== undefined
-          ? `cowork worker ${args.name}: ${mission.title}`
-          : `cowork reviewer ${args.name}: ${reviewTarget ?? ''}`;
+          ? `tower worker ${args.name}: ${mission.title}`
+          : `tower reviewer ${args.name}: ${reviewTarget ?? ''}`;
 
       // Adaptive concurrency gate: refused while the provider is rate-limiting
       // (pause) or the inflight budget is exhausted. The slot is released when
       // the agent's completion settles — or immediately on a launch failure.
-      const gate = coworkRateLimiter.acquire();
+      const gate = towerRateLimiter.acquire();
       if (!gate.ok) {
         return { output: gate.reason, isError: true };
       }
@@ -179,7 +179,7 @@ The briefing prompt is assembled by this tool (worktree path, scope, protocol ru
         let handle: SubagentHandle;
         try {
           handle = await this.subagentHost.spawn({
-            profileName: 'cowork-worker',
+            profileName: 'tower-worker',
             prompt,
             description,
             parentToolCallId: toolCallId,
@@ -195,7 +195,7 @@ The briefing prompt is assembled by this tool (worktree path, scope, protocol ru
           });
         } catch (error) {
           return {
-            output: `cowork spawn failed: ${error instanceof Error ? error.message : String(error)}`,
+            output: `tower spawn failed: ${error instanceof Error ? error.message : String(error)}`,
             isError: true,
           };
         }
@@ -221,7 +221,7 @@ The briefing prompt is assembled by this tool (worktree path, scope, protocol ru
         void handle.completion
           .catch(() => {})
           .finally(() => {
-            coworkRateLimiter.release();
+            towerRateLimiter.release();
           });
         slotHeld = false;
 
@@ -266,21 +266,21 @@ The briefing prompt is assembled by this tool (worktree path, scope, protocol ru
               : [`review_target: ${reviewTarget ?? ''}`]),
             ...notes,
             '',
-            `The ${args.kind} runs detached in the background; its completion arrives as a notification. Track progress with CoworkStatus / CoworkInbox; recover a dead agent with Agent(resume="${handle.agentId}", prompt="...").`,
+            `The ${args.kind} runs detached in the background; its completion arrives as a notification. Track progress with TowerStatus / TowerInbox; recover a dead agent with Agent(resume="${handle.agentId}", prompt="...").`,
           ].join('\n'),
         };
       } finally {
-        if (slotHeld) coworkRateLimiter.release();
+        if (slotHeld) towerRateLimiter.release();
       }
     });
   }
 
   /** Briefings are code-assembled — the tower LLM only supplies `instructions`. */
   private async buildPrompt(
-    args: CoworkSpawnToolInput,
-    store: CoworkStore,
-    state: CoworkState,
-    mission: CoworkMission | undefined,
+    args: TowerSpawnToolInput,
+    store: TowerStore,
+    state: TowerState,
+    mission: TowerMission | undefined,
     reviewTarget: string | undefined,
   ): Promise<string> {
     const extra =
@@ -303,35 +303,35 @@ The briefing prompt is assembled by this tool (worktree path, scope, protocol ru
           : `- Scope — the only files you may change: ${mission.scope.join(', ')}\n\n`);
       if (mission.kind === 'survey') {
         return (
-          `You are "${args.name}", a cowork worker agent in a multi-agent workspace, assigned a READ-ONLY survey mission.\n\n` +
+          `You are "${args.name}", a tower worker agent in a multi-agent workspace, assigned a READ-ONLY survey mission.\n\n` +
           workplace +
           `# Your mission\n\n${missionText.trim()}\n\n` +
           `# Read-only discipline\n` +
           '- Your scope marks what you investigate, not what you may change. You MUST NOT modify, add, or delete any file in the repo, and your branch must end with zero commits — a changed file makes the merge gate reject your mission as a read-only violation.\n' +
-          '- Your deliverables are knowledge: record findings as CoworkMission notes, send summaries to the tower and to dependent agents with CoworkSend, and file CoworkFinding for out-of-scope discoveries.\n\n' +
+          '- Your deliverables are knowledge: record findings as TowerMission notes, send summaries to the tower and to dependent agents with TowerSend, and file TowerFinding for out-of-scope discoveries.\n\n' +
           `# Communication protocol\n` +
-          '- Coordinate through cowork tools ONLY: CoworkSend / CoworkInbox / CoworkFinding / CoworkMission / CoworkStatus. Reach the tower and sibling agents with CoworkSend; check CoworkInbox regularly.\n' +
-          '- NEVER create or edit files under `.cowork/` by hand — the tools are the only writers.\n\n' +
+          '- Coordinate through tower tools ONLY: TowerSend / TowerInbox / TowerFinding / TowerMission / TowerStatus. Reach the tower and sibling agents with TowerSend; check TowerInbox regularly.\n' +
+          '- NEVER create or edit files under `.tower/` by hand — the tools are the only writers.\n\n' +
           `# When the survey is done\n` +
-          `1. Mark the mission completed: CoworkMission(id="${mission.id}", status="completed").\n` +
-          '2. Send the tower your summary: CoworkSend(to="tower", subject="survey-summary", body=the full survey result).\n' +
+          `1. Mark the mission completed: TowerMission(id="${mission.id}", status="completed").\n` +
+          '2. Send the tower your summary: TowerSend(to="tower", subject="survey-summary", body=the full survey result).\n' +
           '3. Finish with a structured final summary: what you covered, key facts with file:line references, open questions.' +
           extra
         );
       }
       return (
-        `You are "${args.name}", a cowork worker agent in a multi-agent workspace.\n\n` +
+        `You are "${args.name}", a tower worker agent in a multi-agent workspace.\n\n` +
         workplace +
         `# Your mission\n\n${missionText.trim()}\n\n` +
         `# Communication protocol\n` +
-        '- Coordinate through cowork tools ONLY: CoworkSend / CoworkInbox / CoworkFinding / CoworkMission / CoworkStatus. Reach the tower and sibling agents with CoworkSend; check CoworkInbox regularly.\n' +
-        '- NEVER create or edit files under `.cowork/` by hand — the tools are the only writers; hand-written protocol files break the merge gate.\n' +
-        '- Found something notable outside your scope? File it with CoworkFinding instead of fixing it.\n' +
-        '- Keep your mission current with CoworkMission: task_done as you finish tasks, note for decisions, blocker when stuck.\n\n' +
+        '- Coordinate through tower tools ONLY: TowerSend / TowerInbox / TowerFinding / TowerMission / TowerStatus. Reach the tower and sibling agents with TowerSend; check TowerInbox regularly.\n' +
+        '- NEVER create or edit files under `.tower/` by hand — the tools are the only writers; hand-written protocol files break the merge gate.\n' +
+        '- Found something notable outside your scope? File it with TowerFinding instead of fixing it.\n' +
+        '- Keep your mission current with TowerMission: task_done as you finish tasks, note for decisions, blocker when stuck.\n\n' +
         `# When the mission is done\n` +
         '1. `git add` + `git commit` everything in your worktree (and `git push` only if a remote is configured).\n' +
-        `2. Mark the mission completed: CoworkMission(id="${mission.id}", status="completed").\n` +
-        '3. Request review: CoworkSend(to="tower", subject="review-request", body=what you changed and why).\n' +
+        `2. Mark the mission completed: TowerMission(id="${mission.id}", status="completed").\n` +
+        '3. Request review: TowerSend(to="tower", subject="review-request", body=what you changed and why).\n' +
         '4. Finish with a structured final summary: files changed, key decisions, open follow-ups.' +
         extra
       );
@@ -339,18 +339,18 @@ The briefing prompt is assembled by this tool (worktree path, scope, protocol ru
     const target = reviewTarget ?? '';
     const author = state.missions.find((m) => m.branch === target)?.owner;
     return (
-      `You are "${args.name}", a cowork reviewer agent in a multi-agent workspace.\n\n` +
+      `You are "${args.name}", a tower reviewer agent in a multi-agent workspace.\n\n` +
       `# Your assignment\n` +
       `Review branch "${target}" against base "${state.base}".\n` +
       `- Work read-only in the main checkout (${store.repoRoot}): \`git diff ${state.base}...${target}\`, \`git log ${state.base}..${target}\`, and read files as needed.\n` +
-      '- Do NOT modify any code, and never create or edit files under `.cowork/` by hand — protocol artifacts go through the cowork tools.\n\n' +
+      '- Do NOT modify any code, and never create or edit files under `.tower/` by hand — protocol artifacts go through the tower tools.\n\n' +
       `# Review checklist (in priority order)\n` +
       '1. Security\n2. Data integrity\n3. Performance\n4. Error handling\n5. Code quality\n\n' +
       `# When done — both steps are mandatory\n` +
-      `1. Submit your verdict with CoworkReview: { target: "${target}", status: "clean" | "p1-Nitems" | "p2-Nitems", merge: "merge" | "fix-then-merge" | "hold", findings, checks, decision }. Only a "clean" review of the exact branch tip lets the tower merge.\n` +
+      `1. Submit your verdict with TowerReview: { target: "${target}", status: "clean" | "p1-Nitems" | "p2-Nitems", merge: "merge" | "fix-then-merge" | "hold", findings, checks, decision }. Only a "clean" review of the exact branch tip lets the tower merge.\n` +
       (author !== undefined
-        ? `2. Notify the author with CoworkSend(to="${author}", subject="review-result", ...).\n`
-        : '2. The author of this branch is not recorded — notify the tower instead: CoworkSend(to="tower", subject="review-result", ...).\n') +
+        ? `2. Notify the author with TowerSend(to="${author}", subject="review-result", ...).\n`
+        : '2. The author of this branch is not recorded — notify the tower instead: TowerSend(to="tower", subject="review-result", ...).\n') +
       'Then finish with a structured summary of the review.' +
       extra
     );

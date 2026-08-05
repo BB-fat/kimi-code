@@ -1,5 +1,5 @@
 /**
- * CoworkInboxTool — read messages addressed to the caller (or broadcast),
+ * TowerInboxTool — read messages addressed to the caller (or broadcast),
  * newest first. The tower sees every message.
  */
 
@@ -9,9 +9,9 @@ import { z } from 'zod';
 import type { BuiltinTool } from '../../../agent/tool';
 import type { ToolExecution } from '../../../loop/types';
 import { toInputJsonSchema } from '../../support/input-schema';
-import { callerName, newStore, runCoworkTool } from './support';
+import { callerName, newStore, runTowerTool } from './support';
 
-export const CoworkInboxToolInputSchema = z
+export const TowerInboxToolInputSchema = z
   .object({
     limit: z
       .number()
@@ -22,23 +22,23 @@ export const CoworkInboxToolInputSchema = z
   })
   .strict();
 
-export type CoworkInboxToolInput = z.infer<typeof CoworkInboxToolInputSchema>;
+export type TowerInboxToolInput = z.infer<typeof TowerInboxToolInputSchema>;
 
 const DEFAULT_LIMIT = 20;
 
-export class CoworkInboxTool implements BuiltinTool<CoworkInboxToolInput> {
-  readonly name = 'CoworkInbox' as const;
-  readonly description: string = `Read your cowork inbox: messages addressed to you plus broadcasts, newest first. The tower sees all messages. Full bodies are included — reply with CoworkSend.`;
-  readonly parameters: Record<string, unknown> = toInputJsonSchema(CoworkInboxToolInputSchema);
+export class TowerInboxTool implements BuiltinTool<TowerInboxToolInput> {
+  readonly name = 'TowerInbox' as const;
+  readonly description: string = `Read your tower inbox: messages addressed to you plus broadcasts, newest first. The tower sees all messages. Full bodies are included — reply with TowerSend.`;
+  readonly parameters: Record<string, unknown> = toInputJsonSchema(TowerInboxToolInputSchema);
 
   constructor(private readonly agent: Agent) {}
 
-  resolveExecution(args: CoworkInboxToolInput): ToolExecution {
+  resolveExecution(args: TowerInboxToolInput): ToolExecution {
     return {
-      description: 'Reading cowork inbox',
+      description: 'Reading tower inbox',
       approvalRule: this.name,
       execute: () =>
-        runCoworkTool(async () => {
+        runTowerTool(async () => {
           const store = newStore(this.agent);
           const state = await store.load();
           const caller = callerName(this.agent, state);

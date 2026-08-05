@@ -2571,9 +2571,9 @@ command = "vim"
     const session = makeSession({
       listSkills: vi.fn(async () => [
         {
-          name: 'cowork',
-          description: 'multi-agent cowork mode',
-          path: 'builtin://cowork',
+          name: 'tower',
+          description: 'multi-agent tower mode',
+          path: 'builtin://tower',
           source: 'builtin',
           type: 'inline',
         },
@@ -2585,9 +2585,9 @@ command = "vim"
     ).refreshSkillCommands(session);
     driver.state.appState.streamingPhase = 'waiting';
 
-    driver.handleUserInput('/cowork refactor auth and ui');
+    driver.handleUserInput('/tower refactor auth and ui');
 
-    expect(session.activateSkill).toHaveBeenCalledWith('cowork', 'refactor auth and ui');
+    expect(session.activateSkill).toHaveBeenCalledWith('tower', 'refactor auth and ui');
     expect(session.prompt).not.toHaveBeenCalled();
     expect(driver.state.queuedMessages).toEqual([]);
     // The live pane keeps belonging to the running turn — no fresh waiting phase.
@@ -2598,9 +2598,9 @@ command = "vim"
     const session = makeSession({
       listSkills: vi.fn(async () => [
         {
-          name: 'cowork',
-          description: 'multi-agent cowork mode',
-          path: 'builtin://cowork',
+          name: 'tower',
+          description: 'multi-agent tower mode',
+          path: 'builtin://tower',
           source: 'builtin',
           type: 'inline',
         },
@@ -2613,15 +2613,15 @@ command = "vim"
     driver.state.appState.isCompacting = true;
     harness.track.mockClear();
 
-    driver.handleUserInput('/cowork refactor auth and ui');
+    driver.handleUserInput('/tower refactor auth and ui');
 
     expect(session.activateSkill).not.toHaveBeenCalled();
     expect(driver.state.queuedMessages).toEqual([
       {
-        text: '/cowork refactor auth and ui',
+        text: '/tower refactor auth and ui',
         agentId: 'main',
         mode: 'skill',
-        skillName: 'cowork',
+        skillName: 'tower',
         skillArgs: 'refactor auth and ui',
       },
     ]);
@@ -2633,7 +2633,7 @@ command = "vim"
     driver.state.queuedMessages = [];
     driver.sendQueuedMessage(session, queued);
 
-    expect(session.activateSkill).toHaveBeenCalledWith('cowork', 'refactor auth and ui');
+    expect(session.activateSkill).toHaveBeenCalledWith('tower', 'refactor auth and ui');
   });
 
   it('steers fresh input while a goal is active even when the streaming phase is idle', async () => {

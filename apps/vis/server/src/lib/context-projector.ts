@@ -498,8 +498,8 @@ export function projectContext(
       case 'swarm_mode.exit':
         swarm = { active: false };
         break;
-      case 'cowork_mode.enter':
-      case 'cowork_mode.exit':
+      case 'tower_mode.enter':
+      case 'tower_mode.exit':
         break;
       // Kinds that don't affect the projected timeline / derived state,
       // including the observability records (request trace — `llm.*`,

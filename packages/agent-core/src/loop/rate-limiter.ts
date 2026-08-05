@@ -6,23 +6,23 @@
  * first provider 429, then capacity snaps to (what was actually running − 1),
  * shrinks by one per subsequent 429 (throttled so a burst is one episode),
  * and recovers +1 per quiet window without 429s. `SubagentBatch` holds one
- * instance per batch; cowork holds a process-wide singleton
- * (`coworkRateLimiter`) fed by `chatWithRetry`, the single funnel for all
- * LLM calls, and adds two cowork-only layers on top: an inflight
+ * instance per batch; tower holds a process-wide singleton
+ * (`towerRateLimiter`) fed by `chatWithRetry`, the single funnel for all
+ * LLM calls, and adds two tower-only layers on top: an inflight
  * acquire/release counter and a short spawn pause after each 429.
  */
 
 export const RATE_LIMIT_CAPACITY_SHRINK_INTERVAL_MS = 2_000;
 export const RATE_LIMIT_CAPACITY_RECOVERY_INTERVAL_MS = 180_000;
-/** Cowork-only: how long new spawns stay paused after a 429 episode. */
-export const COWORK_SPAWN_PAUSE_MS = 60_000;
-/** Cowork-only: ceiling the capacity may recover to. */
-export const COWORK_MAX_BUDGET = 16;
+/** Tower-only: how long new spawns stay paused after a 429 episode. */
+export const TOWER_SPAWN_PAUSE_MS = 60_000;
+/** Tower-only: ceiling the capacity may recover to. */
+export const TOWER_MAX_BUDGET = 16;
 
 /**
  * The extracted swarm capacity state machine. `activeCount` is always
  * caller-supplied — the governor deliberately does not know what it is
- * governing, which is what lets a batch and the cowork singleton share it.
+ * governing, which is what lets a batch and the tower singleton share it.
  */
 export class RateLimitCapacityGovernor {
   private capacity = Number.POSITIVE_INFINITY;
@@ -98,19 +98,19 @@ export class RateLimitCapacityGovernor {
 }
 
 export interface RateLimiterSnapshot {
-  /** Effective cowork spawn budget: governor capacity clamped to the max. */
+  /** Effective tower spawn budget: governor capacity clamped to the max. */
   readonly budget: number;
-  /** Cowork agents currently running (acquired, not yet released). */
+  /** Tower agents currently running (acquired, not yet released). */
   readonly inflight: number;
   /** Epoch ms while which new spawns are refused; null when unblocked. */
   readonly blockedUntil: number | null;
 }
 
 /**
- * The cowork face of the governor: a process-wide singleton with inflight
+ * The tower face of the governor: a process-wide singleton with inflight
  * tracking, a post-429 spawn pause (lifted early by the next success), and a
  * recovery ceiling. Signal collection lives in `chatWithRetry`
- * (`./retry.ts`); enforcement lives in `CoworkSpawn`.
+ * (`./retry.ts`); enforcement lives in `TowerSpawn`.
  */
 export class RateLimiter {
   private readonly governor: RateLimitCapacityGovernor;
@@ -130,11 +130,11 @@ export class RateLimiter {
   }
 
   private get maxBudget(): number {
-    return this.options.maxBudget ?? COWORK_MAX_BUDGET;
+    return this.options.maxBudget ?? TOWER_MAX_BUDGET;
   }
 
   private get pauseMs(): number {
-    return this.options.pauseMs ?? COWORK_SPAWN_PAUSE_MS;
+    return this.options.pauseMs ?? TOWER_SPAWN_PAUSE_MS;
   }
 
   /** A retryable provider 429 from any agent in the process. */
@@ -149,7 +149,7 @@ export class RateLimiter {
     this.governor.maybeRecover();
   }
 
-  /** The current spawn budget: governor capacity, clamped to the cowork max. */
+  /** The current spawn budget: governor capacity, clamped to the tower max. */
   budget(): number {
     this.governor.maybeRecover();
     return Math.max(1, Math.min(this.maxBudget, this.governor.getCapacity()));
@@ -163,7 +163,7 @@ export class RateLimiter {
         return {
           ok: false,
           reason:
-            `provider rate limit hit — new cowork spawns paused for ~${String(retryAfterS)}s. ` +
+            `provider rate limit hit — new tower spawns paused for ~${String(retryAfterS)}s. ` +
             'Successful requests lift the pause early; wait and retry, or let running agents finish first.',
         };
       }
@@ -174,7 +174,7 @@ export class RateLimiter {
       return {
         ok: false,
         reason:
-          `cowork concurrency budget exhausted (${String(this.inflight)}/${String(budget)} agents running). ` +
+          `tower concurrency budget exhausted (${String(this.inflight)}/${String(budget)} agents running). ` +
           'Wait for a running agent to complete, then retry.',
       };
     }
@@ -203,4 +203,4 @@ export class RateLimiter {
 }
 
 /** Process-wide singleton: one CLI process shares one provider account. */
-export const coworkRateLimiter = new RateLimiter();
+export const towerRateLimiter = new RateLimiter();

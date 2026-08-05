@@ -134,7 +134,7 @@ export interface SpawnSubagentOptions extends RunSubagentOptions {
   readonly modelChoice?: SubagentModelChoice;
   /**
    * Working-directory override for the child. Defaults to the parent's cwd.
-   * Used by cowork to confine a worker to its git worktree: relative paths,
+   * Used by tower to confine a worker to its git worktree: relative paths,
    * the workspace guard, and the Bash default cwd all anchor there instead of
    * the main checkout.
    */

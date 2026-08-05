@@ -1,5 +1,5 @@
 /**
- * CoworkMergeTool — the tower's merge lever. The store is the hard gate: it
+ * TowerMergeTool — the tower's merge lever. The store is the hard gate: it
  * refuses when the branch has no review, the latest review is not clean, the
  * branch tip moved since the clean review, dependencies are unmerged, or the
  * branch changed files outside its mission scope. After a successful merge it
@@ -13,9 +13,9 @@ import { z } from 'zod';
 import type { BuiltinTool } from '../../../agent/tool';
 import type { ToolExecution } from '../../../loop/types';
 import { toInputJsonSchema } from '../../support/input-schema';
-import { newStore, runCoworkTool } from './support';
+import { newStore, runTowerTool } from './support';
 
-export const CoworkMergeToolInputSchema = z
+export const TowerMergeToolInputSchema = z
   .object({
     branch: z
       .string()
@@ -23,23 +23,23 @@ export const CoworkMergeToolInputSchema = z
   })
   .strict();
 
-export type CoworkMergeToolInput = z.infer<typeof CoworkMergeToolInputSchema>;
+export type TowerMergeToolInput = z.infer<typeof TowerMergeToolInputSchema>;
 
-export class CoworkMergeTool implements BuiltinTool<CoworkMergeToolInput> {
-  readonly name = 'CoworkMerge' as const;
-  readonly description: string = `Merge a cowork mission branch into the base branch (--no-ff).
+export class TowerMergeTool implements BuiltinTool<TowerMergeToolInput> {
+  readonly name = 'TowerMerge' as const;
+  readonly description: string = `Merge a tower mission branch into the base branch (--no-ff).
 
 Hard gate, enforced by the store — the merge is refused unless: the branch's latest review is "clean" and was written against the current branch tip, all dependency missions are already merged, and every changed file falls inside the mission's declared scope. On refusal, the error message tells you exactly what to do next (assign a reviewer, wait for fixes, re-review a moved tip, merge deps first, widen the scope or revert the extra changes). After a merge, branches reported as conflicting must rebase onto the new base and be re-reviewed before they can merge.`;
-  readonly parameters: Record<string, unknown> = toInputJsonSchema(CoworkMergeToolInputSchema);
+  readonly parameters: Record<string, unknown> = toInputJsonSchema(TowerMergeToolInputSchema);
 
   constructor(private readonly agent: Agent) {}
 
-  resolveExecution(args: CoworkMergeToolInput): ToolExecution {
+  resolveExecution(args: TowerMergeToolInput): ToolExecution {
     return {
-      description: `Merging cowork branch: ${args.branch}`,
+      description: `Merging tower branch: ${args.branch}`,
       approvalRule: this.name,
       execute: () =>
-        runCoworkTool(async () => {
+        runTowerTool(async () => {
           const store = newStore(this.agent);
           const { mergeCommit, conflictsWith, noop } = await store.merge(args.branch);
           if (noop === true) {

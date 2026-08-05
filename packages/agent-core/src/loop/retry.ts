@@ -7,7 +7,7 @@ import { abortable } from '../utils/abort';
 import type { LoopEventDispatcher } from './events';
 import { isAbortError } from './errors';
 import type { LLM, LLMChatParams, LLMChatResponse } from './llm';
-import { coworkRateLimiter } from './rate-limiter';
+import { towerRateLimiter } from './rate-limiter';
 
 // Default retry budget per step: 10 attempts (9 retries). With the
 // exponential ramp below the backoff climbs 0.5s, 1s, 2s … up to the 32s
@@ -45,7 +45,7 @@ export async function chatWithRetry(input: ChatWithRetryInput): Promise<LLMChatR
     try {
       const response = await input.llm.chat(paramsForAttempt(input, 1, effectiveMaxAttempts));
       input.params.trace?.capture(response.traceId);
-      coworkRateLimiter.reportSuccess();
+      towerRateLimiter.reportSuccess();
       return response;
     } catch (error) {
       captureAttemptTraceId(input, error);
@@ -62,7 +62,7 @@ export async function chatWithRetry(input: ChatWithRetryInput): Promise<LLMChatR
     try {
       const response = await input.llm.chat(paramsForAttempt(input, attempt, maxAttempts));
       input.params.trace?.capture(response.traceId);
-      coworkRateLimiter.reportSuccess();
+      towerRateLimiter.reportSuccess();
       return response;
     } catch (error) {
       captureAttemptTraceId(input, error);
@@ -95,7 +95,7 @@ export async function chatWithRetry(input: ChatWithRetryInput): Promise<LLMChatR
 
 /**
  * Feed the adaptive concurrency governor: a retryable provider 429 is
- * congestion (shrink the budget, pause new cowork spawns); quota/balance
+ * congestion (shrink the budget, pause new tower spawns); quota/balance
  * exhaustion shares the status code but is billing — it must not touch the
  * budget.
  */
@@ -103,7 +103,7 @@ function reportToRateLimiter(error: unknown): void {
   if (error instanceof APIProviderQuotaExhaustedError) return;
   if (findAPIStatusError(error) instanceof APIProviderQuotaExhaustedError) return;
   if (maybeStatusCode(error) === 429 || findAPIStatusError(error)?.statusCode === 429) {
-    coworkRateLimiter.reportRateLimited();
+    towerRateLimiter.reportRateLimited();
   }
 }
 

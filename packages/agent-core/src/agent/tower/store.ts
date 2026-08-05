@@ -1,5 +1,5 @@
 /**
- * CoworkStore — the code-enforced half of the cowork protocol.
+ * TowerStore — the code-enforced half of the tower protocol.
  *
  * Every comms artifact (inbox message, finding, review, mission file,
  * MISSIONS.md, activity log line) is produced HERE, never by an agent writing
@@ -8,7 +8,7 @@
  * rounds, the merge gate, and the exact activity-log format are not subject
  * to model discipline.
  *
- * State lives in `.cowork/comms/state.json` (machine truth). `MISSIONS.md`
+ * State lives in `.tower/comms/state.json` (machine truth). `MISSIONS.md`
  * and `missions/*.md` are regenerated human views after every mutation.
  * All store instances in the process share one activity log via append-only
  * `fs.appendFile` — one line per action, written immediately.
@@ -54,39 +54,39 @@ import {
   targetSlug,
 } from './paths';
 import type {
-  CoworkFindingSeverity,
-  CoworkFindingType,
-  CoworkInboxItem,
-  CoworkMission,
-  CoworkMissionKind,
-  CoworkMissionStatus,
-  CoworkReviewInfo,
-  CoworkRosterEntry,
-  CoworkState,
+  TowerFindingSeverity,
+  TowerFindingType,
+  TowerInboxItem,
+  TowerMission,
+  TowerMissionKind,
+  TowerMissionStatus,
+  TowerReviewInfo,
+  TowerRosterEntry,
+  TowerState,
 } from './types';
 
-export class CoworkProtocolError extends Error {
+export class TowerProtocolError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = 'CoworkProtocolError';
+    this.name = 'TowerProtocolError';
   }
 }
 
-export interface CoworkInitResult {
+export interface TowerInitResult {
   readonly base: string;
   readonly created: boolean;
 }
 
-export interface CoworkPlanInput {
+export interface TowerPlanInput {
   readonly title: string;
   readonly scope: readonly string[];
   readonly tasks?: readonly string[];
   readonly deps?: readonly string[];
   /** Defaults to `build`. `survey` missions are read-only and reserve no scope. */
-  readonly kind?: CoworkMissionKind;
+  readonly kind?: TowerMissionKind;
 }
 
-export interface CoworkSendInput {
+export interface TowerSendInput {
   readonly to: string;
   readonly subject: string;
   readonly body: string;
@@ -95,17 +95,17 @@ export interface CoworkSendInput {
   readonly consentRef?: string;
 }
 
-export interface CoworkFindingInput {
-  readonly type: CoworkFindingType;
+export interface TowerFindingInput {
+  readonly type: TowerFindingType;
   readonly title: string;
-  readonly severity?: CoworkFindingSeverity;
+  readonly severity?: TowerFindingSeverity;
   readonly summary: string;
   readonly location?: string;
   readonly details: string;
   readonly suggestedFix: string;
 }
 
-export interface CoworkReviewInput {
+export interface TowerReviewInput {
   readonly target: string;
   readonly status: string;
   readonly merge: string;
@@ -114,8 +114,8 @@ export interface CoworkReviewInput {
   readonly decision: string;
 }
 
-export interface CoworkMissionPatch {
-  readonly status?: CoworkMissionStatus;
+export interface TowerMissionPatch {
+  readonly status?: TowerMissionStatus;
   readonly note?: string;
   readonly blocker?: string;
   readonly clearBlockers?: boolean;
@@ -126,8 +126,8 @@ export interface CoworkMissionPatch {
   readonly scope?: readonly string[];
 }
 
-const FINDING_TYPES: readonly CoworkFindingType[] = ['bug', 'improve', 'vuln', 'idea'];
-const STATUS_EMOJI: Record<CoworkMissionStatus, string> = {
+const FINDING_TYPES: readonly TowerFindingType[] = ['bug', 'improve', 'vuln', 'idea'];
+const STATUS_EMOJI: Record<TowerMissionStatus, string> = {
   planned: '🟡',
   active: '🔵',
   completed: '🟢',
@@ -136,7 +136,7 @@ const STATUS_EMOJI: Record<CoworkMissionStatus, string> = {
   merged: '✅',
 };
 
-export class CoworkStore {
+export class TowerStore {
   /** Absolute path of the main checkout (the session working directory). */
   constructor(readonly repoRoot: string) {}
 
@@ -154,17 +154,17 @@ export class CoworkStore {
   }
 
   /**
-   * Create the `.cowork/` skeleton. Safe to call twice — an existing
+   * Create the `.tower/` skeleton. Safe to call twice — an existing
    * workspace is reported, never reset.
    */
-  async init(): Promise<CoworkInitResult> {
+  async init(): Promise<TowerInitResult> {
     if (!(await isInsideRepo(this.repoRoot))) {
-      throw new CoworkProtocolError(
-        'cowork needs a git repository (the session working directory is not inside one)',
+      throw new TowerProtocolError(
+        'tower needs a git repository (the session working directory is not inside one)',
       );
     }
     if (!(await hasAnyCommit(this.repoRoot))) {
-      throw new CoworkProtocolError(
+      throw new TowerProtocolError(
         'the repository has no commits yet — create an initial commit first',
       );
     }
@@ -179,7 +179,7 @@ export class CoworkStore {
     await this.ensureGitExclude();
 
     const base = await currentBranch(this.repoRoot);
-    const state: CoworkState = {
+    const state: TowerState = {
       version: 1,
       base,
       mode: 'branch',
@@ -194,7 +194,7 @@ export class CoworkStore {
     return { base, created: true };
   }
 
-  /** Add `.cowork/` to `.git/info/exclude` (repo-local; tracked .gitignore stays untouched). */
+  /** Add `.tower/` to `.git/info/exclude` (repo-local; tracked .gitignore stays untouched). */
   private async ensureGitExclude(): Promise<void> {
     const gitDir = (await readGitDir(this.repoRoot)) ?? join(this.repoRoot, '.git');
     const excludePath = join(gitDir, 'info', 'exclude');
@@ -205,20 +205,20 @@ export class CoworkStore {
     } catch {
       // no exclude file yet
     }
-    if (existing.split(/\r?\n/).some((line) => line.trim() === '.cowork/')) return;
-    await appendFile(excludePath, `${existing.endsWith('\n') || existing.length === 0 ? '' : '\n'}.cowork/\n`, 'utf8');
+    if (existing.split(/\r?\n/).some((line) => line.trim() === '.tower/')) return;
+    await appendFile(excludePath, `${existing.endsWith('\n') || existing.length === 0 ? '' : '\n'}.tower/\n`, 'utf8');
   }
 
-  async load(): Promise<CoworkState> {
+  async load(): Promise<TowerState> {
     let raw: string;
     try {
       raw = await readFile(this.abs(STATE_FILE), 'utf8');
     } catch {
-      throw new CoworkProtocolError(
-        'cowork is not initialized in this repository — run CoworkInit first',
+      throw new TowerProtocolError(
+        'tower is not initialized in this repository — run TowerInit first',
       );
     }
-    const state = JSON.parse(raw) as CoworkState;
+    const state = JSON.parse(raw) as TowerState;
     // Backward compat: state files written before mission kinds existed are all builds.
     for (const mission of state.missions) {
       mission.kind ??= 'build';
@@ -226,7 +226,7 @@ export class CoworkStore {
     return state;
   }
 
-  private async save(state: CoworkState): Promise<void> {
+  private async save(state: TowerState): Promise<void> {
     const file = this.abs(STATE_FILE);
     const tmp = `${file}.tmp`;
     await writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
@@ -268,18 +268,18 @@ export class CoworkStore {
   // Roster
   // ---------------------------------------------------------------------
 
-  resolveCallerName(state: CoworkState, agentId: string): string {
+  resolveCallerName(state: TowerState, agentId: string): string {
     if (agentId === 'main') return TOWER_NAME;
     const entry = state.roster.agents.find((agent) => agent.agentId === agentId);
     if (entry === undefined) {
-      throw new CoworkProtocolError(
-        `agent "${agentId}" is not a cowork participant — only spawned workers/reviewers and the tower can use cowork tools`,
+      throw new TowerProtocolError(
+        `agent "${agentId}" is not a tower participant — only spawned workers/reviewers and the tower can use tower tools`,
       );
     }
     return entry.name;
   }
 
-  findAgent(state: CoworkState, name: string): CoworkRosterEntry | undefined {
+  findAgent(state: TowerState, name: string): TowerRosterEntry | undefined {
     return state.roster.agents.find((agent) => agent.name === name);
   }
 
@@ -287,14 +287,14 @@ export class CoworkStore {
    * Register a spawned agent. Returns the existing entry when the name is
    * already taken — callers implement "resume instead of duplicate spawn".
    */
-  findByName(state: CoworkState, name: string): CoworkRosterEntry | undefined {
+  findByName(state: TowerState, name: string): TowerRosterEntry | undefined {
     return this.findAgent(state, name);
   }
 
-  async registerAgent(entry: CoworkRosterEntry): Promise<void> {
+  async registerAgent(entry: TowerRosterEntry): Promise<void> {
     const state = await this.load();
     if (this.findAgent(state, entry.name) !== undefined) {
-      throw new CoworkProtocolError(`cowork agent name "${entry.name}" is already registered`);
+      throw new TowerProtocolError(`tower agent name "${entry.name}" is already registered`);
     }
     state.roster.agents.push(entry);
     await this.save(state);
@@ -304,14 +304,14 @@ export class CoworkStore {
   // Missions
   // ---------------------------------------------------------------------
 
-  async plan(input: readonly CoworkPlanInput[]): Promise<readonly CoworkMission[]> {
+  async plan(input: readonly TowerPlanInput[]): Promise<readonly TowerMission[]> {
     if (input.length === 0) {
-      throw new CoworkProtocolError('CoworkPlan needs at least one mission');
+      throw new TowerProtocolError('TowerPlan needs at least one mission');
     }
     const state = await this.load();
     const startIndex = state.missions.length;
 
-    const missions: CoworkMission[] = input.map((item, index) => {
+    const missions: TowerMission[] = input.map((item, index) => {
       const n = startIndex + index + 1;
       const slug = slugify(item.title, 40);
       return {
@@ -335,7 +335,7 @@ export class CoworkStore {
     for (const mission of missions) {
       for (const dep of mission.deps) {
         if (!knownIds.has(dep)) {
-          throw new CoworkProtocolError(`mission ${mission.id} depends on unknown mission "${dep}"`);
+          throw new TowerProtocolError(`mission ${mission.id} depends on unknown mission "${dep}"`);
         }
       }
     }
@@ -367,14 +367,14 @@ export class CoworkStore {
    * nothing, so they never conflict. Two build scopes conflict when one is a
    * path prefix of the other after stripping trailing `**` / `*` wildcards.
    */
-  private assertScopesDisjoint(missions: readonly CoworkMission[]): void {
+  private assertScopesDisjoint(missions: readonly TowerMission[]): void {
     const scopes: Array<{ readonly id: string; readonly raw: string; readonly stem: string }> = [];
     for (const mission of missions) {
       if (mission.kind === 'survey') continue;
       for (const raw of mission.scope) {
         const stem = raw.replace(/\/\*\*?$/, '').replace(/\*$/, '').replace(/\/+$/, '');
         if (stem.length === 0) {
-          throw new CoworkProtocolError(
+          throw new TowerProtocolError(
             `mission ${mission.id} scope "${raw}" covers the whole repo — narrow it down`,
           );
         }
@@ -387,7 +387,7 @@ export class CoworkStore {
         const b = scopes[j]!;
         if (a.id === b.id) continue;
         if (a.stem === b.stem || a.stem.startsWith(`${b.stem}/`) || b.stem.startsWith(`${a.stem}/`)) {
-          throw new CoworkProtocolError(
+          throw new TowerProtocolError(
             `mission scopes overlap: ${a.id} ("${a.raw}") vs ${b.id} ("${b.raw}") — split the shared files into exactly one mission`,
           );
         }
@@ -398,18 +398,18 @@ export class CoworkStore {
   async updateMission(
     callerName: string,
     id: string,
-    patch: CoworkMissionPatch,
+    patch: TowerMissionPatch,
     options: { readonly silent?: boolean } = {},
-  ): Promise<CoworkMission> {
+  ): Promise<TowerMission> {
     const state = await this.load();
     const mission = state.missions.find((m) => m.id === id);
     if (mission === undefined) {
-      throw new CoworkProtocolError(`unknown mission "${id}"`);
+      throw new TowerProtocolError(`unknown mission "${id}"`);
     }
     if (callerName !== TOWER_NAME) {
       const caller = this.findAgent(state, callerName);
       if (caller?.kind !== 'worker' || caller.missionId !== id) {
-        throw new CoworkProtocolError(
+        throw new TowerProtocolError(
           `agent "${callerName}" does not own mission ${id} — workers update only their own mission file`,
         );
       }
@@ -429,7 +429,7 @@ export class CoworkStore {
 
     if (patch.owner !== undefined) {
       if (callerName !== TOWER_NAME) {
-        throw new CoworkProtocolError(
+        throw new TowerProtocolError(
           `agent "${callerName}" cannot assign mission ownership — only the tower sets owner`,
         );
       }
@@ -437,7 +437,7 @@ export class CoworkStore {
     }
     if (patch.scope !== undefined) {
       if (callerName !== TOWER_NAME) {
-        throw new CoworkProtocolError(
+        throw new TowerProtocolError(
           `agent "${callerName}" cannot change mission scope — only the tower widens a scope, and every change is logged`,
         );
       }
@@ -457,7 +457,7 @@ export class CoworkStore {
     if (patch.taskDone !== undefined) {
       const task = mission.tasks.find((t) => !t.done && t.text.includes(patch.taskDone!));
       if (task === undefined) {
-        throw new CoworkProtocolError(
+        throw new TowerProtocolError(
           `mission ${id} has no open task matching "${patch.taskDone}"`,
         );
       }
@@ -494,7 +494,7 @@ export class CoworkStore {
   // Inbox
   // ---------------------------------------------------------------------
 
-  async send(callerName: string, input: CoworkSendInput): Promise<string> {
+  async send(callerName: string, input: TowerSendInput): Promise<string> {
     const state = await this.load();
     const to = input.to.trim();
     if (
@@ -503,12 +503,12 @@ export class CoworkStore {
       this.findAgent(state, to) === undefined
     ) {
       const known = [TOWER_NAME, BROADCAST_NAME, ...state.roster.agents.map((a) => a.name)];
-      throw new CoworkProtocolError(
+      throw new TowerProtocolError(
         `unknown recipient "${to}" — address a roster agent, ${TOWER_NAME}, or ${BROADCAST_NAME} (known: ${known.join(', ')})`,
       );
     }
     if (to === callerName) {
-      throw new CoworkProtocolError('cannot send an inbox message to yourself');
+      throw new TowerProtocolError('cannot send an inbox message to yourself');
     }
 
     const frontmatter = renderFrontmatter({
@@ -530,14 +530,14 @@ export class CoworkStore {
   }
 
   /** Newest-first messages addressed to `callerName` or broadcast. The tower sees everything. */
-  async readInbox(callerName: string, limit: number): Promise<readonly CoworkInboxItem[]> {
+  async readInbox(callerName: string, limit: number): Promise<readonly TowerInboxItem[]> {
     let files: string[];
     try {
       files = await readdir(this.abs(INBOX_DIR));
     } catch {
       return [];
     }
-    const items: CoworkInboxItem[] = [];
+    const items: TowerInboxItem[] = [];
     for (const file of files.filter((f) => f.endsWith('.md'))) {
       const rel = join(INBOX_DIR, file);
       let text: string;
@@ -572,9 +572,9 @@ export class CoworkStore {
   // Findings
   // ---------------------------------------------------------------------
 
-  async fileFinding(callerName: string, input: CoworkFindingInput): Promise<string> {
+  async fileFinding(callerName: string, input: TowerFindingInput): Promise<string> {
     if (!FINDING_TYPES.includes(input.type)) {
-      throw new CoworkProtocolError(
+      throw new TowerProtocolError(
         `finding type must be one of ${FINDING_TYPES.join(' | ')}`,
       );
     }
@@ -615,7 +615,7 @@ export class CoworkStore {
       '',
       '---',
       '',
-      `*Filed by cowork agent ${callerName} via \`${FINDINGS_DIR}/\`*`,
+      `*Filed by tower agent ${callerName} via \`${FINDINGS_DIR}/\`*`,
       '',
     ];
     const baseName = findingFileName({
@@ -632,23 +632,23 @@ export class CoworkStore {
   // Reviews
   // ---------------------------------------------------------------------
 
-  async submitReview(callerName: string, input: CoworkReviewInput): Promise<string> {
+  async submitReview(callerName: string, input: TowerReviewInput): Promise<string> {
     const state = await this.load();
     if (callerName !== TOWER_NAME) {
       const caller = this.findAgent(state, callerName);
       if (caller?.kind !== 'reviewer' || caller.reviewTarget !== input.target) {
-        throw new CoworkProtocolError(
+        throw new TowerProtocolError(
           `agent "${callerName}" is not an assigned reviewer for "${input.target}"`,
         );
       }
     }
     if (!/^(clean|p[12]-\d+items)$/.test(input.status)) {
-      throw new CoworkProtocolError(
+      throw new TowerProtocolError(
         `review status must be clean | p1-Nitems | p2-Nitems, got "${input.status}"`,
       );
     }
     if (!['merge', 'fix-then-merge', 'hold'].includes(input.merge)) {
-      throw new CoworkProtocolError(
+      throw new TowerProtocolError(
         `review merge verdict must be merge | fix-then-merge | hold, got "${input.merge}"`,
       );
     }
@@ -696,7 +696,7 @@ export class CoworkStore {
     return rel;
   }
 
-  async reviewsFor(target: string): Promise<readonly CoworkReviewInfo[]> {
+  async reviewsFor(target: string): Promise<readonly TowerReviewInfo[]> {
     let files: string[];
     try {
       files = await readdir(this.abs(REVIEWS_DIR));
@@ -704,7 +704,7 @@ export class CoworkStore {
       return [];
     }
     const prefix = `review-${targetSlug(target)}-`;
-    const reviews: CoworkReviewInfo[] = [];
+    const reviews: TowerReviewInfo[] = [];
     for (const file of files.filter((f) => f.startsWith(prefix) && f.endsWith('.md'))) {
       const rel = join(REVIEWS_DIR, file);
       let text: string;
@@ -731,7 +731,7 @@ export class CoworkStore {
     return reviews;
   }
 
-  async latestReview(target: string): Promise<CoworkReviewInfo | undefined> {
+  async latestReview(target: string): Promise<TowerReviewInfo | undefined> {
     const reviews = await this.reviewsFor(target);
     return reviews.at(-1);
   }
@@ -750,13 +750,13 @@ export class CoworkStore {
     const state = await this.load();
     const mission = state.missions.find((m) => m.branch === branch);
     if (mission === undefined) {
-      throw new CoworkProtocolError(`no cowork mission owns branch "${branch}"`);
+      throw new TowerProtocolError(`no tower mission owns branch "${branch}"`);
     }
     // A blocked merge is a decision with a reason — it belongs in the
     // activity log just as much as a successful one.
-    const block = async (reason: string, message: string): Promise<CoworkProtocolError> => {
+    const block = async (reason: string, message: string): Promise<TowerProtocolError> => {
       await this.appendLog(TOWER_NAME, 'merge.blocked', { branch, reason });
-      return new CoworkProtocolError(message);
+      return new TowerProtocolError(message);
     };
 
     const unmergedDeps = mission.deps.filter((dep) => {
@@ -814,7 +814,7 @@ export class CoworkStore {
     // Scope isolation, enforced: every file the branch changed must fall
     // inside the mission's declared scope globs (picomatch semantics — `**`
     // crosses directories). A legitimate expansion goes through a tower
-    // CoworkMission scope update first, which is logged.
+    // TowerMission scope update first, which is logged.
     const changed = await diffNameOnly(this.repoRoot, state.base, branch);
     const outOfScope = changed.filter(
       (file) => !mission.scope.some((glob) => picomatch.isMatch(file, glob)),
@@ -822,7 +822,7 @@ export class CoworkStore {
     if (outOfScope.length > 0) {
       throw await block(
         'out-of-scope',
-        `merge blocked: ${branch} changed files outside mission ${mission.id} scope (${mission.scope.join(', ')}): ${outOfScope.join(', ')} — the tower must widen the mission scope (CoworkMission scope patch) or revert those changes`,
+        `merge blocked: ${branch} changed files outside mission ${mission.id} scope (${mission.scope.join(', ')}): ${outOfScope.join(', ')} — the tower must widen the mission scope (TowerMission scope patch) or revert those changes`,
       );
     }
 
@@ -891,7 +891,7 @@ export class CoworkStore {
   // Human views (generated, never hand-edited)
   // ---------------------------------------------------------------------
 
-  private async renderMissionsIndex(state: CoworkState): Promise<void> {
+  private async renderMissionsIndex(state: TowerState): Promise<void> {
     const rows = state.missions.map(
       (m) =>
         `| ${m.id} | ${m.title} | ${m.branch} | ${m.worktree} | ${STATUS_EMOJI[m.status]} | ${m.owner ?? '—'} |`,
@@ -905,7 +905,7 @@ export class CoworkStore {
     const content = [
       '# MISSIONS',
       '',
-      '<!-- Generated by cowork tools from state.json — do not edit by hand. -->',
+      '<!-- Generated by tower tools from state.json — do not edit by hand. -->',
       '',
       '| ID | Mission | Branch | Worktree | Status | Owner |',
       '| -- | ------- | ------ | -------- | ------ | ----- |',
@@ -924,12 +924,12 @@ export class CoworkStore {
     await writeFile(this.abs(MISSIONS_INDEX), content, 'utf8');
   }
 
-  private async renderMissionFile(mission: CoworkMission): Promise<void> {
+  private async renderMissionFile(mission: TowerMission): Promise<void> {
     const rel = join(MISSIONS_DIR, missionFileName(mission.id, mission.slug));
     const content = [
       `# Mission ${mission.id}: ${mission.title}${mission.kind === 'survey' ? ' 🔍 (read-only survey)' : ''}`,
       '',
-      '<!-- Generated by cowork tools from state.json — update via the CoworkMission tool. -->',
+      '<!-- Generated by tower tools from state.json — update via the TowerMission tool. -->',
       '',
       '| Branch | Worktree | Status | Scope | Owner |',
       '| ------ | -------- | ------ | ----- | ----- |',
@@ -981,7 +981,7 @@ export class CoworkStore {
         throw error;
       }
     }
-    throw new CoworkProtocolError(`could not create a unique file for ${rel}`);
+    throw new TowerProtocolError(`could not create a unique file for ${rel}`);
   }
 }
 

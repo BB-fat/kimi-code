@@ -1,5 +1,5 @@
 /**
- * Git plumbing for cowork. Engine-internal operations (worktree add/remove,
+ * Git plumbing for tower. Engine-internal operations (worktree add/remove,
  * merge, diff) run through `execFile` with a hard timeout — these are not
  * agent-invoked shell commands, so they do not go through the Bash tool.
  */

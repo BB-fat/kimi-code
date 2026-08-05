@@ -116,30 +116,30 @@ describe('default agent profiles', () => {
     expect(prompt).not.toContain('# Plugin Instructions');
   });
 
-  it('wires the cowork-worker profile into the default set', () => {
+  it('wires the tower-worker profile into the default set', () => {
     const agent = DEFAULT_AGENT_PROFILES['agent'];
-    expect(agent?.tools).toContain('CoworkInit');
-    expect(Object.keys(agent?.subagents ?? {})).toContain('cowork-worker');
+    expect(agent?.tools).toContain('TowerInit');
+    expect(Object.keys(agent?.subagents ?? {})).toContain('tower-worker');
 
-    const tools = DEFAULT_AGENT_PROFILES['cowork-worker']?.tools ?? [];
+    const tools = DEFAULT_AGENT_PROFILES['tower-worker']?.tools ?? [];
     expect(tools).toEqual(
       expect.arrayContaining([
-        'CoworkSend',
-        'CoworkInbox',
-        'CoworkFinding',
-        'CoworkReview',
-        'CoworkMission',
-        'CoworkStatus',
+        'TowerSend',
+        'TowerInbox',
+        'TowerFinding',
+        'TowerReview',
+        'TowerMission',
+        'TowerStatus',
       ]),
     );
     // Tower tools stay with the main agent; workers get the shared set only.
-    for (const name of ['CoworkInit', 'CoworkPlan', 'CoworkSpawn', 'CoworkMerge', 'CoworkTeardown']) {
+    for (const name of ['TowerInit', 'TowerPlan', 'TowerSpawn', 'TowerMerge', 'TowerTeardown']) {
       expect(tools).not.toContain(name);
     }
 
-    const prompt = DEFAULT_AGENT_PROFILES['cowork-worker']?.systemPrompt(promptContext) ?? '';
-    expect(prompt).toContain('cowork worker/reviewer');
-    expect(prompt).toContain('Cowork* tools ONLY');
+    const prompt = DEFAULT_AGENT_PROFILES['tower-worker']?.systemPrompt(promptContext) ?? '';
+    expect(prompt).toContain('tower worker/reviewer');
+    expect(prompt).toContain('Tower* tools ONLY');
   });
 
   it('keeps optional-tool guidance out of the shared system prompt entirely', () => {

@@ -10,7 +10,7 @@ import { describe, expect, it, beforeEach } from 'vitest';
 import type { KimiConfig } from '#/config';
 import { ErrorCodes, KimiError } from '#/errors';
 import type { LLM, LLMChatParams, LLMChatResponse } from '#/loop/llm';
-import { coworkRateLimiter } from '#/loop/rate-limiter';
+import { towerRateLimiter } from '#/loop/rate-limiter';
 import { chatWithRetry, DEFAULT_MAX_RETRY_ATTEMPTS, retryBackoffDelays } from '#/loop/retry';
 import { ProviderManager } from '#/session/provider-manager';
 
@@ -305,12 +305,12 @@ function oauthConfig(): KimiConfig {
 
 describe('chatWithRetry: adaptive rate limiter integration', () => {
   beforeEach(() => {
-    coworkRateLimiter.reset();
+    towerRateLimiter.reset();
   });
 
-  it('shrinks the cowork spawn budget around inflight agents when an attempt is rate-limited', async () => {
-    // One running cowork agent: the 429 anchors the budget to (inflight − 1).
-    expect(coworkRateLimiter.acquire().ok).toBe(true);
+  it('shrinks the tower spawn budget around inflight agents when an attempt is rate-limited', async () => {
+    // One running tower agent: the 429 anchors the budget to (inflight − 1).
+    expect(towerRateLimiter.acquire().ok).toBe(true);
 
     let calls = 0;
     const llm: LLM = {
@@ -325,12 +325,12 @@ describe('chatWithRetry: adaptive rate limiter integration', () => {
     };
     await chatWithRetry(makeInput(llm, new AbortController().signal));
 
-    const snapshot = coworkRateLimiter.snapshot();
+    const snapshot = towerRateLimiter.snapshot();
     expect(snapshot.budget).toBe(1);
     expect(snapshot.inflight).toBe(1);
     // The recovering second attempt succeeded, which lifts the pause early.
     expect(snapshot.blockedUntil).toBeNull();
-    coworkRateLimiter.release();
+    towerRateLimiter.release();
   });
 
   it('does not touch the budget on quota exhaustion (billing, not congestion)', async () => {
@@ -346,13 +346,13 @@ describe('chatWithRetry: adaptive rate limiter integration', () => {
       chatWithRetry(makeInput(llm, new AbortController().signal)),
     ).rejects.toMatchObject({ name: 'APIProviderQuotaExhaustedError' });
 
-    expect(coworkRateLimiter.snapshot().budget).toBe(16);
-    expect(coworkRateLimiter.snapshot().blockedUntil).toBeNull();
+    expect(towerRateLimiter.snapshot().budget).toBe(16);
+    expect(towerRateLimiter.snapshot().blockedUntil).toBeNull();
   });
 
   it('lifts the spawn pause early once a request succeeds', async () => {
-    coworkRateLimiter.reportRateLimited();
-    expect(coworkRateLimiter.snapshot().blockedUntil).not.toBeNull();
+    towerRateLimiter.reportRateLimited();
+    expect(towerRateLimiter.snapshot().blockedUntil).not.toBeNull();
 
     const llm: LLM = {
       systemPrompt: '',
@@ -364,6 +364,6 @@ describe('chatWithRetry: adaptive rate limiter integration', () => {
     };
     await chatWithRetry(makeInput(llm, new AbortController().signal));
 
-    expect(coworkRateLimiter.snapshot().blockedUntil).toBeNull();
+    expect(towerRateLimiter.snapshot().blockedUntil).toBeNull();
   });
 });

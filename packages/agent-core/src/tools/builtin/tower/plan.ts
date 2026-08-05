@@ -1,5 +1,5 @@
 /**
- * CoworkPlanTool — the tower's mission splitter. Each mission gets an id, a
+ * TowerPlanTool — the tower's mission splitter. Each mission gets an id, a
  * branch, and a worktree slot; scopes must be pairwise disjoint and deps must
  * reference known mission ids (both enforced by the store).
  */
@@ -10,9 +10,9 @@ import { z } from 'zod';
 import type { BuiltinTool } from '../../../agent/tool';
 import type { ToolExecution } from '../../../loop/types';
 import { toInputJsonSchema } from '../../support/input-schema';
-import { newStore, runCoworkTool } from './support';
+import { newStore, runTowerTool } from './support';
 
-export const CoworkPlanToolInputSchema = z
+export const TowerPlanToolInputSchema = z
   .object({
     missions: z
       .array(
@@ -28,7 +28,7 @@ export const CoworkPlanToolInputSchema = z
             tasks: z
               .array(z.string())
               .optional()
-              .describe('Checklist the worker will tick off via CoworkMission task_done'),
+              .describe('Checklist the worker will tick off via TowerMission task_done'),
             deps: z
               .array(z.string())
               .optional()
@@ -46,26 +46,26 @@ export const CoworkPlanToolInputSchema = z
   })
   .strict();
 
-export type CoworkPlanToolInput = z.infer<typeof CoworkPlanToolInputSchema>;
+export type TowerPlanToolInput = z.infer<typeof TowerPlanToolInputSchema>;
 
-export class CoworkPlanTool implements BuiltinTool<CoworkPlanToolInput> {
-  readonly name = 'CoworkPlan' as const;
-  readonly description: string = `Split the cowork goal into missions. Each mission gets an id (M1, M2, …), a branch (feat/<slug>), and an isolated git worktree (.cowork/worktrees/wt-N).
+export class TowerPlanTool implements BuiltinTool<TowerPlanToolInput> {
+  readonly name = 'TowerPlan' as const;
+  readonly description: string = `Split the tower goal into missions. Each mission gets an id (M1, M2, …), a branch (feat/<slug>), and an isolated git worktree (.tower/worktrees/wt-N).
 
-Rules enforced by the store: scopes of build missions must be pairwise disjoint (survey missions are read-only and reserve no scope), and deps must reference existing mission ids. Plan once, then spawn one worker per mission with CoworkSpawn. Requires an active cowork workspace (run CoworkInit first).`;
-  readonly parameters: Record<string, unknown> = toInputJsonSchema(CoworkPlanToolInputSchema);
+Rules enforced by the store: scopes of build missions must be pairwise disjoint (survey missions are read-only and reserve no scope), and deps must reference existing mission ids. Plan once, then spawn one worker per mission with TowerSpawn. Requires an active tower workspace (run TowerInit first).`;
+  readonly parameters: Record<string, unknown> = toInputJsonSchema(TowerPlanToolInputSchema);
 
   constructor(private readonly agent: Agent) {}
 
-  resolveExecution(args: CoworkPlanToolInput): ToolExecution {
+  resolveExecution(args: TowerPlanToolInput): ToolExecution {
     return {
-      description: `Planning ${String(args.missions.length)} cowork mission(s)`,
+      description: `Planning ${String(args.missions.length)} tower mission(s)`,
       approvalRule: this.name,
       execute: () =>
-        runCoworkTool(async () => {
-          if (!this.agent.coworkMode.isActive) {
+        runTowerTool(async () => {
+          if (!this.agent.towerMode.isActive) {
             return {
-              output: 'cowork mode is not active — run CoworkInit first',
+              output: 'tower mode is not active — run TowerInit first',
               isError: true,
             };
           }
@@ -83,7 +83,7 @@ Rules enforced by the store: scopes of build missions must be pairwise disjoint 
               '| -- | ------- | ---- | ------ | -------- | ----- |',
               ...rows,
               '',
-              'Next: CoworkSpawn one worker per mission (workers get their worktree path and mission briefing automatically), plus reviewers for the branches. Survey missions need no reviewer — they close with a zero-diff CoworkMerge.',
+              'Next: TowerSpawn one worker per mission (workers get their worktree path and mission briefing automatically), plus reviewers for the branches. Survey missions need no reviewer — they close with a zero-diff TowerMerge.',
             ].join('\n'),
           };
         }),

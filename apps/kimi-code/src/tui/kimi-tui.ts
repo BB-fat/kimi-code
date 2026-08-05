@@ -1504,7 +1504,7 @@ export class KimiTUI {
     if (this.state.appState.streamingPhase !== 'idle') {
       // A turn is running: fire immediately. The engine steers the activation
       // into the running turn (see SkillManager.recordActivation), so slash
-      // commands like /cowork take effect at the next step boundary instead
+      // commands like /tower take effect at the next step boundary instead
       // of waiting for the turn to end. No beginSessionRequest — the live
       // pane belongs to the running turn.
       void session.activateSkill(skillName, rewrite.text).catch((error: unknown) => {

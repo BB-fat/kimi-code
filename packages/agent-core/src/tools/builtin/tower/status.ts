@@ -1,5 +1,5 @@
 /**
- * CoworkStatusTool — the shared dashboard: mission table, roster, per-branch
+ * TowerStatusTool — the shared dashboard: mission table, roster, per-branch
  * review-gate state (latest review round/status and whether it still matches
  * the branch tip), the caller's inbox count, and the recent activity log.
  */
@@ -7,20 +7,20 @@
 import type { Agent } from '#/agent';
 import { z } from 'zod';
 
-import { branchExists, branchTip } from '../../../agent/cowork';
-import type { CoworkMission, CoworkState } from '../../../agent/cowork';
+import { branchExists, branchTip } from '../../../agent/tower';
+import type { TowerMission, TowerState } from '../../../agent/tower';
 import type { BuiltinTool } from '../../../agent/tool';
-import { coworkRateLimiter } from '../../../loop/rate-limiter';
+import { towerRateLimiter } from '../../../loop/rate-limiter';
 import type { RateLimiterSnapshot } from '../../../loop/rate-limiter';
 import type { ToolExecution } from '../../../loop/types';
 import { toInputJsonSchema } from '../../support/input-schema';
-import { callerName, newStore, runCoworkTool } from './support';
+import { callerName, newStore, runTowerTool } from './support';
 
-export const CoworkStatusToolInputSchema = z.object({}).strict();
+export const TowerStatusToolInputSchema = z.object({}).strict();
 
-export type CoworkStatusToolInput = z.infer<typeof CoworkStatusToolInputSchema>;
+export type TowerStatusToolInput = z.infer<typeof TowerStatusToolInputSchema>;
 
-const STATUS_EMOJI: Record<CoworkMission['status'], string> = {
+const STATUS_EMOJI: Record<TowerMission['status'], string> = {
   planned: '🟡',
   active: '🔵',
   completed: '🟢',
@@ -32,25 +32,25 @@ const STATUS_EMOJI: Record<CoworkMission['status'], string> = {
 const INBOX_COUNT_LIMIT = 1000;
 const RECENT_LOG_LINES = 10;
 
-export class CoworkStatusTool implements BuiltinTool<CoworkStatusToolInput> {
-  readonly name = 'CoworkStatus' as const;
-  readonly description: string = `Show the cowork dashboard: missions (status/owner), the agent roster, the review-gate state of every unmerged branch (latest review round/status and whether the reviewed commit still matches the branch tip), your inbox message count, and the last activity log lines.`;
-  readonly parameters: Record<string, unknown> = toInputJsonSchema(CoworkStatusToolInputSchema);
+export class TowerStatusTool implements BuiltinTool<TowerStatusToolInput> {
+  readonly name = 'TowerStatus' as const;
+  readonly description: string = `Show the tower dashboard: missions (status/owner), the agent roster, the review-gate state of every unmerged branch (latest review round/status and whether the reviewed commit still matches the branch tip), your inbox message count, and the last activity log lines.`;
+  readonly parameters: Record<string, unknown> = toInputJsonSchema(TowerStatusToolInputSchema);
 
   constructor(private readonly agent: Agent) {}
 
-  resolveExecution(_args: CoworkStatusToolInput): ToolExecution {
+  resolveExecution(_args: TowerStatusToolInput): ToolExecution {
     return {
-      description: 'Reading cowork status',
+      description: 'Reading tower status',
       approvalRule: this.name,
       execute: () =>
-        runCoworkTool(async () => {
+        runTowerTool(async () => {
           const store = newStore(this.agent);
           const state = await store.load();
           const caller = callerName(this.agent, state);
 
           const sections: string[] = [
-            `# Cowork status — base: ${state.base} (mode: ${state.mode}), you are: ${caller}`,
+            `# Tower status — base: ${state.base} (mode: ${state.mode}), you are: ${caller}`,
             '',
             '## Missions',
             '',
@@ -73,7 +73,7 @@ export class CoworkStatusTool implements BuiltinTool<CoworkStatusToolInput> {
               '',
               '## Done',
               '',
-              'All missions are merged. Free the worktree checkouts now: run CoworkTeardown (branches and .cowork/comms/ are kept; dirty worktrees are protected).',
+              'All missions are merged. Free the worktree checkouts now: run TowerTeardown (branches and .tower/comms/ are kept; dirty worktrees are protected).',
             );
           }
 
@@ -82,11 +82,11 @@ export class CoworkStatusTool implements BuiltinTool<CoworkStatusToolInput> {
             '',
             '## Inbox',
             '',
-            `${String(inbox.length)} message(s) visible to you — read with CoworkInbox.`,
+            `${String(inbox.length)} message(s) visible to you — read with TowerInbox.`,
             '',
             '## Concurrency (adaptive)',
             '',
-            renderConcurrency(coworkRateLimiter.snapshot()),
+            renderConcurrency(towerRateLimiter.snapshot()),
             '',
             '## Recent activity',
             '',
@@ -100,7 +100,7 @@ export class CoworkStatusTool implements BuiltinTool<CoworkStatusToolInput> {
 
   private async renderReviewGate(
     store: ReturnType<typeof newStore>,
-    state: CoworkState,
+    state: TowerState,
   ): Promise<string[]> {
     const pending = state.missions.filter((m) => m.status !== 'merged');
     if (pending.length === 0) return ['(all missions merged — or none planned yet)'];
@@ -145,8 +145,8 @@ function renderConcurrency(snapshot: RateLimiterSnapshot): string {
   return parts.join(' · ');
 }
 
-function renderMissions(state: CoworkState): string[] {
-  if (state.missions.length === 0) return ['(no missions planned — use CoworkPlan)'];
+function renderMissions(state: TowerState): string[] {
+  if (state.missions.length === 0) return ['(no missions planned — use TowerPlan)'];
   return [
     '| ID | Mission | Branch | Worktree | Status | Owner |',
     '| -- | ------- | ------ | -------- | ------ | ----- |',
@@ -157,9 +157,9 @@ function renderMissions(state: CoworkState): string[] {
   ];
 }
 
-function renderRoster(state: CoworkState): string[] {
+function renderRoster(state: TowerState): string[] {
   if (state.roster.agents.length === 0) {
-    return ['(no agents registered — spawn workers/reviewers with CoworkSpawn)'];
+    return ['(no agents registered — spawn workers/reviewers with TowerSpawn)'];
   }
   return state.roster.agents.map((a) => {
     const assignment =

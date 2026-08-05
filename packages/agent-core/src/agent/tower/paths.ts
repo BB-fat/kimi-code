@@ -1,16 +1,16 @@
 /**
- * Cowork workspace layout and file naming. Every comms file name is built
+ * Tower workspace layout and file naming. Every comms file name is built
  * here — agents never construct paths by hand.
  */
 
-export const COWORK_ROOT = '.cowork';
-export const COMMS_DIR = `${COWORK_ROOT}/comms`;
+export const TOWER_ROOT = '.tower';
+export const COMMS_DIR = `${TOWER_ROOT}/comms`;
 export const INBOX_DIR = `${COMMS_DIR}/inbox`;
 export const FINDINGS_DIR = `${COMMS_DIR}/findings`;
 export const REVIEWS_DIR = `${COMMS_DIR}/reviews`;
 export const MISSIONS_DIR = `${COMMS_DIR}/missions`;
 export const LOG_DIR = `${COMMS_DIR}/log`;
-export const WORKTREES_DIR = `${COWORK_ROOT}/worktrees`;
+export const WORKTREES_DIR = `${TOWER_ROOT}/worktrees`;
 
 export const STATE_FILE = `${COMMS_DIR}/state.json`;
 export const ACTIVITY_LOG = `${LOG_DIR}/activity.log`;
