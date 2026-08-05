@@ -55,7 +55,7 @@ export class RateLimitCapacityGovernor {
   noteRateLimited(activeCount: number): void {
     const now = this.now();
     if (activeCount > 0) {
-      if (!this.inBackoff) {
+      if (this.capacity === Number.POSITIVE_INFINITY) {
         this.capacity = Math.max(1, activeCount - 1);
         this.lastShrinkAt = now;
       } else if (

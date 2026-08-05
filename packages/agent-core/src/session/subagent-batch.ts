@@ -473,7 +473,7 @@ export class SubagentBatch<T> {
     }
     // Capacity tracking lives in the shared governor: first 429 anchors to
     // (ready launches − 1), later ones shave one more off (throttled).
-    this.capacityGovernor.noteRateLimited(this.startedSuccessCount);
+    this.capacityGovernor.noteRateLimited(Math.max(1, this.startedSuccessCount));
   }
 
   private nextRateLimitCapacityRecoveryAt(): number {
