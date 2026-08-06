@@ -146,7 +146,7 @@ export function buildSubagentModelDescriptions(
     );
   }
   lines.push(
-    'Pass a configured model alias from the list above, or the shortcuts "primary" / "secondary". This explicit choice overrides the selected agent type\'s model_preference; without either, secondary is the default when configured, otherwise the subagent inherits your model. Ignored when resuming — resumed subagents keep their own model.',
+    'Pass a model alias copied exactly from the list above (the id before ":" / "—", e.g. provider/gpt-5.6-sol — not a shortened form like provider/gpt-5.6), or the shortcuts "primary" / "secondary". This explicit choice overrides the selected agent type\'s model_preference; without either, secondary is the default when configured, otherwise the subagent inherits your model. Ignored when resuming — resumed subagents keep their own model.',
   );
   return lines.join('\n');
 }
