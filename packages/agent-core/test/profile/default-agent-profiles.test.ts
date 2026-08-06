@@ -136,6 +136,15 @@ describe('default agent profiles', () => {
     for (const name of ['TowerInit', 'TowerPlan', 'TowerSpawn', 'TowerMerge', 'TowerTeardown']) {
       expect(tools).not.toContain(name);
     }
+    // Workers never fan out a swarm: the tower is the sole orchestrator, and
+    // swarm children would run unbudgeted on the main checkout, bypassing the
+    // worktree/roster discipline and the review-gated merge protocol.
+    expect(tools).not.toContain('AgentSwarm');
+    // v1's subagent declarations are descriptive (not enforced), so the only
+    // lever against write-capable delegation — a coder child would run on the
+    // main checkout, outside the worktree/roster discipline — is dropping the
+    // Agent tool entirely.
+    expect(tools).not.toContain('Agent');
 
     const prompt = DEFAULT_AGENT_PROFILES['tower-worker']?.systemPrompt(promptContext) ?? '';
     expect(prompt).toContain('tower worker/reviewer');

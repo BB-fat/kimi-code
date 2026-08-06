@@ -14,6 +14,10 @@ describe('builtin skill: tower', () => {
     expect(TOWER_SKILL.metadata.disableModelInvocation).toBe(true);
   });
 
+  it('opts into busy activation (the tower coordinates a running turn)', () => {
+    expect(TOWER_SKILL.metadata.allowActivationWhileBusy).toBe(true);
+  });
+
   it('defines the three roles and routes every protocol action through Tower tools', () => {
     const content = TOWER_SKILL.content;
     expect(content).toContain('**The tower**');

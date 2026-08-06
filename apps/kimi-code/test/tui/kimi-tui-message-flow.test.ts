@@ -2567,7 +2567,7 @@ command = "vim"
     expect(harness.track).toHaveBeenCalledWith('input_queue', undefined);
   });
 
-  it('fires a slash-skill activation immediately while a turn is streaming (engine steers it in)', async () => {
+  it('fires a slash-skill activation immediately while a turn is streaming when the skill opts in (engine steers it in)', async () => {
     const session = makeSession({
       listSkills: vi.fn(async () => [
         {
@@ -2576,6 +2576,7 @@ command = "vim"
           path: 'builtin://tower',
           source: 'builtin',
           type: 'inline',
+          allowActivationWhileBusy: true,
         },
       ]),
     });
@@ -2592,6 +2593,48 @@ command = "vim"
     expect(driver.state.queuedMessages).toEqual([]);
     // The live pane keeps belonging to the running turn — no fresh waiting phase.
     expect(driver.state.appState.streamingPhase).toBe('waiting');
+  });
+
+  it('queues a slash-skill activation while a turn is streaming when the skill does not opt in', async () => {
+    const session = makeSession({
+      listSkills: vi.fn(async () => [
+        {
+          name: 'review',
+          description: 'review the current change',
+          path: 'builtin://review',
+          source: 'builtin',
+          type: 'inline',
+        },
+      ]),
+    });
+    const { driver, harness } = await makeDriver(session);
+    await (
+      driver as unknown as { refreshSkillCommands(s: unknown): Promise<void> }
+    ).refreshSkillCommands(session);
+    driver.state.appState.streamingPhase = 'waiting';
+    harness.track.mockClear();
+
+    driver.handleUserInput('/review src/auth');
+
+    expect(session.activateSkill).not.toHaveBeenCalled();
+    expect(driver.state.queuedMessages).toEqual([
+      {
+        text: '/review src/auth',
+        agentId: 'main',
+        mode: 'skill',
+        skillName: 'review',
+        skillArgs: 'src/auth',
+      },
+    ]);
+    expect(harness.track).toHaveBeenCalledWith('input_queue', undefined);
+
+    // Turn ends: the drain re-enters sendSkillActivation, which now fires.
+    driver.state.appState.streamingPhase = 'idle';
+    const queued = driver.state.queuedMessages[0]!;
+    driver.state.queuedMessages = [];
+    driver.sendQueuedMessage(session, queued);
+
+    expect(session.activateSkill).toHaveBeenCalledWith('review', 'src/auth');
   });
 
   it('queues a slash-skill activation while compacting and activates it on drain', async () => {
