@@ -3,7 +3,6 @@ import type { PermissionPolicy } from '../types';
 import { AgentSwarmExclusiveDenyPermissionPolicy } from './agent-swarm-exclusive-deny';
 import { AutoModeApprovePermissionPolicy } from './auto-mode-approve';
 import { AutoModeAskUserQuestionDenyPermissionPolicy } from './auto-mode-ask-user-question-deny';
-import { TowerModeAskUserQuestionDenyPermissionPolicy } from './tower-mode-ask-user-question-deny';
 import { TowerWorkerWriteGuardPermissionPolicy } from './tower-worker-write-guard-deny';
 import { DefaultToolApprovePermissionPolicy } from './default-tool-approve';
 import { ExitPlanModeReviewAskPermissionPolicy } from './exit-plan-mode-review-ask';
@@ -37,8 +36,6 @@ export function createPermissionDecisionPolicies(agent: Agent): PermissionPolicy
     new AutoModeAskUserQuestionDenyPermissionPolicy(agent),
     // plan mode: Write/Edit outside the plan file, or TaskStop → deny.
     new PlanModeGuardDenyPermissionPolicy(agent),
-    // tower mode: AskUserQuestion while the tower runs a fleet → deny.
-    new TowerModeAskUserQuestionDenyPermissionPolicy(agent),
     // tower-worker: Write/Edit outside the agent's worktree → deny.
     new TowerWorkerWriteGuardPermissionPolicy(agent),
     // User-configured deny rule matches → deny.

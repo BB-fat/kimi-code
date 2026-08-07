@@ -5,21 +5,19 @@
  * through the `tower_mode.enter` / `tower_mode.exit` Ops, read through
  * `wire.getModel`), and derives the `towerMode` slice of
  * `agent.status.updated` from the Ops' `toEvent`. Also carries the
- * tower-mode harness constraints as `onBeforeExecuteTool` veto listeners:
- * while tower mode is active, an `AskUserQuestion` call is vetoed with a
- * `toolApproval.formatDenyMessage`-formatted reason — the tower coordinates
- * a fleet of background agents and must keep it moving, so a
- * blocked-on-human question is a mode violation, not a UX choice. A second
- * listener is the tower-worker write guard (port of v1's
- * `tower-worker-write-guard-deny` policy): a `tower-worker`-profile agent's
- * Write/Edit is confined to the worktree its roster entry records
- * (`.tower/worktrees/<slot>` under the repo root, resolved through the
- * `tower` protocol store from `sessionContext.cwd`); any declared write
- * access outside it is vetoed with the v1 message verbatim. v1 keyed the
- * confinement on the worker's cwd override, which was always set; v2 has no
- * per-agent cwd, so a worker without a roster entry (or with no readable
- * `.tower` state) is simply outside the protocol and the guard abstains.
- * Bound at Agent scope.
+ * tower-mode harness constraint as an `onBeforeExecuteTool` veto listener —
+ * the tower-worker write guard (port of v1's `tower-worker-write-guard-deny`
+ * policy): a `tower-worker`-profile agent's Write/Edit is confined to the
+ * worktree its roster entry records (`.tower/worktrees/<slot>` under the
+ * repo root, resolved through the `tower` protocol store from
+ * `sessionContext.cwd`); any declared write access outside it is vetoed with
+ * the v1 message verbatim. v1 keyed the confinement on the worker's cwd
+ * override, which was always set; v2 has no per-agent cwd, so a worker
+ * without a roster entry (or with no readable `.tower` state) is simply
+ * outside the protocol and the guard abstains. `AskUserQuestion` is
+ * deliberately not vetoed here: the tower (the main agent) may ask the human
+ * to clarify requirements, while workers and reviewers cannot ask at all —
+ * their `tower-worker` profile does not list the tool. Bound at Agent scope.
  */
 
 import { join } from 'node:path';
@@ -55,19 +53,6 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
     @ISessionContext private readonly sessionCtx: ISessionContext,
   ) {
     super();
-    this._register(
-      toolExecutor.onBeforeExecuteTool((event) => {
-        if (!this.isActive) return;
-        if (event.toolCall.name !== 'AskUserQuestion') return;
-        event.veto(
-          denyToolExecution(
-            this.toolApproval.formatDenyMessage(
-              'AskUserQuestion is not available while tower mode is active. Make a reasonable decision yourself and continue — surface the choice in your reply (the human reads it later) and record it via the tower tools.',
-            ),
-          ),
-        );
-      }),
-    );
     this._register(
       toolExecutor.onBeforeExecuteTool(async (event) => {
         if (this.profile.data().profileName !== 'tower-worker') return;

@@ -201,20 +201,15 @@ describe('AgentTowerService', () => {
     expect(fresh.getModel(TowerModel)).toBe(true);
   });
 
-  it('vetoes AskUserQuestion while tower mode is active', async () => {
+  it('leaves AskUserQuestion alone while tower mode is active (the tower may ask)', async () => {
     const tower = ix.get(IAgentTowerService);
     tower.enter();
 
     const decision = await fire(hookContext([toolCall('AskUserQuestion', 'call_ask')]));
 
-    expect(decision).toEqual({
-      veto: {
-        output: expect.stringContaining('not available while tower mode is active'),
-        isError: true,
-      },
-    });
-    expect(permissionGateRan).toBe(false);
-    expect(formatDenyMessage).toHaveBeenCalledTimes(1);
+    expect(decision).toBeUndefined();
+    expect(permissionGateRan).toBe(true);
+    expect(formatDenyMessage).not.toHaveBeenCalled();
   });
 
   it('abstains on AskUserQuestion while tower mode is inactive', async () => {

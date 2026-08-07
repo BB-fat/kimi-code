@@ -52,9 +52,10 @@ describe('builtin skill: tower', () => {
     expect(content).not.toContain('wait for explicit approval');
   });
 
-  it('forbids AskUserQuestion in tower mode and names the return channels', () => {
+  it('lets the tower clarify up front but keeps workers ask-less, naming the return channels', () => {
     const content = TOWER_SKILL.content;
-    expect(content).toContain('`AskUserQuestion` is code-denied while tower mode is active');
+    expect(content).toContain('Use `AskUserQuestion` to pin down requirements');
+    expect(content).toContain('their profile has no `AskUserQuestion`');
     expect(content).toContain('activity.log');
   });
 
