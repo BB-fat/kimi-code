@@ -187,6 +187,9 @@ The briefing prompt is assembled by this tool (worktree path, scope, protocol ru
             parentToolCallId: toolCallId,
             runInBackground: true,
             signal: controller.signal,
+            // Reviewers stay on the tower's (primary) model — review quality
+            // is not where the secondary model saves money.
+            modelChoice: args.kind === 'reviewer' ? 'primary' : undefined,
             // Workers are confined to their worktree (cwd override): relative
             // paths land there and the write guard rejects anything outside.
             // Reviewers stay on the main checkout — their work is read-only.
@@ -236,7 +239,7 @@ The briefing prompt is assembled by this tool (worktree path, scope, protocol ru
             modelAlias: this.agent.config.modelAlias,
             thinkingEffort: this.agent.config.thinkingEffort,
           },
-          undefined,
+          args.kind === 'reviewer' ? 'primary' : undefined,
         );
         const boundModel =
           spawnBinding.modelAlias === undefined

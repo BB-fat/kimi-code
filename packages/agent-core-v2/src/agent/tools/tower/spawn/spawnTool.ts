@@ -15,8 +15,9 @@
  * a launch/registration failure). The worker's model binding follows the same
  * rule as the `Agent`/`AgentSwarm` tools (`resolveSubagentBinding`): the
  * configured secondary model while the secondary-model experiment is on,
- * otherwise the tower's own model — the resolved model is reported in the
- * tool output and the `spawn` line of the tower activity log.
+ * otherwise the tower's own model — except reviewers, who always bind the
+ * tower's (primary) model. The resolved model is reported in the tool output
+ * and the `spawn` line of the tower activity log.
  *
  * Deliberate v2 adaptation — no per-agent cwd: v1 confined each worker by
  * overriding its process cwd to the worktree. v2 freezes the session cwd by
@@ -201,7 +202,9 @@ export class TowerSpawnTool implements ITowerSpawnTool {
         const controller = new AbortController();
         // The same binding rule as the Agent/AgentSwarm tools: the configured
         // secondary model when the experiment is on, otherwise inherit the
-        // tower's own model.
+        // tower's own model. Reviewers are the exception — they always bind
+        // the tower's (primary) model: review quality is not where the
+        // secondary model saves money.
         const own = this.profile.data();
         const binding =
           own.modelAlias === undefined
@@ -210,7 +213,7 @@ export class TowerSpawnTool implements ITowerSpawnTool {
                 this.config,
                 this.flags,
                 { modelAlias: own.modelAlias, thinkingLevel: own.thinkingLevel },
-                undefined,
+                args.kind === 'reviewer' ? 'primary' : undefined,
               );
         let handle: SubagentHandle;
         try {
