@@ -872,15 +872,24 @@ export class TowerStore {
       if (await isWorktreeDirty(absPath)) {
         if (options.force !== true) {
           report.push(`kept ${rel} (uncommitted changes — rerun with force to remove)`);
+          await this.appendLog(TOWER_NAME, 'worktree.keep', {
+            worktree: mission.worktree,
+            reason: 'uncommitted-changes',
+          });
           continue;
         }
       }
       try {
-        await worktreeRemove(this.repoRoot, absPath, options.force === true);
+        await worktreeRemove(this.repoRoot, absPath);
         report.push(`removed ${rel}`);
         await this.appendLog(TOWER_NAME, 'worktree.remove', { worktree: mission.worktree });
       } catch (error) {
-        report.push(`failed to remove ${rel}: ${error instanceof Error ? error.message : String(error)}`);
+        const reason = error instanceof Error ? error.message : String(error);
+        report.push(`failed to remove ${rel}: ${reason}`);
+        await this.appendLog(TOWER_NAME, 'worktree.remove.failed', {
+          worktree: mission.worktree,
+          reason,
+        });
       }
     }
     await this.appendLog(TOWER_NAME, 'teardown', { force: options.force === true ? 'yes' : undefined });

@@ -82,8 +82,13 @@ export async function worktreeAdd(
   await git(cwd, ['worktree', 'add', path, '-b', branch, base]);
 }
 
-export async function worktreeRemove(cwd: string, path: string, force: boolean): Promise<void> {
-  await git(cwd, ['worktree', 'remove', ...(force ? ['--force'] : []), path]);
+/**
+ * Removal is always `--force`: the caller's dirty check is the data-loss gate.
+ * A plain `git worktree remove` additionally refuses clean worktrees that
+ * contain initialized submodules, which must not strand a clean teardown.
+ */
+export async function worktreeRemove(cwd: string, path: string): Promise<void> {
+  await git(cwd, ['worktree', 'remove', '--force', path]);
 }
 
 export async function isWorktreeDirty(path: string): Promise<boolean> {

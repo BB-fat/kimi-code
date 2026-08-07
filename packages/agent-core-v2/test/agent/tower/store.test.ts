@@ -701,4 +701,33 @@ describe('teardown', () => {
     expect(report.join('\n')).toContain(`removed .tower/worktrees/${mission.worktree}`);
     await expect(stat(wt)).rejects.toThrow();
   });
+
+  it('removes clean worktrees that contain an initialized submodule', async () => {
+    // A plain `git worktree remove` refuses worktrees containing submodules
+    // even when they are clean — teardown must not strand them.
+    const subRepo = await mkdtemp(join(tmpdir(), 'tower-sub-test-'));
+    try {
+      await git(subRepo, 'init', '-b', 'main');
+      await git(subRepo, 'config', 'user.email', 'tower-test@example.com');
+      await git(subRepo, 'config', 'user.name', 'Tower Test');
+      await commitFile(subRepo, 'lib.txt', 'lib\n', 'lib initial');
+      await git(repo, '-c', 'protocol.file.allow=always', 'submodule', 'add', subRepo, 'vendor/lib');
+      await git(repo, 'commit', '-m', 'add vendor/lib submodule');
+
+      const mission = await setupMission({
+        title: 'feature z',
+        scope: 'src/z/**',
+        file: 'src/z/z.ts',
+        content: 'z\n',
+      });
+      const wt = worktreeOf(mission);
+      await git(wt, '-c', 'protocol.file.allow=always', 'submodule', 'update', '--init');
+
+      const report = await store.teardown();
+      expect(report.join('\n')).toContain(`removed .tower/worktrees/${mission.worktree}`);
+      await expect(stat(wt)).rejects.toThrow();
+    } finally {
+      await rm(subRepo, { recursive: true, force: true });
+    }
+  });
 });
