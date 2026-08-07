@@ -77,6 +77,13 @@ describe('builtin skill: tower', () => {
     expect(content).toContain('activity.log');
   });
 
+  it('forbids TodoList mission tracking and demands parallel spawning', () => {
+    const content = TOWER_SKILL.content;
+    expect(content).toContain('never in `TodoList`');
+    expect(content).toContain('spawn every dependency-unblocked mission right away');
+    expect(content).toContain('end your turn');
+  });
+
   it('lets workers negotiate peer-to-peer instead of tower relay', () => {
     const content = TOWER_SKILL.content;
     expect(content).toContain('Agents negotiate internally');

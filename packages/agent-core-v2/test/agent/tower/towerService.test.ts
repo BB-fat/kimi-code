@@ -222,6 +222,32 @@ describe('AgentTowerService', () => {
     expect(formatDenyMessage).not.toHaveBeenCalled();
   });
 
+  it('vetoes TodoList while tower mode is active', async () => {
+    const tower = ix.get(IAgentTowerService);
+    tower.enter();
+
+    const decision = await fire(hookContext([toolCall('TodoList', 'call_todo')]));
+
+    expect(decision).toEqual({
+      veto: {
+        output: expect.stringContaining('TodoList is not available while tower mode is active'),
+        isError: true,
+      },
+    });
+    expect(permissionGateRan).toBe(false);
+    expect(formatDenyMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('abstains on TodoList while tower mode is inactive', async () => {
+    ix.get(IAgentTowerService);
+
+    const decision = await fire(hookContext([toolCall('TodoList', 'call_todo')]));
+
+    expect(decision).toBeUndefined();
+    expect(permissionGateRan).toBe(true);
+    expect(formatDenyMessage).not.toHaveBeenCalled();
+  });
+
   it('abstains on other tools while tower mode is active', async () => {
     const tower = ix.get(IAgentTowerService);
     tower.enter();

@@ -5,8 +5,13 @@
  * through the `tower_mode.enter` / `tower_mode.exit` Ops, read through
  * `wire.getModel`), and derives the `towerMode` slice of
  * `agent.status.updated` from the Ops' `toEvent`. Also carries the
- * tower-mode harness constraint as an `onBeforeExecuteTool` veto listener —
- * the tower-worker write guard (port of v1's `tower-worker-write-guard-deny`
+ * tower-mode harness constraints as `onBeforeExecuteTool` veto listeners.
+ * The first denies `TodoList` while tower mode is active: mission state
+ * lives in the tower protocol, and todo semantics ("keep exactly one task
+ * in_progress") would serialize a fleet that exists to run in parallel —
+ * tower mode is per-agent, so this only ever fires for the tower itself and
+ * workers keep their TodoList. The second is the tower-worker write guard
+ * (port of v1's `tower-worker-write-guard-deny`
  * policy): a `tower-worker`-profile agent's Write/Edit is confined to the
  * worktree its roster entry records (`.tower/worktrees/<slot>` under the
  * repo root, resolved through the `tower` protocol store from
@@ -54,6 +59,19 @@ export class AgentTowerService extends Disposable implements IAgentTowerService 
     @ISessionContext private readonly sessionCtx: ISessionContext,
   ) {
     super();
+    this._register(
+      toolExecutor.onBeforeExecuteTool((event) => {
+        if (!this.isActive) return;
+        if (event.toolCall.name !== 'TodoList') return;
+        event.veto(
+          denyToolExecution(
+            this.toolApproval.formatDenyMessage(
+              'TodoList is not available while tower mode is active — mission state lives in the tower protocol (TowerPlan/TowerMission/TowerStatus, MISSIONS.md), and todo semantics would serialize the fleet. Spawn every dependency-unblocked mission now, then end your turn: worker completions wake you.',
+            ),
+          ),
+        );
+      }),
+    );
     this._register(
       toolExecutor.onBeforeExecuteTool(async (event) => {
         if (this.profile.data().profileName !== 'tower-worker') return;
