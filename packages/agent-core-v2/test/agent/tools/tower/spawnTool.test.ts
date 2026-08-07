@@ -7,7 +7,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -17,6 +17,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vite
 import { SyncDescriptor } from '#/_base/di/descriptors';
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { TestInstantiationService } from '#/_base/di/test';
+import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentTaskService } from '#/agent/task/task';
 import { TowerStore } from '#/agent/tower/protocol/index';
@@ -25,11 +26,16 @@ import { ITowerRateLimitService } from '#/agent/tower/towerRateLimit';
 import { SubagentTask } from '#/agent/tools/agent/subagent-task';
 import { ITowerSpawnTool, type TowerSpawnToolInput } from '#/agent/tools/tower/spawn/spawn';
 import { TowerSpawnTool } from '#/agent/tools/tower/spawn/spawnTool';
+import { IConfigService } from '#/app/config/config';
 import { IEventBus } from '#/app/event/eventBus';
 import { EventBusService } from '#/app/event/eventBusService';
+import { IFlagService } from '#/app/flag/flag';
+import { SECONDARY_MODEL_SECTION } from '#/app/kosongConfig/configSection';
+import { IModelCatalog } from '#/kosong/model/catalog';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { DEFAULT_SUBAGENT_TIMEOUT_MS } from '#/session/subagent/configSection';
+import { SECONDARY_MODEL_FLAG_ID } from '#/session/subagent/flag';
 import {
   ISessionSubagentService,
   type AgentRunHandle,
@@ -70,6 +76,8 @@ describe('TowerSpawnTool', () => {
   let runAgent: Mock<ISessionSubagentService['run']>;
   let registerTask: Mock<IAgentTaskService['registerTask']>;
   let completion: Deferred<{ readonly summary: string }>;
+  let secondaryFlagOn: boolean;
+  let secondaryModel: { readonly model: string } | undefined;
 
   async function git(cwd: string, ...args: string[]): Promise<void> {
     await execFileAsync('git', args, { cwd });
@@ -91,6 +99,8 @@ describe('TowerSpawnTool', () => {
     gate = { ok: true };
     release = vi.fn();
     completion = deferred();
+    secondaryFlagOn = false;
+    secondaryModel = undefined;
     createAgent = vi.fn(async () => ({ id: 'agent-7' }) as never);
     runAgent = vi.fn(
       async (agentId: string) =>
@@ -135,6 +145,17 @@ describe('TowerSpawnTool', () => {
     } as unknown as IAgentLifecycleService);
     ix.stub(ISessionSubagentService, { run: runAgent } as unknown as ISessionSubagentService);
     ix.stub(IAgentTaskService, { registerTask } as unknown as IAgentTaskService);
+    ix.stub(IAgentProfileService, {
+      data: () => ({ profileName: 'agent', modelAlias: 'kimi-code', thinkingLevel: 'off' }),
+    } as unknown as IAgentProfileService);
+    ix.stub(IConfigService, {
+      get: ((domain: string) =>
+        domain === SECONDARY_MODEL_SECTION ? secondaryModel : undefined) as IConfigService['get'],
+    });
+    ix.stub(IFlagService, {
+      enabled: (id: string) => id === SECONDARY_MODEL_FLAG_ID && secondaryFlagOn,
+    } as unknown as IFlagService);
+    ix.stub(IModelCatalog, { get: () => ({}) } as unknown as IModelCatalog);
     ix.set(ITowerSpawnTool, new SyncDescriptor(TowerSpawnTool));
   });
 
@@ -191,7 +212,7 @@ describe('TowerSpawnTool', () => {
     expect(result.output).toContain(`worktree: ${worktreeAbs}`);
 
     expect(createAgent).toHaveBeenCalledWith({
-      binding: { profile: 'tower-worker' },
+      binding: { profile: 'tower-worker', model: 'kimi-code', thinking: 'off' },
       labels: { parentAgentId: 'main' },
     });
     expect(runAgent).toHaveBeenCalledWith(
@@ -223,6 +244,31 @@ describe('TowerSpawnTool', () => {
     await vi.waitFor(() => {
       expect(release).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it('binds the configured secondary model and reports it in the output and activity log', async () => {
+    secondaryFlagOn = true;
+    secondaryModel = { model: 'cheap/fast' };
+
+    const result = await execute(WORKER_ARGS);
+
+    expect(result.isError).toBeUndefined();
+    expect(result.output).toContain('model: cheap/fast');
+    expect(createAgent).toHaveBeenCalledWith({
+      binding: { profile: 'tower-worker', model: 'cheap/fast', thinking: undefined },
+      labels: { parentAgentId: 'main' },
+    });
+    const activityLog = await readFile(join(repo, '.tower/comms/log/activity.log'), 'utf8');
+    expect(activityLog).toMatch(/spawn .*model=cheap\/fast/);
+  });
+
+  it('inherits the tower model when the secondary-model experiment is off', async () => {
+    const result = await execute(WORKER_ARGS);
+
+    expect(result.isError).toBeUndefined();
+    expect(result.output).toContain('model: kimi-code');
+    const activityLog = await readFile(join(repo, '.tower/comms/log/activity.log'), 'utf8');
+    expect(activityLog).toMatch(/spawn .*model=kimi-code/);
   });
 
   it('registers a reviewer without a worktree', async () => {

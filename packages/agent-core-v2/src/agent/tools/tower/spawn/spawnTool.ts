@@ -12,7 +12,11 @@
  * `IAgentTaskService` under a `SubagentTask` — the same background path as
  * the `Agent` tool. Spawn concurrency is gated by `ITowerRateLimitService`;
  * the slot is released when the agent's completion settles (or immediately on
- * a launch/registration failure).
+ * a launch/registration failure). The worker's model binding follows the same
+ * rule as the `Agent`/`AgentSwarm` tools (`resolveSubagentBinding`): the
+ * configured secondary model while the secondary-model experiment is on,
+ * otherwise the tower's own model — the resolved model is reported in the
+ * tool output and the `spawn` line of the tower activity log.
  *
  * Deliberate v2 adaptation — no per-agent cwd: v1 confined each worker by
  * overriding its process cwd to the worktree. v2 freezes the session cwd by
@@ -31,6 +35,8 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
+import type { IAgentScopeHandle } from '#/_base/di/scope';
+import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentTaskService } from '#/agent/task/task';
 import {
@@ -48,6 +54,9 @@ import {
 import { IAgentTowerService } from '#/agent/tower/tower';
 import { ITowerRateLimitService } from '#/agent/tower/towerRateLimit';
 import { registerAgentToolService } from '#/agent/toolRegistry/toolContribution';
+import { IConfigService } from '#/app/config/config';
+import { IFlagService } from '#/app/flag/flag';
+import { IModelCatalog } from '#/kosong/model/catalog';
 import { toInputJsonSchema } from '#/tool/input-schema';
 import {
   type ExecutableToolContext,
@@ -57,7 +66,11 @@ import {
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
 import { subagentLabels } from '#/session/agentLifecycle/subagentMetadata';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
-import { DEFAULT_SUBAGENT_TIMEOUT_MS } from '#/session/subagent/configSection';
+import {
+  DEFAULT_SUBAGENT_TIMEOUT_MS,
+  resolveSubagentBinding,
+  wrapSubagentModelError,
+} from '#/session/subagent/configSection';
 import { emitAgentRunSpawned, mirrorAgentRun } from '#/session/subagent/mirrorAgentRun';
 import { ISessionSubagentService } from '#/session/subagent/subagent';
 
@@ -67,6 +80,8 @@ import { ITowerSpawnTool, TowerSpawnToolInputSchema, type TowerSpawnToolInput } 
 import DESCRIPTION from './spawn.md?raw';
 
 const TOWER_WORKER_PROFILE = 'tower-worker';
+
+type SubagentBinding = ReturnType<typeof resolveSubagentBinding>;
 
 export class TowerSpawnTool implements ITowerSpawnTool {
   declare readonly _serviceBrand: undefined;
@@ -84,6 +99,10 @@ export class TowerSpawnTool implements ITowerSpawnTool {
     @IAgentLifecycleService private readonly lifecycle: IAgentLifecycleService,
     @ISessionSubagentService private readonly subagents: ISessionSubagentService,
     @IAgentTaskService private readonly tasks: IAgentTaskService,
+    @IAgentProfileService private readonly profile: IAgentProfileService,
+    @IConfigService private readonly config: IConfigService,
+    @IFlagService private readonly flags: IFlagService,
+    @IModelCatalog private readonly modelCatalog: IModelCatalog,
   ) {
     this.callerAgentId = scopeContext.agentId;
   }
@@ -180,9 +199,22 @@ export class TowerSpawnTool implements ITowerSpawnTool {
       let slotHeld = true;
       try {
         const controller = new AbortController();
+        // The same binding rule as the Agent/AgentSwarm tools: the configured
+        // secondary model when the experiment is on, otherwise inherit the
+        // tower's own model.
+        const own = this.profile.data();
+        const binding =
+          own.modelAlias === undefined
+            ? undefined
+            : resolveSubagentBinding(
+                this.config,
+                this.flags,
+                { modelAlias: own.modelAlias, thinkingLevel: own.thinkingLevel },
+                undefined,
+              );
         let handle: SubagentHandle;
         try {
-          handle = await this.launch(prompt, description, toolCallId, controller);
+          handle = await this.launch(prompt, description, toolCallId, controller, binding);
         } catch (error) {
           return {
             output: `tower spawn failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -231,6 +263,7 @@ export class TowerSpawnTool implements ITowerSpawnTool {
             agent: handle.agentId,
             mission: mission?.id,
             target: reviewTarget,
+            model: binding?.displayModel,
           },
           mission !== undefined
             ? join(MISSIONS_DIR, missionFileName(mission.id, mission.slug))
@@ -244,6 +277,7 @@ export class TowerSpawnTool implements ITowerSpawnTool {
             `agent_id: ${handle.agentId}`,
             `task_id: ${taskId}`,
             'status: running',
+            ...(binding !== undefined ? [`model: ${binding.displayModel}`] : []),
             ...(mission !== undefined
               ? [
                   `mission: ${mission.id} — ${mission.title}`,
@@ -275,16 +309,31 @@ export class TowerSpawnTool implements ITowerSpawnTool {
     description: string,
     toolCallId: string,
     controller: AbortController,
+    binding: SubagentBinding | undefined,
   ): Promise<SubagentHandle> {
     const requester = this.lifecycle.get(this.callerAgentId);
     if (requester === undefined) {
       throw new Error(`Caller agent "${this.callerAgentId}" does not exist`);
     }
 
-    const created = await this.lifecycle.create({
-      binding: { profile: TOWER_WORKER_PROFILE },
-      labels: subagentLabels(this.callerAgentId),
-    });
+    let created: IAgentScopeHandle;
+    try {
+      // Validate the bound alias up front so a dangling [secondary_model]
+      // pointer fails the spawn here, not mid-turn inside the worker.
+      if (binding !== undefined) this.modelCatalog.get(binding.model);
+      created = await this.lifecycle.create({
+        binding: {
+          profile: TOWER_WORKER_PROFILE,
+          model: binding?.model,
+          thinking: binding?.thinking,
+        },
+        labels: subagentLabels(this.callerAgentId),
+      });
+    } catch (error) {
+      throw binding === undefined
+        ? error
+        : wrapSubagentModelError(error, binding.model, this.profile.data().modelAlias);
+    }
     const agentId = created.id;
 
     emitAgentRunSpawned(requester, agentId, {

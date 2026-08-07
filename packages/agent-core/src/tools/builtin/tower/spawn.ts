@@ -16,12 +16,14 @@ import { AgentBackgroundTask, type BackgroundManager } from '../../../agent/back
 import { MISSIONS_DIR, TOWER_NAME, WORKTREES_DIR, missionFileName } from '../../../agent/tower';
 import type { TowerMission, TowerState, TowerStore } from '../../../agent/tower';
 import type { BuiltinTool } from '../../../agent/tool';
+import { SECONDARY_DERIVED_MODEL_ALIAS } from '../../../config';
 import type {
   ExecutableToolContext,
   ExecutableToolResult,
   ToolExecution,
 } from '../../../loop/types';
 import { towerRateLimiter } from '../../../loop/rate-limiter';
+import { resolveSubagentBinding } from '../../../session/subagent-binding';
 import {
   DEFAULT_SUBAGENT_TIMEOUT_MS,
   type SessionSubagentHost,
@@ -225,6 +227,24 @@ The briefing prompt is assembled by this tool (worktree path, scope, protocol ru
           });
         slotHeld = false;
 
+        // Display-only resolution — the host already resolved (and validated)
+        // the same binding inside spawn(); surface it in the log and output.
+        const spawnBinding = resolveSubagentBinding(
+          this.agent.kimiConfig,
+          this.agent.experimentalFlags,
+          {
+            modelAlias: this.agent.config.modelAlias,
+            thinkingEffort: this.agent.config.thinkingEffort,
+          },
+          undefined,
+        );
+        const boundModel =
+          spawnBinding.modelAlias === undefined
+            ? undefined
+            : spawnBinding.modelAlias === SECONDARY_DERIVED_MODEL_ALIAS
+              ? (this.agent.kimiConfig?.secondaryModel?.model ?? spawnBinding.modelAlias)
+              : spawnBinding.modelAlias;
+
         await store.registerAgent({
           name: args.name,
           agentId: handle.agentId,
@@ -244,6 +264,7 @@ The briefing prompt is assembled by this tool (worktree path, scope, protocol ru
             agent: handle.agentId,
             mission: mission?.id,
             target: reviewTarget,
+            model: boundModel,
           },
           mission !== undefined
             ? join(MISSIONS_DIR, missionFileName(mission.id, mission.slug))
@@ -257,6 +278,7 @@ The briefing prompt is assembled by this tool (worktree path, scope, protocol ru
             `agent_id: ${handle.agentId}`,
             `task_id: ${taskId}`,
             'status: running',
+            ...(boundModel !== undefined ? [`model: ${boundModel}`] : []),
             ...(mission !== undefined
               ? [
                   `mission: ${mission.id} — ${mission.title}`,
