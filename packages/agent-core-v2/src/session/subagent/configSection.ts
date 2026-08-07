@@ -26,9 +26,14 @@
  * resolved capability flags when an `IModelCatalog` is provided, so the parent
  * can route multimodal or thinking-heavy subagent tasks instead of guessing
  * from the model id), and wrap secondary-model spawn failures with
- * `wrapSubagentModelError`; while the experiment is off they also strip the
- * no-op `model` parameter from their advertised schemas via
- * `stripSubagentModelParameter` when callers opt into that path.
+ * `wrapSubagentModelError`. Spawn reporting reads the display-facing alias from
+ * `subagentDisplayModel` / the binding's `displayModel`: the derived entry id
+ * means nothing to a user, so it resolves back to the recipe's base alias —
+ * flag-independent on purpose, since interpreting an already-persisted derived
+ * binding (resume) must keep working after the experiment is switched off.
+ * Because free-form aliases remain available even when the experiment is off,
+ * the advertised `model` parameter stays in the tool schema; callers that only
+ * expose the primary/secondary pair may still use `stripSubagentModelParameter`.
  * Self-registered at module load via `registerConfigSection`.
  */
 
@@ -110,6 +115,8 @@ export interface SubagentModelBinding {
   readonly model: string;
   readonly thinking?: string;
   readonly source: SubagentBindingSource;
+  /** User-facing alias; maps derived secondary ids back to the recipe base. */
+  readonly displayModel: string;
 }
 
 export function resolveSecondaryModel(
@@ -127,28 +134,61 @@ export function resolveSubagentBinding(
   requested?: SubagentModelChoice,
 ): SubagentModelBinding {
   if (requested === 'primary') {
-    return { model: own.modelAlias, thinking: own.thinkingLevel, source: 'primary' };
+    return {
+      model: own.modelAlias,
+      thinking: own.thinkingLevel,
+      source: 'primary',
+      displayModel: subagentDisplayModel(config, own.modelAlias),
+    };
   }
 
   // Free-form alias (anything other than the secondary shortcut / omit).
   if (requested !== undefined && requested !== 'secondary') {
-    return { model: requested, thinking: undefined, source: 'explicit' };
+    return {
+      model: requested,
+      thinking: undefined,
+      source: 'explicit',
+      displayModel: subagentDisplayModel(config, requested),
+    };
   }
 
   // requested is undefined | 'secondary' — secondary default when available.
   const secondary = resolveSecondaryModel(config, flags);
   if (secondary?.model !== undefined) {
+    const model =
+      secondaryModelPatch(secondary) === undefined
+        ? secondary.model
+        : SECONDARY_DERIVED_MODEL_ID;
     return {
-      model:
-        secondaryModelPatch(secondary) === undefined
-          ? secondary.model
-          : SECONDARY_DERIVED_MODEL_ID,
+      model,
       thinking: secondary.defaultEffort,
       source: 'secondary',
+      displayModel: subagentDisplayModel(config, model),
     };
   }
 
-  return { model: own.modelAlias, thinking: own.thinkingLevel, source: 'inherit' };
+  return {
+    model: own.modelAlias,
+    thinking: own.thinkingLevel,
+    source: 'inherit',
+    displayModel: subagentDisplayModel(config, own.modelAlias),
+  };
+}
+
+/**
+ * Map a bound model alias to the value shown in spawn UIs. The derived
+ * secondary entry id is an internal catalog key; resume and listings should
+ * show the recipe's base alias instead. Independent of the experiment flag so
+ * already-persisted derived bindings still render after the flag is flipped off.
+ */
+export function subagentDisplayModel(
+  config: IConfigService,
+  boundAlias: string,
+): string {
+  if (boundAlias !== SECONDARY_DERIVED_MODEL_ID) return boundAlias;
+  return (
+    config.get<SecondaryModelConfig | undefined>(SECONDARY_MODEL_SECTION)?.model ?? boundAlias
+  );
 }
 
 export interface BuildSubagentModelDescriptionsOptions {

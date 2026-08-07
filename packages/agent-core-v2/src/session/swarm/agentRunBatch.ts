@@ -13,6 +13,7 @@ import type { SubagentModelBinding } from '#/session/subagent/configSection';
 import * as retry from 'retry';
 
 import { isUserCancellation } from '#/_base/utils/abort';
+import { setClampedTimeout } from '#/_base/utils/timer';
 import { BugIndicatingError, Error2, ErrorCodes } from '#/errors';
 import type { SessionSwarmRunResult, SessionSwarmTask } from './sessionSwarm';
 
@@ -602,9 +603,9 @@ export class AgentRunBatch<T> {
       attempt.controller.abort(task.signal?.reason);
     };
     const timeout =
-      task.timeout === undefined
+      task.timeout === undefined || task.timeout <= 0
         ? undefined
-        : setTimeout(() => {
+        : setClampedTimeout(() => {
             attempt.timedOut = true;
             attempt.controller.abort(new Error('Aborted'));
           }, task.timeout);

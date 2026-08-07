@@ -80,6 +80,7 @@ import {
   resolveSubagentTimeoutMs,
   SUBAGENT_SECTION,
   SUBAGENT_TIMEOUT_ENV,
+  subagentDisplayModel,
   type SubagentConfig,
   wrapSubagentModelError,
 } from '#/session/subagent/configSection';
@@ -1747,11 +1748,13 @@ describe('subagent config section', () => {
       model: 'provider/main',
       thinking: 'medium',
       source: 'inherit',
+      displayModel: 'provider/main',
     });
     expect(resolveSubagentBinding(noModel.config, secondaryModelFlags(), own, 'secondary')).toEqual({
       model: 'provider/main',
       thinking: 'medium',
       source: 'inherit',
+      displayModel: 'provider/main',
     });
     // A free-form alias binds explicitly and leaves thinking to resolve
     // naturally, regardless of the secondary config.
@@ -1761,6 +1764,7 @@ describe('subagent config section', () => {
       model: 'provider/other',
       thinking: undefined,
       source: 'explicit',
+      displayModel: 'provider/other',
     });
     noModel.disposables.dispose();
 
@@ -1771,11 +1775,13 @@ describe('subagent config section', () => {
       model: 'provider/secondary',
       thinking: undefined,
       source: 'secondary',
+      displayModel: 'provider/secondary',
     });
     expect(resolveSubagentBinding(withModel.config, secondaryModelFlags(), own, 'primary')).toEqual({
       model: 'provider/main',
       thinking: 'medium',
       source: 'primary',
+      displayModel: 'provider/main',
     });
     withModel.disposables.dispose();
 
@@ -1789,12 +1795,14 @@ describe('subagent config section', () => {
       model: SECONDARY_DERIVED_MODEL_ID,
       thinking: 'low',
       source: 'secondary',
+      displayModel: 'provider/secondary',
     });
     // default_effort only applies together with the secondary model.
     expect(resolveSubagentBinding(withEffort.config, secondaryModelFlags(), own, 'primary')).toEqual({
       model: 'provider/main',
       thinking: 'medium',
       source: 'primary',
+      displayModel: 'provider/main',
     });
     withEffort.disposables.dispose();
 
@@ -1806,6 +1814,7 @@ describe('subagent config section', () => {
       model: SECONDARY_DERIVED_MODEL_ID,
       thinking: undefined,
       source: 'secondary',
+      displayModel: 'provider/secondary',
     });
     withFactPatch.disposables.dispose();
   });
@@ -1821,9 +1830,40 @@ describe('subagent config section', () => {
       model: 'provider/main',
       thinking: 'medium',
       source: 'inherit',
+      displayModel: 'provider/main',
     });
 
     disposables.dispose();
+  });
+
+  it('normalizes the derived entry to the recipe base alias regardless of the flag', async () => {
+    const withRecipe = await createConfig(
+      {},
+      '[secondary_model]\nmodel = "provider/secondary"\ndefault_effort = "low"\n',
+    );
+    expect(subagentDisplayModel(withRecipe.config, SECONDARY_DERIVED_MODEL_ID)).toBe(
+      'provider/secondary',
+    );
+    expect(subagentDisplayModel(withRecipe.config, 'provider/main')).toBe('provider/main');
+    withRecipe.disposables.dispose();
+
+    const bare = await createConfig({});
+    expect(subagentDisplayModel(bare.config, SECONDARY_DERIVED_MODEL_ID)).toBe(
+      SECONDARY_DERIVED_MODEL_ID,
+    );
+    bare.disposables.dispose();
+  });
+
+  it('normalizes an inherited derived alias on the caller-fallback branch', async () => {
+    const withRecipe = await createConfig({}, '[secondary_model]\nmodel = "provider/secondary"\n');
+    const own = { modelAlias: SECONDARY_DERIVED_MODEL_ID, thinkingLevel: 'medium' };
+    expect(resolveSubagentBinding(withRecipe.config, secondaryModelFlags(false), own)).toEqual({
+      model: SECONDARY_DERIVED_MODEL_ID,
+      thinking: 'medium',
+      source: 'inherit',
+      displayModel: 'provider/secondary',
+    });
+    withRecipe.disposables.dispose();
   });
 
   it('preserves the coded error contract when adding secondary-model guidance', () => {
