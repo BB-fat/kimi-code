@@ -17,6 +17,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vite
 import { SyncDescriptor } from '#/_base/di/descriptors';
 import { DisposableStore } from '#/_base/di/lifecycle';
 import { TestInstantiationService } from '#/_base/di/test';
+import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentTaskService } from '#/agent/task/task';
@@ -76,6 +77,8 @@ describe('TowerSpawnTool', () => {
   let runAgent: Mock<ISessionSubagentService['run']>;
   let registerTask: Mock<IAgentTaskService['registerTask']>;
   let completion: Deferred<{ readonly summary: string }>;
+  let permissionMode: 'manual' | 'yolo' | 'auto';
+  let childSetPermissionMode: Mock<IAgentPermissionModeService['setMode']>;
   let secondaryFlagOn: boolean;
   let secondaryModel: { readonly model: string } | undefined;
 
@@ -99,9 +102,19 @@ describe('TowerSpawnTool', () => {
     gate = { ok: true };
     release = vi.fn();
     completion = deferred();
+    permissionMode = 'manual';
+    childSetPermissionMode = vi.fn();
     secondaryFlagOn = false;
     secondaryModel = undefined;
-    createAgent = vi.fn(async () => ({ id: 'agent-7' }) as never);
+    createAgent = vi.fn(async () => ({
+      id: 'agent-7',
+      accessor: {
+        get: (id: unknown) =>
+          id === (IAgentPermissionModeService as unknown)
+            ? { setMode: childSetPermissionMode }
+            : undefined,
+      },
+    }) as never);
     runAgent = vi.fn(
       async (agentId: string) =>
         ({ agentId, turn: undefined, completion: completion.promise }) as unknown as AgentRunHandle,
@@ -143,6 +156,12 @@ describe('TowerSpawnTool', () => {
           : undefined,
       create: createAgent,
     } as unknown as IAgentLifecycleService);
+    ix.stub(IAgentPermissionModeService, {
+      get mode() {
+        return permissionMode;
+      },
+      setMode: vi.fn(),
+    } as unknown as IAgentPermissionModeService);
     ix.stub(ISessionSubagentService, { run: runAgent } as unknown as ISessionSubagentService);
     ix.stub(IAgentTaskService, { registerTask } as unknown as IAgentTaskService);
     ix.stub(IAgentProfileService, {
@@ -245,6 +264,19 @@ describe('TowerSpawnTool', () => {
       expect(release).toHaveBeenCalledTimes(1);
     });
   });
+
+  it.each(['auto', 'yolo'] as const)(
+    'inherits %s permission mode for tower workers',
+    async (mode) => {
+      permissionMode = mode;
+
+      const result = await execute(WORKER_ARGS);
+
+      expect(result.isError).toBeUndefined();
+      expect(childSetPermissionMode).toHaveBeenCalledWith(mode);
+      completion.resolve({ summary: 'worker done' });
+    },
+  );
 
   it('binds the configured secondary model and reports it in the output and activity log', async () => {
     secondaryFlagOn = true;

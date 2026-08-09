@@ -37,6 +37,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { IAgentScopeHandle } from '#/_base/di/scope';
+import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentTaskService } from '#/agent/task/task';
@@ -101,6 +102,7 @@ export class TowerSpawnTool implements ITowerSpawnTool {
     @ISessionSubagentService private readonly subagents: ISessionSubagentService,
     @IAgentTaskService private readonly tasks: IAgentTaskService,
     @IAgentProfileService private readonly profile: IAgentProfileService,
+    @IAgentPermissionModeService private readonly permissionMode: IAgentPermissionModeService,
     @IConfigService private readonly config: IConfigService,
     @IFlagService private readonly flags: IFlagService,
     @IModelCatalog private readonly modelCatalog: IModelCatalog,
@@ -335,8 +337,9 @@ export class TowerSpawnTool implements ITowerSpawnTool {
     } catch (error) {
       throw binding === undefined
         ? error
-        : wrapSubagentModelError(error, binding.model, this.profile.data().modelAlias);
+        : wrapSubagentModelError(error, binding.model, binding.source);
     }
+    created.accessor.get(IAgentPermissionModeService).setMode(this.permissionMode.mode);
     const agentId = created.id;
 
     emitAgentRunSpawned(requester, agentId, {
