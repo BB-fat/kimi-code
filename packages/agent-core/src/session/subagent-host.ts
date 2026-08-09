@@ -133,6 +133,13 @@ export interface SpawnSubagentOptions extends RunSubagentOptions {
    * and secondary-as-default still require the `secondary-model` experiment.
    */
   readonly modelChoice?: SubagentModelChoice;
+  /**
+   * Working-directory override for the child. Defaults to the parent's cwd.
+   * Used by tower to confine a worker to its git worktree: relative paths,
+   * the workspace guard, and the Bash default cwd all anchor there instead of
+   * the main checkout.
+   */
+  readonly cwd?: string;
 }
 
 type SubagentCompletion = {
@@ -176,7 +183,7 @@ export class SessionSubagentHost {
     const completion = this.runWithActiveChild(id, options, async (runOptions) => {
       this.emitSubagentSpawned(parent, id, profile.name, runOptions);
       try {
-        await this.configureChild(parent, agent, profile, options.modelChoice);
+        await this.configureChild(parent, agent, profile, options.modelChoice, options.cwd);
         return await this.runPromptTurn(parent, id, agent, profile.name, runOptions);
       } catch (error) {
         this.emitSubagentFailed(parent, id, runOptions, error);
@@ -442,10 +449,11 @@ export class SessionSubagentHost {
     child: Agent,
     profile: ResolvedAgentProfile,
     modelChoice?: SubagentModelChoice,
+    cwdOverride?: string,
   ): Promise<void> {
     const binding = this.resolveSpawnBinding(parent, profile, modelChoice);
     child.config.update({
-      cwd: parent.config.cwd,
+      cwd: cwdOverride ?? parent.config.cwd,
       modelAlias: binding.modelAlias,
       thinkingEffort: binding.thinkingEffort,
     });
