@@ -57,6 +57,7 @@ export interface EditorKeyboardHost {
   handleInputModeChange(mode: 'prompt' | 'bash'): void;
   clearQueuedMessages(): void;
   setExternalEditorRunning(running: boolean): void;
+  updateActivityPane(): void;
 }
 
 export class EditorKeyboardController {
@@ -528,7 +529,10 @@ export class EditorKeyboardController {
     }
     this.host.setExternalEditorRunning(true);
     const seed = state.editor.getExpandedText?.() ?? state.editor.getText();
-    state.ui.stop();
+    // Fullscreen: a plain stop() would replay the whole transcript into the
+    // main screen on exit; the external editor only needs the alternate
+    // screen released, so preserve the screen instead.
+    state.ui.stop({ preserveScreen: state.ui.mode === 'fullscreen' ? true : undefined });
     await new Promise<void>((resolve) => {
       setImmediate(resolve);
     });
@@ -547,6 +551,11 @@ export class EditorKeyboardController {
       state.ui.start();
       state.ui.setFocus(state.editor);
       state.ui.requestRender(true);
+      // terminal.stop() cleared the OSC 9;4 progress indicator while the
+      // app-side progressActive flag still reads true; resync so a turn that
+      // was streaming while the editor was open gets its progress back.
+      state.terminalState.progressActive = false;
+      this.host.updateActivityPane();
       this.host.setExternalEditorRunning(false);
     }
   }

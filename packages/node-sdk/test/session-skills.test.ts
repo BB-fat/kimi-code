@@ -180,15 +180,18 @@ describe('Session skills', () => {
       expect(state['lastPrompt']).toBe('/review src/app.ts');
 
       const skillDir = normalizeWorkDir(await realpath(join(workDir, '.kimi-code', 'skills', 'review')));
+      // Skill activation steers (not prompts) so /tower and other
+      // allowActivationWhileBusy skills can land mid-turn; with no active
+      // turn, steer launches a new turn the same way prompt would.
       await expect(
         waitForAgentWireEvent(
           homeDir,
           session.id,
-          'turn.prompt',
+          'turn.steer',
           (event) => event['origin'] !== undefined,
         ),
       ).resolves.toMatchObject({
-        type: 'turn.prompt',
+        type: 'turn.steer',
         input: [
           {
             type: 'text',
