@@ -544,7 +544,7 @@ async function closeAll(...harnesses: readonly KimiHarness[]): Promise<void> {
  * and skew the comparison; the original values are restored on cleanup.
  */
 const CONFIG_ENV_PATTERN =
-  /^(KIMI_MODEL_|KIMI_LOOP_|KIMI_MCP_|KIMI_WEB_|KIMI_SECONDARY_|KIMI_IMAGE_|KIMI_CODE_BACKGROUND_|KIMI_CODE_MODEL_CATALOG_)/;
+  /^(KIMI_MODEL_|KIMI_LOOP_|KIMI_MCP_|KIMI_WEB_|KIMI_IMAGE_|KIMI_CODE_BACKGROUND_|KIMI_CODE_MODEL_CATALOG_)/;
 
 function scrubConfigEnv(): () => void {
   const saved: Record<string, string> = {};
@@ -660,35 +660,6 @@ api_key = "fixture-api-key"
 
 [thinking]
 enabled = "not-a-boolean"
-`;
-
-/**
- * Secondary-model parity fixture: one resolvable model and the experiment
- * enabled, no `[secondary_model]` recipe — the apply cases persist the recipe
- * through `setConfig` mid-test.
- */
-const SECONDARY_MODEL_CONFIG_TOML = `
-default_provider = "fixture-provider"
-default_model = "fixture-model"
-
-[providers.fixture-provider]
-type = "kimi"
-api_key = "fixture-api-key"
-base_url = "https://example.com/v1"
-
-[models.fixture-model]
-provider = "fixture-provider"
-model = "kimi-for-coding"
-max_context_size = 262144
-
-[experimental]
-secondary-model = true
-`;
-
-/** Same fixture with a dangling `[secondary_model]` pointer baked in. */
-const SECONDARY_MODEL_BROKEN_CONFIG_TOML = `${SECONDARY_MODEL_CONFIG_TOML}
-[secondary_model]
-model = "missing-model"
 `;
 
 function expectConfigParity(v1Config: KimiConfig, v2Config: KimiConfig): void {
@@ -2505,8 +2476,8 @@ describe('v1↔v2 agent interaction parity', () => {
     // Model-less on purpose: parity covers the pre-provider surface — the
     // call returns without throwing and the metadata update (same shared
     // helpers on both engines) lands before the turn fails asynchronously.
-    // The enqueue-semantics gaps (v1 drops a mid-turn prompt, v2 queues it;
-    // v1 ignores disabledTools, v2 applies it) are pinned in the tracker.
+    // The enqueue-semantics gap (v1 drops a mid-turn prompt, v2 queues it) is
+    // pinned in the tracker.
     const pair = await makeSessionParityPair();
     try {
       await createOnBoth(pair, { id: 'session_parity_agent_prompt' });
@@ -2734,96 +2705,6 @@ describe('v1↔v2 agent interaction parity', () => {
       await expect(pair.v2.getSessionWarnings({ sessionId: 'session_missing' })).rejects.toMatchObject(
         { code: ErrorCodes.SESSION_NOT_FOUND },
       );
-    } finally {
-      await closeSessionPair(pair);
-      restoreEnv();
-    }
-  });
-
-  it('applyPersistedSecondaryModel validates, applies, and refreshes warnings identically', async () => {
-    const restoreEnv = scrubConfigEnv();
-    const pair = await makeSessionParityPair(SECONDARY_MODEL_CONFIG_TOML);
-    try {
-      await createOnBoth(pair, { id: 'session_parity_secondary_apply' });
-      const input = { sessionId: 'session_parity_secondary_apply' } as const;
-      const applyError = (client: SDKRpcClient | SDKRpcClientV2) =>
-        client.applyPersistedSecondaryModel(input).then(
-          () => undefined,
-          (error: unknown) => error as Error,
-        );
-
-      // No recipe persisted yet: both reject with v1's persist-first error.
-      const [v1NoRecipe, v2NoRecipe] = await Promise.all([
-        applyError(pair.v1),
-        applyError(pair.v2),
-      ]);
-      expect(v1NoRecipe).toMatchObject({ code: ErrorCodes.CONFIG_INVALID });
-      expect(v2NoRecipe).toMatchObject({ code: ErrorCodes.CONFIG_INVALID });
-      expect(v2NoRecipe?.message).toBe(v1NoRecipe?.message);
-
-      // A dangling recipe: both reject, pointing at [secondary_model].
-      await Promise.all([
-        pair.v1.setConfig({ secondaryModel: { model: 'missing-model' } }),
-        pair.v2.setConfig({ secondaryModel: { model: 'missing-model' } }),
-      ]);
-      const [v1Broken, v2Broken] = await Promise.all([
-        applyError(pair.v1),
-        applyError(pair.v2),
-      ]);
-      expect(v1Broken).toMatchObject({ code: ErrorCodes.CONFIG_INVALID });
-      expect(v2Broken).toMatchObject({ code: ErrorCodes.CONFIG_INVALID });
-      expect(v1Broken?.message).toContain('[secondary_model].model');
-      expect(v2Broken?.message).toContain('[secondary_model].model');
-
-      // A valid recipe: both apply cleanly. The warnings pull converges on
-      // empty — v1's snapshot never held the broken recipe (its apply
-      // validates before mutating), v2's live-config warning cache is
-      // refreshed by the successful apply.
-      await Promise.all([
-        pair.v1.setConfig({ secondaryModel: { model: 'fixture-model' } }),
-        pair.v2.setConfig({ secondaryModel: { model: 'fixture-model' } }),
-      ]);
-      await Promise.all([
-        pair.v1.applyPersistedSecondaryModel(input),
-        pair.v2.applyPersistedSecondaryModel(input),
-      ]);
-      const [v1Warnings, v2Warnings] = await Promise.all([
-        pair.v1.getSessionWarnings(input),
-        pair.v2.getSessionWarnings(input),
-      ]);
-      expect(v2Warnings).toEqual(v1Warnings);
-      expect(v1Warnings).toEqual([]);
-
-      await expect(
-        pair.v1.applyPersistedSecondaryModel({ sessionId: 'session_missing' }),
-      ).rejects.toMatchObject({ code: ErrorCodes.SESSION_NOT_FOUND });
-      await expect(
-        pair.v2.applyPersistedSecondaryModel({ sessionId: 'session_missing' }),
-      ).rejects.toMatchObject({ code: ErrorCodes.SESSION_NOT_FOUND });
-    } finally {
-      await closeSessionPair(pair);
-      restoreEnv();
-    }
-  });
-
-  it('getSessionWarnings flags a creation-time broken secondary recipe on both engines', async () => {
-    const restoreEnv = scrubConfigEnv();
-    const pair = await makeSessionParityPair(SECONDARY_MODEL_BROKEN_CONFIG_TOML);
-    try {
-      await createOnBoth(pair, { id: 'session_parity_secondary_broken' });
-      const input = { sessionId: 'session_parity_secondary_broken' } as const;
-      const [v1Warnings, v2Warnings] = await Promise.all([
-        pair.v1.getSessionWarnings(input),
-        pair.v2.getSessionWarnings(input),
-      ]);
-      // The message wording is engine-specific; the code + severity are the
-      // shared contract.
-      const codes = (warnings: readonly { code: string; severity: string }[]) =>
-        warnings.map(({ code, severity }) => ({ code, severity }));
-      expect(codes(v2Warnings)).toEqual(codes(v1Warnings));
-      expect(codes(v1Warnings)).toEqual([
-        { code: 'secondary-model-invalid', severity: 'warning' },
-      ]);
     } finally {
       await closeSessionPair(pair);
       restoreEnv();
@@ -3604,10 +3485,10 @@ describe('v1↔v2 global MCP parity', () => {
     });
     for (const homeDir of [pair.v1HomeDir, pair.v2HomeDir]) {
       const externalOAuth = new McpOAuthService({ kimiHomeDir: homeDir });
-      externalOAuth
+      await externalOAuth
         .getProvider('oauth-authorized', authorizedUrl)
         .saveTokens({ access_token: 'test-access-token', token_type: 'Bearer' });
-      externalOAuth
+      await externalOAuth
         .getProvider('sse', statusServer.oauthUrl)
         .saveTokens({ access_token: 'stale-sse-token', token_type: 'Bearer' });
     }

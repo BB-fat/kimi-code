@@ -31,7 +31,7 @@ import { IConfigService } from '#/app/config/config';
 import { IEventBus } from '#/app/event/eventBus';
 import { EventBusService } from '#/app/event/eventBusService';
 import { IFlagService } from '#/app/flag/flag';
-import { SECONDARY_MODEL_SECTION } from '#/app/kosongConfig/configSection';
+import { SECONDARY_MODEL_SECTION } from '#/session/subagent/configSection';
 import { IModelCatalog } from '#/kosong/model/catalog';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';

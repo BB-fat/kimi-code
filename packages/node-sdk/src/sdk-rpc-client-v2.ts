@@ -57,10 +57,10 @@
  *   too (default-profile bind + permission mode).
  * - `prompt` / `steer` / `runShellCommand` / `cancelShellCommand` → the
  *   `klient.session(id).agent(id)` facade; `activatePluginCommand` →
- *   `IAgentRPCService` through the agent scope; `activateSkill` →
- *   `IAgentSkillService` through the agent scope (the RPC service's
- *   fire-and-forget variant would swallow v1's synchronous rejections) plus
- *   v1's main-only metadata update; `generateAgentsMd` →
+ *   `IAgentPluginCommandService` through the agent scope; `activateSkill` →
+ *   `IAgentSkillService` through the agent scope (the engine settles
+ *   `{turn_id}` and applies v1's main-only metadata update itself);
+ *   `generateAgentsMd` →
  *   `ISessionInitService` through the session scope; `getSessionWarnings` →
  *   rebuilt over the profile's cached AGENTS.md warning plus the engine's
  *   `prepareSystemPromptContext` (no v2 aggregate service exists).
@@ -118,13 +118,6 @@
  *   injection point — see the session-lifecycle section header), and
  *   `toolCall` keeps the base class's "not supported" answer, which the
  *   interaction bridge already relies on.
- * - `applyPersistedSecondaryModel` → the reload + loud validations + warning
- *   refresh of v1's contract, rebuilt over the live `IConfigService` recipe
- *   and `ISessionSecondaryModelWarningService.recheckSecondaryModelWarning`
- *   (the v2 spawn binding resolves the secondary model at spawn time, so
- *   there is no session snapshot to push). `getSessionWarnings` also
- *   surfaces the v2 secondary-model warning next to the AGENTS.md one,
- *   matching v1's aggregate.
  */
 import { randomUUID } from 'node:crypto';
 import { readdir } from 'node:fs/promises';
@@ -151,13 +144,10 @@ import {
   type BeginAuthorizationResult,
 } from '@moonshot-ai/agent-core-v2/mcpCore/oauth/service';
 import { createMcpOAuthStore } from '@moonshot-ai/agent-core-v2/app/mcpConfig/oauthStore';
-import { SECONDARY_MODEL_SECTION } from '@moonshot-ai/agent-core-v2/app/kosongConfig/configSection';
 import { IAtomicDocumentStore } from '@moonshot-ai/agent-core-v2/persistence/interface/atomicDocumentStore';
-import { wrapSubagentModelError } from '@moonshot-ai/agent-core-v2/session/subagent/configSection';
 import { loadMcpServers } from '@moonshot-ai/agent-core-v2/workspace/workspaceMcpConfig/internal/config-loader';
 import type { McpServerConfig as WorkspaceMcpServerConfig } from '@moonshot-ai/agent-core-v2/mcpCore/config-schema';
 import {
-  applyPromptMetadataUpdate,
   bootstrap,
   DEFAULT_AGENT_PROFILE_NAME,
   drainQueryStoreDisposals,
@@ -167,6 +157,7 @@ import {
   IAgentActivityView,
   IAgentContextInjectorService,
   IAgentContextMemoryService,
+  IAgentConversationUndoService,
   IAgentFullCompactionService,
   IAgentGoalService,
   IAgentPluginService,
@@ -174,18 +165,19 @@ import {
   IAgentLoopService,
   IAgentPermissionModeService,
   IAgentPermissionRulesService,
+  IAgentPluginCommandService,
   IAgentProfileService,
-  IAgentRPCService,
   IAgentSkillService,
   IAgentSwarmService,
   IAgentTaskService,
   IAgentTokenCountingService,
+  IAgentToolPolicyService,
+  IAgentToolRegistryService,
   IBootstrapService,
   IConfigService,
   IEventService,
   IHostEnvironment,
   IHostFileSystem,
-  IModelCatalog,
   IModelService,
   IProviderService,
   ISessionBtwService,
@@ -197,7 +189,6 @@ import {
   ISessionInitService,
   ISessionMcpHandle,
   ISessionMetadata,
-  ISessionSecondaryModelWarningService,
   ISessionSkillCatalog,
   ISessionWorkspaceContext,
   ITelemetryService,
@@ -223,7 +214,6 @@ import {
   PRINT_WAIT_CEILING_S_DEFAULT,
   ProfileError,
   ProfileErrors,
-  promptMetadataTextFromSkill,
   resolveAgentTaskConfig,
   resolveConfigPath,
   resolveKimiHome,
@@ -234,7 +224,6 @@ import {
   type IDisposable,
   type ISessionScopeHandle,
   type Scope,
-  type SecondaryModelConfig,
   type ServicesAccessor,
   type SessionSummary as V2SessionSummary,
 } from '@moonshot-ai/agent-core-v2';
@@ -661,26 +650,30 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
 
   /**
    * v1's removal cascades: the provider entry, every model pointing at it,
-   * and the default pointers when they dangle. The engine's own
-   * `kosong.removeProvider` only clears the default-provider pointer, so the
-   * full v1 cascade is computed from the user-layer values (see
-   * `planProviderRemoval`) and persisted as ONE atomic multi-section replace —
-   * the same single-write shape as v1's `removeKimiProvider`, so a process
-   * exit can never leave the file in a halfway-cascaded state.
+   * the default pointers when they dangle, and the `[secondary_model]`
+   * subagent pool entries (the section itself when its default dangles).
+   * The engine's own `kosong.removeProvider` only clears the
+   * default-provider pointer, so the full v1 cascade is computed from the
+   * user-layer values (see `planProviderRemoval`) and persisted as ONE
+   * atomic multi-section replace — the same single-write shape as v1's
+   * `removeKimiProvider`, so a process exit can never leave the file in a
+   * halfway-cascaded state.
    */
   override async removeProvider(providerId: string): Promise<KimiConfig> {
     await this.configReady;
-    const [providers, models, defaultModel, defaultProvider] = await Promise.all([
+    const [providers, models, defaultModel, defaultProvider, secondaryModel] = await Promise.all([
       this.klient.global.config.inspect<Record<string, unknown>>('providers'),
       this.klient.global.config.inspect<Record<string, Record<string, unknown>>>('models'),
       this.klient.global.config.inspect<string>('defaultModel'),
       this.klient.global.config.inspect<string>('defaultProvider'),
+      this.klient.global.config.inspect<Record<string, unknown>>('secondaryModel'),
     ]);
     const plan = planProviderRemoval({
       providers: providers.userValue,
       models: models.userValue,
       defaultModel: defaultModel.userValue,
       defaultProvider: defaultProvider.userValue,
+      secondaryModel: secondaryModel.userValue,
       providerId,
     });
     const sections: Record<string, unknown> = {
@@ -692,6 +685,11 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     }
     if (plan.clearDefaultProvider) {
       sections['defaultProvider'] = undefined;
+    }
+    if (plan.secondaryModel !== undefined) {
+      // `null` clears the whole section; a replacement object folds the
+      // filtered pool into the same atomic write.
+      sections['secondaryModel'] = plan.secondaryModel ?? undefined;
     }
     await this.klient.global.config.replaceSections({ sections });
     return this.getConfig();
@@ -965,6 +963,13 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       foldAgentWireReplay(join(ctx.sessionDir, 'agents', agent.id, 'wire.jsonl')),
     ]);
     const profile = agent.accessor.get(IAgentProfileService).data();
+    const toolPolicy = agent.accessor.get(IAgentToolPolicyService);
+    const tools = agent.accessor.get(IAgentToolRegistryService).list().map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      active: toolPolicy.isToolActive(tool.name, tool.source),
+      source: tool.source,
+    }));
     return {
       type,
       config: {
@@ -985,7 +990,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       plan: plan as ResumedAgentState['plan'],
       swarmMode: agent.accessor.get(IAgentSwarmService).isActive,
       usage: usage as ResumedAgentState['usage'],
-      tools: agent.accessor.get(IAgentRPCService).getTools({}) as ResumedAgentState['tools'],
+      tools: tools as ResumedAgentState['tools'],
       toolStore: folded.toolStore,
       background: background as readonly BackgroundTaskInfo[],
     };
@@ -1466,43 +1471,6 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     agent.accessor.get(IAgentProfileService).setThinking(input.effort);
   }
 
-  /**
-   * v1 reloads the core config and pushes the resolved snapshot into the
-   * session: the spawn binding, the tool descriptions, and the cached
-   * startup warning all read that snapshot. The v2 engine resolves the
-   * secondary model live against `IConfigService` at spawn time
-   * (`resolveSubagentBinding`) and rebuilds the tool description on every
-   * read, so the preceding `setConfig` write already took effect
-   * session-wide — what remains of v1's contract is the reload (the recipe
-   * may have been persisted through another channel), the same loud
-   * validations, and the warning-cache refresh. The recipe read is NOT
-   * flag-gated, mirroring v1's `setSecondaryModelConfig` (the experiment
-   * gate lives at the spawn binding on both engines).
-   */
-  override async applyPersistedSecondaryModel(input: SessionIdRpcInput): Promise<void> {
-    const session = this.requireLiveSession(input.sessionId);
-    await this.klient.global.config.reload();
-    await this.configReady;
-    await this.modelReady;
-    const secondary = this.engineAccessor
-      .get(IConfigService)
-      .get<SecondaryModelConfig | undefined>(SECONDARY_MODEL_SECTION);
-    if (secondary?.model === undefined) {
-      throw new KimiError(
-        ErrorCodes.CONFIG_INVALID,
-        'Cannot set the secondary model: persist its recipe before applying it to a session.',
-      );
-    }
-    try {
-      this.engineAccessor.get(IModelCatalog).get(secondary.model);
-    } catch (error) {
-      throw wrapSubagentModelError(error, secondary.model, 'secondary');
-    }
-    session.accessor
-      .get(ISessionSecondaryModelWarningService)
-      .recheckSecondaryModelWarning();
-  }
-
   override async setPermission(input: SetSessionPermissionRpcInput): Promise<void> {
     const agent = await this.agentFacade(input.sessionId);
     return agent.setPermission(input.mode);
@@ -1525,26 +1493,27 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     return agent.clearPlan();
   }
 
-  /** Facade (`agentRPCService.listCommands`) — the v2-only contributed-command seam. */
+  /** Facade (`agentCommandService.list`) — the v2-only contributed-command seam. */
   override async listCommands(input: SessionIdRpcInput): Promise<readonly AgentCommandInfo[]> {
     const agent = await this.agentFacade(input.sessionId);
     return agent.listCommands();
   }
 
-  /** Facade (`agentRPCService.runCommand`) — runs the contribution engine-side. */
+  /** Facade (`agentCommandService.run`) — runs the contribution engine-side. */
   override async runCommand(input: RunCommandRpcInput): Promise<void> {
     const agent = await this.agentFacade(input.sessionId);
     return agent.runCommand({ name: input.name, args: input.args });
   }
 
   /**
-   * Facade (`agentRPCService.getContext`). The v2 `AgentContextData` is the
+   * Facade (`getContext`, merged client-side from `agentContextMemoryService.get`
+   * and `agentTokenCountingService.statusSize`). The v2 `AgentContextData` is the
    * same wire shape as v1's — the cast only bridges the two packages' type
    * declarations (v2's origin union carries kinds a v1 client never sees in
    * practice); the data itself crossed the same JSON boundary on both sides.
-   * Token-count reporting is estimate-inclusive under v2's default
-   * `[token_counting]` strategy (`measured+estimated` via statusSize), matching
-   * v1's running-estimate semantics.
+   * Token-count semantics differ by design: v1 reports the running estimate,
+   * v2 the provider-measured prefix (`0` until the first LLM round) — pinned
+   * in the parity KNOWN_DIFFS.
    */
   override async getContext(input: SessionIdRpcInput): Promise<AgentContextData> {
     const agent = await this.agentFacade(input.sessionId);
@@ -1615,18 +1584,18 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   }
 
   /**
-   * Through the agent scope (`IAgentRPCService.cancelCompaction`, the v2 RPC
-   * surface's own cancel) — no klient facade exists. Aborts the in-flight
-   * compaction; a no-op when idle, like v1.
+   * Through the agent scope (`IAgentFullCompactionService.cancel`) — no
+   * klient facade exists. Aborts the in-flight compaction; a no-op when idle,
+   * like v1.
    */
   override async cancelCompaction(input: SessionIdRpcInput): Promise<void> {
     const agent = await this.agentScope(input.sessionId);
-    await agent.accessor.get(IAgentRPCService).cancelCompaction({});
+    agent.accessor.get(IAgentFullCompactionService).cancel();
   }
 
   /**
-   * Through the agent scope (`IAgentRPCService.undoHistory`, the v2 RPC
-   * surface's own undo) — no klient facade exists; the returned count is
+   * Through the agent scope (`IAgentConversationUndoService.undo`) — no
+   * klient facade exists; the returned count is
    * dropped (v1 returns void). Failure semantics differ by design: v2
    * prechecks and rejects atomically with `session.undo_unavailable`, while
    * v1 splices a partial suffix out of the live history and then throws
@@ -1634,7 +1603,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    */
   override async undoHistory(input: SessionIdRpcInput & { count: number }): Promise<void> {
     const agent = await this.agentScope(input.sessionId);
-    await agent.accessor.get(IAgentRPCService).undoHistory({ count: input.count });
+    await agent.accessor.get(IAgentConversationUndoService).undo(input.count);
   }
 
   /**
@@ -1654,9 +1623,10 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    * behavior over v2 primitives: the same busy rejection
    * (`turn.agent_busy`), the byte-identical import message and validations
    * (`src/v2/import-context.ts`), the same overflow gate, then the same wire
-   * `context.append_message` Op v1 persists. Post-import
-   * `getContext().tokenCount` is estimate-inclusive on both engines under the
-   * default strategy (v1's running estimate; v2's measured+estimated statusSize).
+   * `context.append_message` Op v1 persists. Known gap: v1 also adopts the
+   * post-import estimate as its reported token count, while v2's reported
+   * count is provider-measured and has no public setter — post-import
+   * `getContext().tokenCount` diverges (pinned in the parity KNOWN_DIFFS).
    */
   override async importContext(input: ImportContextRpcInput): Promise<void> {
     const agent = await this.agentScope(input.sessionId);
@@ -1681,24 +1651,22 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   }
 
   /**
-   * Facade (`agentRPCService.prompt`). The launch result (`{turn_id}`, or
+   * Facade (`agentPromptService.submit`). The launch result (`{turn_id}`, or
    * `undefined` when the prompt queued behind a running turn) is dropped —
    * v1's RPC returns void. The pre-provider surface matches v1: the metadata
    * update (title/lastPrompt) runs through the same shared helpers before the
    * turn launches, and a model-less turn fails asynchronously exactly like
-   * v1's. Two enqueue-semantics gaps vs v1, pinned in the migration tracker:
+   * v1's. One enqueue-semantics gap vs v1, pinned in the migration tracker:
    * v1 drops a prompt submitted while a turn is active (error event only)
-   * where v2 queues it FIFO, and v1 never consumes `disabledTools` (the
-   * payload field reaches the agent RPC but no code reads it) where v2
-   * applies it as the session tool denylist.
+   * where v2 queues it FIFO.
    */
   override async prompt(input: SessionPromptRpcInput): Promise<void> {
     const agent = await this.agentFacade(input.sessionId);
-    await agent.prompt({ input: input.input, disabledTools: input.disabledTools });
+    await agent.prompt({ input: input.input });
   }
 
   /**
-   * Facade (`agentRPCService.steer`). Matches v1 on both paths: mid-turn
+   * Facade (`agentPromptService.submitSteer`). Matches v1 on both paths: mid-turn
    * steers join the running turn, and an idle-session steer degrades to
    * launching a fresh turn (the enqueue launches it directly) while
    * title/lastPrompt are updated like a prompt's.
@@ -1737,40 +1705,32 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   }
 
   /**
-   * Through the agent scope (`IAgentSkillService.activate`) — deliberately
-   * NOT `IAgentRPCService.activateSkill`, whose `void this.skills.activate(...)`
-   * fire-and-forget turns v1's synchronous rejections (`skill.not_found` /
-   * `skill.type_unsupported`) into unhandled rejections. The direct call keeps
-   * v1's semantics: validate first, then render the skill prompt and launch a
-   * turn with it. v1's session layer then updates title/lastPrompt for the
-   * MAIN agent only; replicated here over the engine's shared metadata
-   * helpers. Busy-turn gap vs v1, pinned in the migration tracker: v1 drops
+   * Through the agent scope (`IAgentSkillService.activate`) — the direct call
+   * keeps v1's semantics: validate first (`skill.not_found` /
+   * `skill.type_unsupported` reject synchronously), then render the skill
+   * prompt and launch a turn with it. The engine updates title/lastPrompt for
+   * the MAIN agent only, matching v1's session layer. Busy-turn gap vs v1,
+   * pinned in the migration tracker: v1 drops
    * the activation into an error event while a turn runs; v2's activate
    * awaits the queued prompt's launch.
    */
   override async activateSkill(input: ActivateSkillRpcInput): Promise<void> {
     const agent = await this.agentScope(input.sessionId);
     await agent.accessor.get(IAgentSkillService).activate({ name: input.name, args: input.args });
-    if (this.interactiveAgentId === MAIN_AGENT_ID) {
-      await this.updatePromptMetadata(input.sessionId, promptMetadataTextFromSkill(input));
-    }
   }
 
   /**
-   * Through the agent scope (`IAgentRPCService.activatePluginCommand`) — the
-   * v2 RPC surface's own implementation: the same `request.invalid` rejection
-   * text for an unknown command, the same argument expansion, the activation
-   * event, the prompt enqueue, and the metadata update. Two gaps vs v1,
+   * Through the agent scope (`IAgentPluginCommandService.activate`): the same
+   * `request.invalid` rejection text for an unknown command, the same
+   * argument expansion, the activation event, the prompt enqueue, and the
+   * main-agent-only metadata update. Two gaps vs v1,
    * pinned in the migration tracker: v1 resolves the command against the
    * session's creation-time snapshot (v2 uses the app-global live view), and
-   * v1 drops the activation while a turn runs where v2 queues it. v1 also
-   * updates title/lastPrompt for the main agent only, where the v2 RPC does
-   * it unconditionally — only observable through a non-main
-   * `interactiveAgentId`.
+   * v1 drops the activation while a turn runs where v2 queues it.
    */
   override async activatePluginCommand(input: ActivatePluginCommandRpcInput): Promise<void> {
     const agent = await this.agentScope(input.sessionId);
-    await agent.accessor.get(IAgentRPCService).activatePluginCommand({
+    await agent.accessor.get(IAgentPluginCommandService).activate({
       pluginId: input.pluginId,
       commandName: input.commandName,
       args: input.args,
@@ -1795,22 +1755,14 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   }
 
   /**
-   * No v2 service implements the session-warnings aggregate (`ISessionRPCService`
-   * is an interface without an implementation), so the SDK rebuilds v1's
+   * No v2 service implements the session-warnings aggregate, so the SDK rebuilds v1's
    * `Session.getSessionWarnings` over v2 primitives: the profile's cached
    * `agentsMdWarning` (computed on every bind, v1's bootstrap-time cache),
    * recomputed through the engine's own `prepareSystemPromptContext` when the
    * cache is empty — v1 recomputes on demand whenever no warning is cached,
    * so an AGENTS.md that outgrows the budget mid-session surfaces on both
    * engines. The single warning shape (`agents-md-oversized`, severity
-   * `warning`) mirrors v1's assembly. The secondary-model half comes from the
-   * session scope's `ISessionSecondaryModelWarningService` (v1's
-   * `computeSecondaryModelWarnings`): v1 computes it from the session's
-   * config snapshot while v2 caches the live-config check at main-agent
-   * creation, so the two agree on recipes applied through
-   * `applyPersistedSecondaryModel` (which refreshes the v2 cache) and on
-   * recipes present at session creation; a recipe persisted but never
-   * applied surfaces only on v2 (live config vs v1's snapshot).
+   * `warning`) mirrors v1's assembly.
    */
   override async getSessionWarnings(input: SessionIdRpcInput) {
     const agent = await this.agentScope(input.sessionId);
@@ -1828,34 +1780,9 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       );
       warning = prepared.agentsMdWarning;
     }
-    const warnings: { code: string; message: string; severity: 'warning' }[] =
-      warning === undefined
-        ? []
-        : [{ code: 'agents-md-oversized', message: warning, severity: 'warning' as const }];
-    const secondary = this.requireLiveSession(input.sessionId)
-      .accessor.get(ISessionSecondaryModelWarningService)
-      .getSecondaryModelWarning();
-    if (secondary !== undefined) {
-      warnings.push({ code: secondary.code, message: secondary.message, severity: 'warning' });
-    }
-    return warnings;
-  }
-
-  /**
-   * v1's session-layer prompt-metadata update (title/lastPrompt), rebuilt
-   * over the engine's shared helper so skill/plugin-command activations land
-   * on the same metadata the native v2 prompt path writes.
-   */
-  private async updatePromptMetadata(sessionId: string, text: string | undefined): Promise<void> {
-    const session = this.requireLiveSession(sessionId);
-    await applyPromptMetadataUpdate(
-      {
-        metadata: session.accessor.get(ISessionMetadata),
-        eventService: this.engineAccessor.get(IEventService),
-        sessionId,
-      },
-      text,
-    );
+    return warning === undefined
+      ? []
+      : [{ code: 'agents-md-oversized', message: warning, severity: 'warning' as const }];
   }
 
   /**

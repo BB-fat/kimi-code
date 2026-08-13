@@ -268,7 +268,7 @@ export class TowerSpawnTool implements ITowerSpawnTool {
             agent: handle.agentId,
             mission: mission?.id,
             target: reviewTarget,
-            model: binding?.displayModel,
+            model: binding?.model,
           },
           mission !== undefined
             ? join(MISSIONS_DIR, missionFileName(mission.id, mission.slug))
@@ -282,7 +282,7 @@ export class TowerSpawnTool implements ITowerSpawnTool {
             `agent_id: ${handle.agentId}`,
             `task_id: ${taskId}`,
             'status: running',
-            ...(binding !== undefined ? [`model: ${binding.displayModel}`] : []),
+            ...(binding !== undefined ? [`model: ${binding.model}`] : []),
             ...(mission !== undefined
               ? [
                   `mission: ${mission.id} — ${mission.title}`,
@@ -337,7 +337,7 @@ export class TowerSpawnTool implements ITowerSpawnTool {
     } catch (error) {
       throw binding === undefined
         ? error
-        : wrapSubagentModelError(error, binding.model, binding.source);
+        : wrapSubagentModelError(error, binding.model, this.profile.data().modelAlias);
     }
     created.accessor.get(IAgentPermissionModeService).setMode(this.permissionMode.mode);
     const agentId = created.id;

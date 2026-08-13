@@ -21,7 +21,7 @@
  * the native v2 services directly (the workspace handler's
  * `ISessionLifecycleService.fork` / `archive` / `restore`, reached through the
  * `sessionIndex` → `IWorkspaceLifecycleService.handlerFor` composition,
- * `IAgentFullCompactionService.begin`, `IAgentRPCService.cancel`); there is no
+ * `IAgentFullCompactionService.begin`, `IAgentLoopService.cancelFromUser`); there is no
  * v1-only projection to centralize, so no adapter is involved. `undo` likewise
  * calls `IAgentConversationUndoService.undo` directly (it throws
  * `session.undo_unavailable` with a structured reason) and only borrows
@@ -29,10 +29,12 @@
  * `/sessions/{id}/children` endpoints call `ISessionLifecycleService.createChild`
  * and `ISessionIndex.list({ childOf })` directly — the child markers and
  * parent-title default live in the lifecycle, and the child filter lives in the
- * index. Only `POST /sessions/{id}/profile` (`updateProfile`),
- * `GET /sessions/{id}/status`, and `GET /sessions/{id}/goal` go through
- * `ISessionLegacyService` (the `agent_config` patch, the status rollup, and the
- * current-goal read hold real cross-domain adaptation);
+ * index. `POST /sessions/{id}/profile` is composed at the edge too: both the
+ * title/metadata patch (`sessionProfile.ts`) and the `agent_config` dispatch
+ * (`sessionAgentConfig.ts`) are wire-to-native translations over the native v2
+ * services. Only `GET /sessions/{id}/status` and `GET /sessions/{id}/goal` go
+ * through `ISessionLegacyService` (the status rollup and the current-goal read
+ * hold real cross-domain adaptation);
  * the route forwards each adapter result verbatim, mirroring v1's thin handler.
  * `create`, `fork`, and child creation publish `event.session.created` on the
  * core event bus, matching v1.
@@ -40,10 +42,7 @@
  * `GET /sessions/{id}/warnings` surfaces session-level notices in the v1
  * `{ code, message, severity }` wire shape: the `agents-md-oversized` warning
  * (projected from the main agent's `IAgentProfileService.getAgentsMdWarning()`
- * — computed and cached when the agent binds a profile) and the
- * secondary-model early-validation warning (projected from the Session-scope
- * `ISessionSecondaryModelWarningService` — computed and cached when the main
- * agent is created). An unbound main agent or a valid/unset secondary model
+ * — computed and cached when the agent binds a profile). An unbound main agent
  * yields an empty list, matching v1's "no warning" case.
  *
  * **Wire fidelity**: mirrors v1's `toProtocolSession`
@@ -82,7 +81,7 @@ import {
   IAgentProfileService,
   IAgentConversationUndoService,
   IAgentFullCompactionService,
-  IAgentRPCService,
+  IAgentLoopService,
   IAuthSummaryService,
   ISessionActivityView,
   ISessionBtwService,
@@ -90,7 +89,6 @@ import {
   ISessionIndex,
   ISessionMetadata,
   ISessionLegacyService,
-  ISessionSecondaryModelWarningService,
   IEventService,
   IWorkspaceAliases,
   ISessionLifecycleService,
@@ -141,6 +139,8 @@ import { requestLog } from '../lib/requestLog';
 import { defineRoute } from '../middleware/defineRoute';
 import { ensureMainAgent } from '../transport/mainAgent';
 import { parseActionSuffix } from './action-suffix';
+import { applySessionAgentConfig } from './sessionAgentConfig';
+import { updateSessionProfile } from './sessionProfile';
 
 interface SessionRouteHost {
   post(
@@ -617,9 +617,15 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
     async (req, reply) => {
       try {
         const { session_id } = req.params;
-        const fields = await core.accessor
-          .get(ISessionLegacyService)
-          .updateProfile(session_id, req.body);
+        const { agent_config, ...profileBody } = req.body;
+        // Both halves of the profile patch are wire-to-native translations
+        // dispatched to the native v2 services at the edge (same direct-call
+        // pattern as fork/compact/undo); title/metadata applies first,
+        // matching the original in-adapter ordering.
+        const fields = await updateSessionProfile(core, session_id, profileBody);
+        if (agent_config !== undefined) {
+          await applySessionAgentConfig(core, session_id, agent_config);
+        }
         const session = toWireSession(fields, fields.root, resolveSessionFacts(core, fields.id));
         // Broadcast the title change to every connection (including clients not
         // subscribed to this session, and covering inactive sessions), so session
@@ -780,7 +786,7 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
           const agent = await resolveMainAgent(core, parsed.id);
           // No turnId → cancel whatever turn is active; a safe no-op when idle.
           // v1 always reports success once the session exists.
-          await agent.accessor.get(IAgentRPCService).cancel({});
+          agent.accessor.get(IAgentLoopService).cancelFromUser();
           requestLog(req)?.info({ session_id: parsed.id, action: 'abort' }, 'session action completed');
           reply.send(okEnvelope({ aborted: true }, req.id));
           return;
@@ -1058,18 +1064,12 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
       try {
         // Surface v2 notices in the v1 wire shape. The agents-md warning is
         // computed (and cached) by `IAgentProfileService` when the main agent
-        // binds a profile; the secondary-model warning is computed (and
-        // cached) by `ISessionSecondaryModelWarningService` when the main
-        // agent is created. An unbound main agent / unset secondary model
-        // yields `undefined` → that entry drops out, matching v1's "no
-        // warning" case.
+        // binds a profile; an unbound main agent yields `undefined` → the
+        // entry drops out, matching v1's "no warning" case.
         const agent = await ensureMainAgent(session);
         const agentsMdWarning = agent.accessor.get(IAgentProfileService).getAgentsMdWarning();
-        const secondaryModelWarning = session.accessor
-          .get(ISessionSecondaryModelWarningService)
-          .getSecondaryModelWarning();
-        const warnings = [
-          ...(agentsMdWarning === undefined
+        const warnings =
+          agentsMdWarning === undefined
             ? []
             : [
                 {
@@ -1077,17 +1077,7 @@ export function registerSessionsRoutes(app: SessionRouteHost, core: Scope): void
                   message: agentsMdWarning,
                   severity: 'warning' as const,
                 },
-              ]),
-          ...(secondaryModelWarning === undefined
-            ? []
-            : [
-                {
-                  code: secondaryModelWarning.code,
-                  message: secondaryModelWarning.message,
-                  severity: 'warning' as const,
-                },
-              ]),
-        ];
+              ];
         reply.send(okEnvelope({ warnings }, req.id));
       } catch (error) {
         sendMappedError(reply, req, error);
@@ -1353,6 +1343,7 @@ function sendMappedError(
         return;
       case 'request.invalid':
       case 'validation.failed':
+      case ErrorCodes.CONFIG_INVALID:
         reply.send(errEnvelope(ErrorCode.VALIDATION_FAILED, err.message, requestId, err.stack));
         return;
     }

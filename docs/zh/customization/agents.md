@@ -100,7 +100,7 @@ disallowedTools:
 | `description` | 是 | Agent 的用途。主 Agent 挑选子 Agent 时会看到，请围绕委派决策来写 |
 | `whenToUse` | 否 | 补充说明何时应使用该 Agent |
 | `override` | 否 | 是否允许覆盖同名内置 Agent，默认 `false`。`--agent-file` 属于显式启动意图，无需设置此字段 |
-| `model_preference` | 否 | `Agent` 或 `AgentSwarm` 启动该 profile 时的符号默认值：`primary` 选择调用方当前运行的模型，`secondary` 选择 [`[secondary_model] model`](../configuration/config-files.md#secondary-model)。工具调用显式传入的 `model`（任意已配置的 `[models]` 别名，或快捷方式 `"primary"` / `"secondary"`）优先于该字段；两者均未设置时，已配置的次主力模型仍为默认值。未配置次主力模型时，子 Agent 继承调用方模型 |
+| `model_preference` | 否 | `Agent` 或 `AgentSwarm` 启动该 profile 时的符号默认值：`primary` 选择调用方当前运行的模型，`secondary` 选择 [`[secondary_model] model`](../configuration/config-files.md#secondary-model)。工具调用显式传入的 `model`（同样只接受 `"primary"` / `"secondary"` 两个符号值）优先于该字段；两者均未设置时，已配置的次主力模型仍为默认值。未配置次主力模型时，子 Agent 继承调用方模型。仅使用 `KIMI_CODE_LEGACY_FLAG=1` 选择的旧版 `agent-core` 引擎读取该字段；默认的 v2 引擎会忽略 |
 | `tools` | 否 | 工具名允许列表，如 `Read`、`Bash`；MCP 工具用 glob 匹配，如 `mcp__github__*`。支持 YAML 列表或逗号分隔字符串（`tools: Read, Grep`）两种写法。缺省表示允许全部工具；单独的 `*` 同样表示允许全部工具；空列表（`tools: []`）表示禁用全部工具 |
 | `disallowedTools` | 否 | 禁止列表，写法与匹配规则相同，在 `tools` 之后应用 |
 | `subagents` | 否 | 允许委派的子 Agent 名称列表，写法与 `tools` 相同（YAML 列表或逗号分隔字符串）。缺省表示可委派所有类型；单独的 `*` 同样表示全部 |
@@ -111,7 +111,7 @@ disallowedTools:
 
 未知字段会被忽略，新版本写的文件在旧版本上仍可读取。其他 Agent 工具的字段（如 Claude Code 的 `model`、OpenCode 的 `mode`）同样会被忽略；加上 `tools` 的逗号分隔写法和 `name` 缺省回退到文件名，Claude Code 与 OpenCode 风格的 Agent 文件一般可直接加载 —— 只含 `description` 和正文的最小文件可跨工具通用。
 
-`model_preference` 仅在次主力模型实验功能启用时对新启动的子 Agent 生效——设置 `KIMI_CODE_EXPERIMENTAL_SECONDARY_MODEL=1`，或 master `KIMI_CODE_EXPERIMENTAL_FLAG=1`。它在包括交互式 TUI 在内的所有启动方式下生效。该字段不用于填写具体模型 alias（仅支持符号值 `primary` / `secondary`），已恢复的子 Agent 也会保持原模型。主 Agent 仍可在工具调用中显式传入任意已配置的 `[models]` 别名作为 `model`，以便为不同任务指定不同模型。
+`model_preference` 仅在次主力模型实验功能启用时对新启动的子 Agent 生效——设置 `KIMI_CODE_EXPERIMENTAL_SECONDARY_MODEL=1`，或 master `KIMI_CODE_EXPERIMENTAL_FLAG=1`。它在包括交互式 TUI 在内的所有启动方式下生效。该字段不用于填写具体模型 alias，已恢复的子 Agent 也会保持原模型。主 Agent 会在 profile 描述中看到这项偏好，因此仍可在某项任务需要不同选择时显式传入 `model`。
 
 目录中发现的非法文件会被跳过并告警，不影响其他文件。通过 `--agent-file` 显式传入的文件必须合法 —— 否则 CLI 会报错并退出。
 

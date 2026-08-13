@@ -124,6 +124,7 @@ export * from '#/app/sessionIndex/sessionIndexService';
 export * from '#/app/sessionIndex/sessionIndexMirrorService';
 export * from '#/session/sessionMetadata/sessionMetadata';
 export * from '#/session/sessionMetadata/sessionMetadataService';
+export * from '#/session/sessionMetadata/promptMetadata';
 export * from '#/session/sessionActivity/sessionActivity';
 export * from '#/session/sessionActivity/sessionActivityService';
 export * from '#/session/sessionActivity/sessionOutcomeMirror';
@@ -149,7 +150,6 @@ export * from '#/kosong/protocol/protocol';
 export * from '#/kosong/protocol/protocolBase';
 export * from '#/kosong/protocol/protocolTrait';
 import '#/app/kosongConfig/envOverlay';
-import '#/app/kosongConfig/secondaryModelOverlay';
 export * from '#/kosong/model/completionBudget';
 export * from '#/kosong/model/hostRequestHeaders';
 export * from '#/kosong/model/model';
@@ -165,12 +165,6 @@ export {
   ModelCatalogConfigSchema,
   type ModelCatalogConfig,
 } from '#/app/kosongConfig/configSection';
-export type { SecondaryModelConfig } from '#/app/kosongConfig/configSection';
-export {
-  SECONDARY_DERIVED_MODEL_ID,
-  secondaryModelOverlay,
-  secondaryModelPatch,
-} from '#/app/kosongConfig/secondaryModelOverlay';
 export * from '#/app/kosongConfig/kosongConfig';
 export * from '#/app/kosongConfig/kosongConfigService';
 export * from '#/kosong/model/modelOAuth';
@@ -305,6 +299,13 @@ import '#/features/plan/planFeature';
 export * from '#/features/debugEvents/debugEvents';
 export * from '#/features/debugEvents/debugEventsService';
 import '#/features/debugEvents/debugEventsFeature';
+export * from '#/features/swarm/agent/swarm';
+export * from '#/features/swarm/agent/swarmService';
+export * from '#/features/swarm/session/sessionSwarm';
+export * from '#/features/swarm/session/sessionSwarmService';
+export * from '#/features/swarm/tools/agent-swarm/agent-swarm';
+import '#/features/swarm/tools/agent-swarm/agentSwarmTool';
+import '#/features/swarm/swarmFeature';
 export * from '#/agent/tools/goal/create-goal/create-goal';
 import '#/agent/tools/goal/create-goal/createGoalTool';
 export * from '#/agent/tools/goal/get-goal/get-goal';
@@ -318,10 +319,6 @@ import '#/agent/goal/goalDeadlineSchedulerService';
 export * from '#/agent/goal/goal';
 export * from '#/agent/goal/goalService';
 export * from '#/agent/goal/types';
-export * from '#/agent/tools/agent-swarm/agent-swarm';
-import '#/agent/tools/agent-swarm/agentSwarmTool';
-export * from '#/agent/swarm/swarm';
-export * from '#/agent/swarm/swarmService';
 export * from '#/agent/tower/tower';
 export * from '#/agent/tower/towerService';
 export * from '#/agent/tower/towerRateLimit';
@@ -424,8 +421,8 @@ export * from '#/workspace/workspaceMcp/workspaceMcpService';
 export * from '#/session/subagent/subagent';
 export * from '#/session/subagent/subagentService';
 import '#/session/subagent/flag';
-export * from '#/session/subagent/secondaryModelWarning';
-export * from '#/session/subagent/secondaryModelWarningService';
+export * from '#/session/subagent/subagentModelsValidation';
+import '#/session/subagent/subagentModelsValidationService';
 export * from '#/agent/tools/agent/subagent-task';
 export { AGENT_RUN_PROMPT_ORIGIN } from '#/session/subagent/runAgentTurn';
 export * from '#/session/subagent/mirrorAgentRun';
@@ -644,27 +641,29 @@ import '#/agent/permissionRules/configSection';
 export * from '#/agent/permissionRules/permissionRules';
 export * from '#/agent/permissionRules/matchesRule';
 export * from '#/agent/permissionRules/permissionRulesService';
+export * from '#/agent/pluginCommand/pluginCommand';
+export * from '#/agent/pluginCommand/pluginCommandService';
 export * from '#/agent/profile/profile';
 export * from '#/agent/profile/profileService';
 export * from '#/agent/profile/context';
 export * from '#/agent/prompt/prompt';
 export * from '#/agent/prompt/promptService';
+export * from '#/agent/prompt/promptMetadataText';
 export * from '#/agent/replayBuilder/types';
+// `replayBuilder/types` inlines its own `SessionSummary`; keep the barrel's
+// `SessionSummary` pinned to the session-index one (explicit re-export wins
+// over the ambiguous `export *` pair).
+export { type SessionSummary } from '#/app/sessionIndex/sessionIndex';
 export * from '#/agent/undo/undo';
 export * from '#/agent/undo/undoService';
 export * from '#/agent/shellCommand/shellCommand';
 export * from '#/agent/shellCommand/shellCommandService';
-export * from '#/agent/rpc/rpc';
-export * from '#/agent/rpc/rpcService';
-export * from '#/agent/rpc/prompt-metadata';
 export * from '#/agent/scopeContext/scopeContext';
 export * from '#/agent/stepRetry/stepRetry';
 export * from '#/agent/stepRetry/stepRetryService';
 export * from '#/session/sessionInit/sessionInit';
 export * from '#/session/sessionInit/sessionInitService';
 export * from '#/session/sessionInit/profile/init';
-export * from '#/session/swarm/sessionSwarm';
-export * from '#/session/swarm/sessionSwarmService';
 export * from '#/session/todo/todoItem';
 export * from '#/session/todo/todoListReminder';
 export * from '#/session/todo/sessionTodo';
