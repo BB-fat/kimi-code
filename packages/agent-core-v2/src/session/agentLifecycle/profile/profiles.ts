@@ -1,28 +1,3 @@
-/**
- * `agentLifecycle` domain — builtin agent profile contributions.
- *
- * Registers the default `agent` profile plus the `coder` / `explore` /
- * `tower-worker` task-agent profiles. Each profile is self-contained: its
- * structured `renderSystemPrompt` merges the shared base template with its own
- * role text at call time, so a child agent no longer inherits the parent's
- * prompt through a runtime overlay.
- *
- * The default profile deliberately carries no `subagents` allowlist: the
- * allowlist is enforced when present, and pinning one would block user-defined
- * file-based profiles. Leaving it `undefined` allows delegating to any
- * profile, `tower-worker` included.
- *
- * `tower-worker` drops `AgentSwarm` from the coder tool set on purpose: the
- * tower is the sole orchestrator, and a worker-side swarm fan-out would run
- * unbudgeted (the tower rate limit only gates TowerSpawn) and outside the
- * worktree/roster discipline — swarm children inherit the session cwd, the
- * main checkout, bypassing the review-gated merge protocol. The same argument
- * caps the remaining `Agent` delegation at read-only profiles
- * (`subagents: ['explore', 'plan']`): a write-capable child would run on the
- * main checkout outside the roster and the write guard. (v1 has no enforced
- * allowlist, so the v1 profile drops `Agent` entirely.)
- */
-
 import { collectGitContext } from './gitContext';
 import { registerAgentProfile } from '#/app/agentProfileCatalog/contribution';
 import {
@@ -45,6 +20,7 @@ const AGENT_TOOLS = [
   'TaskList',
   'TaskOutput',
   'TaskStop',
+  'WaitFor',
   'CronCreate',
   'CronList',
   'CronDelete',
@@ -83,6 +59,7 @@ const CODER_TOOLS = [
   'TaskOutput',
   'TaskStop',
   'TodoList',
+  'WaitFor',
   'WebSearch',
   'FetchURL',
   'Write',
@@ -173,9 +150,9 @@ registerAgentProfile({
   tools: EXPLORE_TOOLS,
   renderSystemPrompt: (context) =>
     renderSystemPromptResult(EXPLORE_ROLE, context, { skillActive: skillActiveFor(EXPLORE_TOOLS) }),
-  promptPrefix: async ({ cwd, runner, log }) => {
+  promptPrefix: async ({ cwd, process, log }) => {
     try {
-      return await collectGitContext(runner, cwd, log);
+      return await collectGitContext(process, cwd, log);
     } catch {
       return '';
     }

@@ -23,6 +23,7 @@ import type {
 } from '@moonshot-ai/agent-core-v2/agent/activityView/activityView';
 import type { AgentContextData } from '@moonshot-ai/agent-core-v2/agent/contextMemory/types';
 import type { IAgentCommandService } from '@moonshot-ai/agent-core-v2/agent/command/agentCommand';
+import type { IAgentRuntimeBindingService } from '@moonshot-ai/agent-core-v2/agent/runtimeBinding/runtimeBinding';
 import type { TurnEndReason } from '@moonshot-ai/agent-core-v2/agent/loop/turnEvents';
 import type { PermissionMode } from '@moonshot-ai/agent-core-v2/agent/permissionPolicy/types';
 import type { IAgentProfileService } from '@moonshot-ai/agent-core-v2/agent/profile/profile';
@@ -64,6 +65,7 @@ import type {
   SessionMetadataChangedEvent,
   SessionMetaPatch,
 } from '@moonshot-ai/agent-core-v2/session/sessionMetadata/sessionMetadata';
+import type { ISessionTitleService } from '@moonshot-ai/agent-core-v2/session/sessionTitle/sessionTitle';
 import type {
   AuthStatus,
   IOAuthService,
@@ -80,6 +82,10 @@ import type {
   CapabilityStep,
 } from '@moonshot-ai/agent-core-v2/app/capability/types';
 import type { ExperimentalFeatureState } from '@moonshot-ai/agent-core-v2/app/flag/flag';
+import type {
+  FileMeta,
+  SaveOptions,
+} from '@moonshot-ai/agent-core-v2/app/file/fileService';
 import type {
   FsBrowseResponse,
   FsHomeResponse,
@@ -162,8 +168,12 @@ import {
   promptLaunchResultSchema,
   promptPartSchema,
   promptPayloadSchema,
+  promptSkillActivationSchema,
+  promptWithSkillsPayloadSchema,
+  promptWithSkillsResultSchema,
   runCommandPayloadSchema,
   runShellCommandPayloadSchema,
+  runtimeBindingSchema,
   setModelPayloadSchema,
   setModelResultSchema,
   setPermissionPayloadSchema,
@@ -224,6 +234,7 @@ import {
   questionResultSchema,
 } from '../src/contract/session/question.js';
 import { skillSummarySchema } from '../src/contract/session/skills.js';
+import { sessionTitleContract } from '../src/contract/session/title.js';
 
 import {
   authStatusSchema,
@@ -253,6 +264,10 @@ import {
   refreshProviderModelsResponseSchema,
 } from '../src/contract/global/providerDiscovery.js';
 import { experimentalFeatureStateSchema } from '../src/contract/global/flags.js';
+import {
+  fileMetaSchema,
+  fileSaveOptionsSchema,
+} from '../src/contract/global/files.js';
 import {
   fsBrowseResponseSchema,
   fsHomeResponseSchema,
@@ -366,6 +381,11 @@ const _experimentalFeatureState: AssertWire<
 // hostFs.ts
 const _fsBrowseResponse: AssertWire<typeof fsBrowseResponseSchema, FsBrowseResponse> = true;
 const _fsHomeResponse: AssertWire<typeof fsHomeResponseSchema, FsHomeResponse> = true;
+
+// files.ts (`fileGetResultSchema` has no engine counterpart — the wire
+// adaptation replaces `GetResult.stream` with base64 `data`).
+const _fileMeta: AssertWire<typeof fileMetaSchema, FileMeta> = true;
+const _fileSaveOptions: AssertWire<typeof fileSaveOptionsSchema, SaveOptions> = true;
 
 // catalog.ts / providerDiscovery.ts — protocol wire shapes derived through the
 // catalog and discovery service interfaces.
@@ -494,6 +514,12 @@ const _questionResult: AssertWire<typeof questionResultSchema, QuestionResult> =
 // session/skills.ts
 const _skillSummary: AssertWire<typeof skillSummarySchema, SkillSummary> = true;
 
+// session/title.ts
+const _generateTitleOutput: AssertWire<
+  (typeof sessionTitleContract)['generateTitle']['output'],
+  Awaited<ReturnType<ISessionTitleService['generateTitle']>>
+> = true;
+
 // agent/activity.ts
 const _turnPhase: AssertWire<typeof turnPhaseSchema, TurnPhase> = true;
 const _approvalRef: AssertWire<typeof approvalRefSchema, ApprovalRef> = true;
@@ -523,7 +549,10 @@ type PromptPayload = Parameters<IAgentPromptService['submit']>[0];
 type PromptLaunchResult = NonNullable<Awaited<ReturnType<IAgentPromptService['submit']>>>;
 type SteerPayload = Parameters<IAgentPromptService['submitSteer']>[0];
 type ActivateSkillPayload = Parameters<IAgentSkillService['activate']>[0];
+type PromptWithSkillsPayload = Parameters<IAgentSkillService['promptWithSkills']>[0];
+type PromptSkillActivation = PromptWithSkillsPayload['skills'][number];
 type AgentCommandInfo = ReturnType<IAgentCommandService['list']>[number];
+type RuntimeBinding = ReturnType<IAgentRuntimeBindingService['get']>;
 type RunShellCommandPayload = Parameters<IAgentShellCommandService['run']>[0];
 type ShellCommandResult = Awaited<ReturnType<IAgentShellCommandService['run']>>;
 type SetModelResult = Awaited<ReturnType<IAgentProfileService['setModel']>>;
@@ -547,10 +576,25 @@ const _promptPart: AssertWire<typeof promptPartSchema, PromptPart> = true;
 // the full `ContentPart` union (also think/audio parts); the wire mirrors the
 // `PromptPart` subset clients may send, so the reverse direction fails.
 const _promptPayload: AssertWireToEngine<typeof promptPayloadSchema, PromptPayload> = true;
+const _promptSkillActivation: AssertWire<
+  typeof promptSkillActivationSchema,
+  PromptSkillActivation
+> = true;
+// Same one-directional rule as `promptPayload`: the engine's `input` accepts
+// the full `ContentPart` union; the wire mirrors the `PromptPart` subset.
+const _promptWithSkillsPayload: AssertWireToEngine<
+  typeof promptWithSkillsPayloadSchema,
+  PromptWithSkillsPayload
+> = true;
 const _steerPayload: AssertWireToEngine<typeof steerPayloadSchema, SteerPayload> = true;
 const _activateSkillPayload: AssertWire<typeof activateSkillPayloadSchema, ActivateSkillPayload> =
   true;
 const _promptLaunchResult: AssertWire<typeof promptLaunchResultSchema, PromptLaunchResult> = true;
+type PromptWithSkillsResult = Awaited<ReturnType<IAgentSkillService['promptWithSkills']>>;
+const _promptWithSkillsResult: AssertWire<
+  typeof promptWithSkillsResultSchema,
+  PromptWithSkillsResult
+> = true;
 const _cancelPayload: AssertWire<typeof cancelPayloadSchema, CancelPayload> = true;
 const _runShellCommandPayload: AssertWire<
   typeof runShellCommandPayloadSchema,
@@ -571,6 +615,7 @@ const _usageStatus: AssertWire<typeof usageStatusSchema, UsageStatus> = true;
 // `Message`/`Tool`/`PromptOrigin` unions) mirrored as `unknown`.
 const _agentContextData: AssertEngineToWire<typeof agentContextDataSchema, AgentContextData> = true;
 const _agentCommandInfo: AssertWire<typeof agentCommandInfoSchema, AgentCommandInfo> = true;
+const _runtimeBinding: AssertWire<typeof runtimeBindingSchema, RuntimeBinding> = true;
 const _runCommandPayload: AssertWire<typeof runCommandPayloadSchema, RunCommandPayload> = true;
 const _planData: AssertWire<typeof planDataSchema, PlanData> = true;
 const _cancelPlanPayload: AssertWire<typeof cancelPlanPayloadSchema, CancelPlanPayload> = true;

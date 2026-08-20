@@ -1,5 +1,171 @@
 # @moonshot-ai/kimi-code
 
+## 0.37.2
+
+### Patch Changes
+
+- [#3061](https://github.com/MoonshotAI/kimi-code/pull/3061) [`5c661f4`](https://github.com/MoonshotAI/kimi-code/commit/5c661f4610f36481dbf2f9598aa63f49004e4980) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: the subagent detail panel now keeps the working process fully expanded and drops the end-of-turn timestamp footer.
+
+- [#3061](https://github.com/MoonshotAI/kimi-code/pull/3061) [`5c661f4`](https://github.com/MoonshotAI/kimi-code/commit/5c661f4610f36481dbf2f9598aa63f49004e4980) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: Settings gains a Lab tab with a multi-tab sidebar toggle (off by default); when enabled, the sidebar shows the Open / Done / Workspaces tabs.
+
+## 0.37.1
+
+### Patch Changes
+
+- [#3053](https://github.com/MoonshotAI/kimi-code/pull/3053) [`95cede8`](https://github.com/MoonshotAI/kimi-code/commit/95cede82b4d3b6cb1845c66e87896ab2e5fd9ba5) Thanks [@7Sageer](https://github.com/7Sageer)! - Fix pasted images failing to reach the model on first send.
+
+- [#3047](https://github.com/MoonshotAI/kimi-code/pull/3047) [`c9c34ae`](https://github.com/MoonshotAI/kimi-code/commit/c9c34ae5a8626f133bd1b9c34cac0f3270e35b8d) Thanks [@7Sageer](https://github.com/7Sageer)! - Fix pasted videos failing to submit instead of reaching the model.
+
+## 0.37.0
+
+### Minor Changes
+
+- [#2935](https://github.com/MoonshotAI/kimi-code/pull/2935) [`44a6c70`](https://github.com/MoonshotAI/kimi-code/commit/44a6c70e66762ea9e122f8dceae16dc759086a7c) Thanks [@chengluyu](https://github.com/chengluyu)! - Activate multiple skills in a single prompt. Type `/` after whitespace to insert a skill token.
+
+- [#2994](https://github.com/MoonshotAI/kimi-code/pull/2994) [`8c865f4`](https://github.com/MoonshotAI/kimi-code/commit/8c865f48173011439cfc2e140e45586e59b6bfcf) Thanks [@liruifengv](https://github.com/liruifengv)! - The Windows native (single-binary) CLI now supports automatic updates.
+
+- [#3043](https://github.com/MoonshotAI/kimi-code/pull/3043) [`e31b3a3`](https://github.com/MoonshotAI/kimi-code/commit/e31b3a335ed49139c1aa3abb6b45a244fa17356a) Thanks [@liruifengv](https://github.com/liruifengv)! - web: the sidebar gains Open / Done / Workspaces tabs, and sessions can be marked as done (and reopened) to keep the open list focused.
+
+- [#3043](https://github.com/MoonshotAI/kimi-code/pull/3043) [`e31b3a3`](https://github.com/MoonshotAI/kimi-code/commit/e31b3a335ed49139c1aa3abb6b45a244fa17356a) Thanks [@liruifengv](https://github.com/liruifengv)! - web: added a session management page (from the sidebar's list-management menu) for cross-workspace triage — filter by workspace, status, and updated time, and batch mark sessions as done or reopen them.
+
+### Patch Changes
+
+- [#2593](https://github.com/MoonshotAI/kimi-code/pull/2593) [`d833a1a`](https://github.com/MoonshotAI/kimi-code/commit/d833a1a893c4d69d96af542f40557442992085e0) Thanks [@7Sageer](https://github.com/7Sageer)! - Keep pasted image and video attachments available in session history.
+
+- [#3043](https://github.com/MoonshotAI/kimi-code/pull/3043) [`e31b3a3`](https://github.com/MoonshotAI/kimi-code/commit/e31b3a335ed49139c1aa3abb6b45a244fa17356a) Thanks [@liruifengv](https://github.com/liruifengv)! - web: @-mentioned files, folders, and skills in chat messages now render as icon pills.
+
+- [#3043](https://github.com/MoonshotAI/kimi-code/pull/3043) [`e31b3a3`](https://github.com/MoonshotAI/kimi-code/commit/e31b3a335ed49139c1aa3abb6b45a244fa17356a) Thanks [@liruifengv](https://github.com/liruifengv)! - web: renamed the Subagent panel to "Background Agent".
+
+- [#2914](https://github.com/MoonshotAI/kimi-code/pull/2914) [`1cf617d`](https://github.com/MoonshotAI/kimi-code/commit/1cf617d769a887f5d8306ebc16a1e078b5e47049) Thanks [@SeleneXX](https://github.com/SeleneXX)! - Fix Gemini tool-calling sessions failing on follow-up requests.
+
+- [#2972](https://github.com/MoonshotAI/kimi-code/pull/2972) [`04d23e2`](https://github.com/MoonshotAI/kimi-code/commit/04d23e2dab776c480d24cfa033c9500543c75a3b) Thanks [@sailist](https://github.com/sailist)! - Fix text files containing Chinese or emoji being misdetected as binary in the web UI.
+
+- [#2940](https://github.com/MoonshotAI/kimi-code/pull/2940) [`6b72345`](https://github.com/MoonshotAI/kimi-code/commit/6b72345f8bb03487e3bcc05b541e65484818428c) Thanks [@bj456736](https://github.com/bj456736)! - Print and copy the full `kimi --resume` command after `/fork`.
+
+- [#2928](https://github.com/MoonshotAI/kimi-code/pull/2928) [`d96cd03`](https://github.com/MoonshotAI/kimi-code/commit/d96cd037702637305422222e985139e51ff83c8c) Thanks [@chengluyu](https://github.com/chengluyu)! - Warn when a typed `/goal` objective exceeds the 4000-character limit, and keep the input if it is rejected.
+
+- [#2633](https://github.com/MoonshotAI/kimi-code/pull/2633) [`f492cd7`](https://github.com/MoonshotAI/kimi-code/commit/f492cd7c9e03666ecfd10dc47ca9b48c35de2318) Thanks [@tpoisonooo](https://github.com/tpoisonooo)! - Fix slow startup by loading the global search index on demand.
+
+- [#3043](https://github.com/MoonshotAI/kimi-code/pull/3043) [`e31b3a3`](https://github.com/MoonshotAI/kimi-code/commit/e31b3a335ed49139c1aa3abb6b45a244fa17356a) Thanks [@liruifengv](https://github.com/liruifengv)! - web: fixed YAML frontmatter in messages rendering as a giant heading — it now shows as a small meta block.
+
+- [#3043](https://github.com/MoonshotAI/kimi-code/pull/3043) [`e31b3a3`](https://github.com/MoonshotAI/kimi-code/commit/e31b3a335ed49139c1aa3abb6b45a244fa17356a) Thanks [@liruifengv](https://github.com/liruifengv)! - web: fixed plain text like "(c)", "(tm)", and "--" in messages being rewritten as ©, ™, and dashes — message text now renders verbatim.
+
+- [#2985](https://github.com/MoonshotAI/kimi-code/pull/2985) [`a7dc1ea`](https://github.com/MoonshotAI/kimi-code/commit/a7dc1ea28445555d5944066936fdf6e1b21d27ea) Thanks [@bj456736](https://github.com/bj456736)! - Fix a startup error when a restored session references a model that is no longer configured.
+
+- [#3043](https://github.com/MoonshotAI/kimi-code/pull/3043) [`e31b3a3`](https://github.com/MoonshotAI/kimi-code/commit/e31b3a335ed49139c1aa3abb6b45a244fa17356a) Thanks [@liruifengv](https://github.com/liruifengv)! - web: hovering a mention pill now shows a detail bubble (full path for files and folders, description plus an open button for skills), skill and file mentions in messages are clickable, long file names middle-ellipsize, and deleted files are struck through.
+
+- [#3043](https://github.com/MoonshotAI/kimi-code/pull/3043) [`e31b3a3`](https://github.com/MoonshotAI/kimi-code/commit/e31b3a335ed49139c1aa3abb6b45a244fa17356a) Thanks [@liruifengv](https://github.com/liruifengv)! - web: fixed long task panel titles pushing the status badge, copy, and close buttons out of view — titles now ellipsize and show the full text on hover.
+
+- [#3043](https://github.com/MoonshotAI/kimi-code/pull/3043) [`e31b3a3`](https://github.com/MoonshotAI/kimi-code/commit/e31b3a335ed49139c1aa3abb6b45a244fa17356a) Thanks [@liruifengv](https://github.com/liruifengv)! - web: fixed pasting a copied folder into the composer failing the upload with a connection error — folders are now skipped instead.
+
+- [#3043](https://github.com/MoonshotAI/kimi-code/pull/3043) [`e31b3a3`](https://github.com/MoonshotAI/kimi-code/commit/e31b3a335ed49139c1aa3abb6b45a244fa17356a) Thanks [@liruifengv](https://github.com/liruifengv)! - web: reduced animation power draw — the mascot and home doodle pause while hidden or scrolled offscreen, and looping animations play once and stop when the system's "reduce motion" setting is on.
+
+- [#2969](https://github.com/MoonshotAI/kimi-code/pull/2969) [`ee564e5`](https://github.com/MoonshotAI/kimi-code/commit/ee564e5ec90afd068123b8052928c53f1fd5a27d) Thanks [@sailist](https://github.com/sailist)! - Fix the displayed context size dropping to a smaller estimate after archiving and resuming a session.
+
+- [#3043](https://github.com/MoonshotAI/kimi-code/pull/3043) [`e31b3a3`](https://github.com/MoonshotAI/kimi-code/commit/e31b3a335ed49139c1aa3abb6b45a244fa17356a) Thanks [@liruifengv](https://github.com/liruifengv)! - web: the plan review feedback box now auto-grows with its content, so longer rejection reasons are easier to write.
+
+- [#2633](https://github.com/MoonshotAI/kimi-code/pull/2633) [`f492cd7`](https://github.com/MoonshotAI/kimi-code/commit/f492cd7c9e03666ecfd10dc47ca9b48c35de2318) Thanks [@tpoisonooo](https://github.com/tpoisonooo)! - Queue slash skill commands entered while the agent is busy instead of rejecting them.
+
+- [#3043](https://github.com/MoonshotAI/kimi-code/pull/3043) [`e31b3a3`](https://github.com/MoonshotAI/kimi-code/commit/e31b3a335ed49139c1aa3abb6b45a244fa17356a) Thanks [@liruifengv](https://github.com/liruifengv)! - web: the search dialog now finds workspaces too, and picking a workspace or session result expands the sidebar and scrolls the item into view.
+
+- [#3043](https://github.com/MoonshotAI/kimi-code/pull/3043) [`e31b3a3`](https://github.com/MoonshotAI/kimi-code/commit/e31b3a335ed49139c1aa3abb6b45a244fa17356a) Thanks [@liruifengv](https://github.com/liruifengv)! - web: fixed sent image and video attachments rendering broken in session history after a refresh or reopen.
+
+- [#3043](https://github.com/MoonshotAI/kimi-code/pull/3043) [`e31b3a3`](https://github.com/MoonshotAI/kimi-code/commit/e31b3a335ed49139c1aa3abb6b45a244fa17356a) Thanks [@liruifengv](https://github.com/liruifengv)! - web: fixed empty replies left by manually stopped answers still showing a completion time after reloading the page.
+
+- [#3043](https://github.com/MoonshotAI/kimi-code/pull/3043) [`e31b3a3`](https://github.com/MoonshotAI/kimi-code/commit/e31b3a335ed49139c1aa3abb6b45a244fa17356a) Thanks [@liruifengv](https://github.com/liruifengv)! - web: fixed background agent tasks not being cancellable during their first moments after starting.
+
+- [#3043](https://github.com/MoonshotAI/kimi-code/pull/3043) [`e31b3a3`](https://github.com/MoonshotAI/kimi-code/commit/e31b3a335ed49139c1aa3abb6b45a244fa17356a) Thanks [@liruifengv](https://github.com/liruifengv)! - web: fixed foreground subagents leaking into the Background Agent panel, which broke the count and left finished rows stuck as running and unstoppable.
+
+- [#3043](https://github.com/MoonshotAI/kimi-code/pull/3043) [`e31b3a3`](https://github.com/MoonshotAI/kimi-code/commit/e31b3a335ed49139c1aa3abb6b45a244fa17356a) Thanks [@liruifengv](https://github.com/liruifengv)! - web: merged the task panel's two copy icons into a single button with a dropdown menu (copy command / copy output / copy all), with keyboard and touch-friendly targets.
+
+- [#3043](https://github.com/MoonshotAI/kimi-code/pull/3043) [`e31b3a3`](https://github.com/MoonshotAI/kimi-code/commit/e31b3a335ed49139c1aa3abb6b45a244fa17356a) Thanks [@liruifengv](https://github.com/liruifengv)! - web: fixed cancelled or abnormally ended background tasks showing as completed.
+
+- [#3016](https://github.com/MoonshotAI/kimi-code/pull/3016) [`98ebda8`](https://github.com/MoonshotAI/kimi-code/commit/98ebda840a1e420f57a05ec680cbeca41a2419d7) Thanks [@sailist](https://github.com/sailist)! - Fix /undo not restoring the todo list to its state before the undone turn.
+
+- [#2858](https://github.com/MoonshotAI/kimi-code/pull/2858) [`59dde73`](https://github.com/MoonshotAI/kimi-code/commit/59dde734f37596db5c77794060f81bfb3c1dbeb6) Thanks [@7Sageer](https://github.com/7Sageer)! - On the legacy engine, plugin MCP server changes and OAuth sign-in now take effect in open sessions immediately.
+
+- [#3043](https://github.com/MoonshotAI/kimi-code/pull/3043) [`e31b3a3`](https://github.com/MoonshotAI/kimi-code/commit/e31b3a335ed49139c1aa3abb6b45a244fa17356a) Thanks [@liruifengv](https://github.com/liruifengv)! - web: the browser tab title now shows the current workspace directory name (override with the new `--web-title` flag), making instances on multiple machines easier to tell apart.
+
+- [#3043](https://github.com/MoonshotAI/kimi-code/pull/3043) [`e31b3a3`](https://github.com/MoonshotAI/kimi-code/commit/e31b3a335ed49139c1aa3abb6b45a244fa17356a) Thanks [@liruifengv](https://github.com/liruifengv)! - web: fixed Ctrl+K in the composer opening session search on macOS instead of deleting to end of line — session search now only answers to Cmd+K.
+
+- [#2989](https://github.com/MoonshotAI/kimi-code/pull/2989) [`09976b0`](https://github.com/MoonshotAI/kimi-code/commit/09976b09140c412f81a38cc00191f88bee4a9437) Thanks [@bj456736](https://github.com/bj456736)! - Add `kimi web --web-title <title>` to set a custom browser tab title for the web UI.
+
+## 0.36.1
+
+### Patch Changes
+
+- [#2922](https://github.com/MoonshotAI/kimi-code/pull/2922) [`cd48995`](https://github.com/MoonshotAI/kimi-code/commit/cd489955bb42c4a8055de9545d0b699b93bba98a) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: The timestamp under assistant replies now shows the message time instead of the work duration.
+
+- [#2922](https://github.com/MoonshotAI/kimi-code/pull/2922) [`cd48995`](https://github.com/MoonshotAI/kimi-code/commit/cd489955bb42c4a8055de9545d0b699b93bba98a) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: Restyle the slash command and @ file mention menus: matched fragments are bold-highlighted in the slash menu, and long lists in both menus get a scroll fade and a draggable floating scrollbar.
+
+- [#2922](https://github.com/MoonshotAI/kimi-code/pull/2922) [`cd48995`](https://github.com/MoonshotAI/kimi-code/commit/cd489955bb42c4a8055de9545d0b699b93bba98a) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: The background Bash panel now supports filtering by status, and clicking a task shows its command and output on the right.
+
+- [#2865](https://github.com/MoonshotAI/kimi-code/pull/2865) [`53909d9`](https://github.com/MoonshotAI/kimi-code/commit/53909d91e3ca570d4b565ba1abd00f027ca78d6b) Thanks [@weivwang](https://github.com/weivwang)! - Cache content-hashed Kimi Web assets across reloads while keeping the app entry point revalidated.
+
+- [#2916](https://github.com/MoonshotAI/kimi-code/pull/2916) [`7475c2e`](https://github.com/MoonshotAI/kimi-code/commit/7475c2e2e3dd86ac0b8a8d51d4f1d233ed7df797) Thanks [@Grapedge](https://github.com/Grapedge)! - Cancel an in-flight /init run together with the turn instead of letting it run to completion.
+
+- [#2911](https://github.com/MoonshotAI/kimi-code/pull/2911) [`249d8fa`](https://github.com/MoonshotAI/kimi-code/commit/249d8faa3447427665185a900926d048213d2ac7) Thanks [@7Sageer](https://github.com/7Sageer)! - Fix sessions hanging on the second approval prompt and tool call results being dropped or mixed up in history when using a self-hosted OpenAI-compatible endpoint that renumbers tool call ids on every response.
+
+- [#2917](https://github.com/MoonshotAI/kimi-code/pull/2917) [`6cf315b`](https://github.com/MoonshotAI/kimi-code/commit/6cf315b7bdea8a04cfaeba1bb8931c1730853aec) Thanks [@wbxl2000](https://github.com/wbxl2000)! - Fix bare URLs in chat output absorbing the CJK characters that follow them, which made the link unclickable or open a broken address.
+
+- [#2922](https://github.com/MoonshotAI/kimi-code/pull/2922) [`cd48995`](https://github.com/MoonshotAI/kimi-code/commit/cd489955bb42c4a8055de9545d0b699b93bba98a) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: Fix the slash command panel staying open after switching sessions or when the composer loses focus.
+
+- [#2922](https://github.com/MoonshotAI/kimi-code/pull/2922) [`cd48995`](https://github.com/MoonshotAI/kimi-code/commit/cd489955bb42c4a8055de9545d0b699b93bba98a) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: Replace the composer mode menu with mutually exclusive plan/goal pills on the left of the input area (arm via /plan or /goal, exit with ×); Swarm becomes a separate toolbar toggle.
+
+- [#2922](https://github.com/MoonshotAI/kimi-code/pull/2922) [`cd48995`](https://github.com/MoonshotAI/kimi-code/commit/cd489955bb42c4a8055de9545d0b699b93bba98a) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: Restyle the work status pills above the composer with a borderless rounded look.
+
+- [#2910](https://github.com/MoonshotAI/kimi-code/pull/2910) [`eb72aeb`](https://github.com/MoonshotAI/kimi-code/commit/eb72aebeeb972b2fcc238d5650dd991a5580f96b) Thanks [@sailist](https://github.com/sailist)! - Remove the 64 MiB limit on web session exports, so large sessions no longer fail with a file-too-large error when downloaded from the web UI.
+
+- [#2884](https://github.com/MoonshotAI/kimi-code/pull/2884) [`1811bd4`](https://github.com/MoonshotAI/kimi-code/commit/1811bd4baf5b75ba076e2a24825f9c4f82c13341) Thanks [@liruifengv](https://github.com/liruifengv)! - Fix startup banner text wrapping on narrow terminals.
+
+- [#2922](https://github.com/MoonshotAI/kimi-code/pull/2922) [`cd48995`](https://github.com/MoonshotAI/kimi-code/commit/cd489955bb42c4a8055de9545d0b699b93bba98a) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: Fix `$` content inside inline code spans being misrendered as inline math.
+
+- [#2899](https://github.com/MoonshotAI/kimi-code/pull/2899) [`102984a`](https://github.com/MoonshotAI/kimi-code/commit/102984aa660d752ba8dd7d1aba155575f32affe2) Thanks [@oocz](https://github.com/oocz)! - Fix MCP OAuth cancellation leaving an in-flight authorization waiting for its callback timeout.
+
+- [#2922](https://github.com/MoonshotAI/kimi-code/pull/2922) [`cd48995`](https://github.com/MoonshotAI/kimi-code/commit/cd489955bb42c4a8055de9545d0b699b93bba98a) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: Fix the thinking-effort flyout being unreachable when selecting the last model in the subagent model list.
+
+- [#2876](https://github.com/MoonshotAI/kimi-code/pull/2876) [`5912d4c`](https://github.com/MoonshotAI/kimi-code/commit/5912d4c7d19d68975e85b007976b1bef59edae5c) Thanks [@7Sageer](https://github.com/7Sageer)! - Fix repeated file-watcher errors on Windows when the workspace is a drive root (such as `E:\`) or a UNC network share.
+
+- [#2916](https://github.com/MoonshotAI/kimi-code/pull/2916) [`7475c2e`](https://github.com/MoonshotAI/kimi-code/commit/7475c2e2e3dd86ac0b8a8d51d4f1d233ed7df797) Thanks [@Grapedge](https://github.com/Grapedge)! - Show a clear error when forking a session while its turn is running, instead of copying a partially written turn.
+
+- [#2922](https://github.com/MoonshotAI/kimi-code/pull/2922) [`cd48995`](https://github.com/MoonshotAI/kimi-code/commit/cd489955bb42c4a8055de9545d0b699b93bba98a) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: Fix forking sessions with very long histories always failing with a timeout.
+
+- [#2922](https://github.com/MoonshotAI/kimi-code/pull/2922) [`cd48995`](https://github.com/MoonshotAI/kimi-code/commit/cd489955bb42c4a8055de9545d0b699b93bba98a) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: Selecting /goal from the slash menu now immediately arms a removable goal pill in the composer; typing and sending creates the goal without requiring the goal text after the command.
+
+- [#2922](https://github.com/MoonshotAI/kimi-code/pull/2922) [`cd48995`](https://github.com/MoonshotAI/kimi-code/commit/cd489955bb42c4a8055de9545d0b699b93bba98a) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: Restyle the goal panel: the goal text and elapsed time move to the header, and actions become icon buttons.
+
+- [#2922](https://github.com/MoonshotAI/kimi-code/pull/2922) [`cd48995`](https://github.com/MoonshotAI/kimi-code/commit/cd489955bb42c4a8055de9545d0b699b93bba98a) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: Fix CJK text immediately after a bare URL being swallowed into the link, which made the link unopenable.
+
+- [#2922](https://github.com/MoonshotAI/kimi-code/pull/2922) [`cd48995`](https://github.com/MoonshotAI/kimi-code/commit/cd489955bb42c4a8055de9545d0b699b93bba98a) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: Adjust when plan mode takes effect: enabling it now arms a removable plan pill in the composer and only activates when the message is sent, matching goal mode behavior.
+
+- [#2922](https://github.com/MoonshotAI/kimi-code/pull/2922) [`cd48995`](https://github.com/MoonshotAI/kimi-code/commit/cd489955bb42c4a8055de9545d0b699b93bba98a) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: Add a plan viewer panel: click a plan entry in the work bar to see the full plan, review results, and feedback.
+
+- [#2863](https://github.com/MoonshotAI/kimi-code/pull/2863) [`245e3d5`](https://github.com/MoonshotAI/kimi-code/commit/245e3d56a6de45e74d55449ef26cd65304a3250a) Thanks [@LouisDM](https://github.com/LouisDM)! - Prevent background task output from disrupting terminal pane borders.
+
+- [#2922](https://github.com/MoonshotAI/kimi-code/pull/2922) [`cd48995`](https://github.com/MoonshotAI/kimi-code/commit/cd489955bb42c4a8055de9545d0b699b93bba98a) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: Show a clear top-center confirmation toast after exporting a session, and a clearer error message when the export fails because the session is too large.
+
+- [#2922](https://github.com/MoonshotAI/kimi-code/pull/2922) [`cd48995`](https://github.com/MoonshotAI/kimi-code/commit/cd489955bb42c4a8055de9545d0b699b93bba98a) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: Fix the session list PR badge not refreshing after a PR is created from within a session.
+
+- [#2922](https://github.com/MoonshotAI/kimi-code/pull/2922) [`cd48995`](https://github.com/MoonshotAI/kimi-code/commit/cd489955bb42c4a8055de9545d0b699b93bba98a) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: Restyle the session list PR badge as a small tag with a background.
+
+- [#2922](https://github.com/MoonshotAI/kimi-code/pull/2922) [`cd48995`](https://github.com/MoonshotAI/kimi-code/commit/cd489955bb42c4a8055de9545d0b699b93bba98a) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: Unify session status display in the sidebar and stabilize session list ordering.
+
+- [#2922](https://github.com/MoonshotAI/kimi-code/pull/2922) [`cd48995`](https://github.com/MoonshotAI/kimi-code/commit/cd489955bb42c4a8055de9545d0b699b93bba98a) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: Slash commands now support fuzzy search: find commands by description text, pinyin, or pinyin initials.
+
+- [#2922](https://github.com/MoonshotAI/kimi-code/pull/2922) [`cd48995`](https://github.com/MoonshotAI/kimi-code/commit/cd489955bb42c4a8055de9545d0b699b93bba98a) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: Rework the subagent panel into a card grid layout with status filtering, showing in-progress and recently finished tasks by default.
+
+- [#2922](https://github.com/MoonshotAI/kimi-code/pull/2922) [`cd48995`](https://github.com/MoonshotAI/kimi-code/commit/cd489955bb42c4a8055de9545d0b699b93bba98a) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: Fix server request timeouts being misreported as "cannot connect to the Kimi server".
+
+- [#2922](https://github.com/MoonshotAI/kimi-code/pull/2922) [`cd48995`](https://github.com/MoonshotAI/kimi-code/commit/cd489955bb42c4a8055de9545d0b699b93bba98a) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: Restyle the todo panel as frosted cards and add a current-progress completion count.
+
+- [#2922](https://github.com/MoonshotAI/kimi-code/pull/2922) [`cd48995`](https://github.com/MoonshotAI/kimi-code/commit/cd489955bb42c4a8055de9545d0b699b93bba98a) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: Increase the font size and row height of the user menu and the plan usage flyout.
+
+- [#2922](https://github.com/MoonshotAI/kimi-code/pull/2922) [`cd48995`](https://github.com/MoonshotAI/kimi-code/commit/cd489955bb42c4a8055de9545d0b699b93bba98a) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: Rename the user menu's "Upgrade" entry to "Upgrade membership" and label the plan usage percentage as used.
+
+- [#2922](https://github.com/MoonshotAI/kimi-code/pull/2922) [`cd48995`](https://github.com/MoonshotAI/kimi-code/commit/cd489955bb42c4a8055de9545d0b699b93bba98a) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: Add experimental automatic session title generation, with on-demand regeneration from the session list.
+
+- [#2922](https://github.com/MoonshotAI/kimi-code/pull/2922) [`cd48995`](https://github.com/MoonshotAI/kimi-code/commit/cd489955bb42c4a8055de9545d0b699b93bba98a) Thanks [@wbxl2000](https://github.com/wbxl2000)! - web: Add a "sort by recent activity" option to the workspace-grouped sidebar view (switched in the view options menu); newly added workspaces now sort to the top.
+
 ## 0.36.0
 
 ### Minor Changes

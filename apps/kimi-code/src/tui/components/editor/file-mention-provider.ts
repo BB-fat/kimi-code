@@ -11,6 +11,7 @@ import {
 } from '@moonshot-ai/pi-tui';
 
 import { extractSlashTokenAtCursor, isLeadingSlashInEditor } from '#/tui/commands/parse';
+import { findInlineSkillTokens } from '../../utils/inline-skill-tokens';
 
 const PATH_DELIMITERS = new Set([' ', '\t', '"', "'", '=']);
 const MAX_FALLBACK_SCAN = 2000;
@@ -48,6 +49,8 @@ interface FsMentionCandidate {
 export class FileMentionProvider implements AutocompleteProvider {
   private readonly inner: CombinedAutocompleteProvider;
   private readonly additionalDirs: readonly string[];
+  private readonly skillCommandNames: ReadonlySet<string> | undefined;
+  private readonly onImmediateCommand: ((name: string) => void) | undefined;
 
   constructor(
     private readonly slashCommands: SlashAutocompleteCommand[],
@@ -55,8 +58,16 @@ export class FileMentionProvider implements AutocompleteProvider {
     private readonly fdPath: string | null,
     additionalDirs: readonly string[] = [],
     private readonly getInputMode: () => 'prompt' | 'bash' = () => 'prompt',
-    private readonly onImmediateCommand?: (name: string) => void,
+    skillCommandNames?: ReadonlySet<string> | ((name: string) => void),
+    onImmediateCommand?: (name: string) => void,
   ) {
+    if (typeof skillCommandNames === 'function') {
+      this.skillCommandNames = undefined;
+      this.onImmediateCommand = skillCommandNames;
+    } else {
+      this.skillCommandNames = skillCommandNames;
+      this.onImmediateCommand = onImmediateCommand;
+    }
     this.additionalDirs = additionalDirs.map((dir) => normalizePath(resolve(workDir, dir)));
     // Build an expanded list that includes alias entries so that
     // inner's argument completion can find commands by alias too.
@@ -78,6 +89,7 @@ export class FileMentionProvider implements AutocompleteProvider {
   ): Promise<AutocompleteSuggestions | null> {
     const currentLine = lines[cursorLine] ?? '';
     const textBeforeCursor = currentLine.slice(0, cursorCol);
+    let midPromptSlash = false;
 
     // `@` file / folder mentions take priority over the slash-command guards
     // below. Without this, typing `@` inside a slash command's argument text
@@ -111,7 +123,23 @@ export class FileMentionProvider implements AutocompleteProvider {
       }
     }
 
+    // An inline skill token the cursor is still on stays eligible for skill
+    // selection even when the input begins with a slash command and has text
+    // after the cursor — the argument suppression below guards the command's
+    // own arguments, not an inline skill the user inserts mid-text. Computed
+    // before the leading-whitespace suppression: an indented inline token
+    // (`  /skill:rev`) is a skill reference, not a path to suppress.
+    const inlineSkillPrefix = extractInlineSkillPrefix(textBeforeCursor, cursorLine);
+
     if (
+      inlineSkillPrefix === null &&
+      shouldSuppressLeadingWhitespaceSlashPath(textBeforeCursor, options.force)
+    ) {
+      return null;
+    }
+
+    if (
+      inlineSkillPrefix === null &&
       shouldSuppressSlashArgumentCompletion(
         textBeforeCursor,
         currentLine.slice(cursorCol),
@@ -123,13 +151,11 @@ export class FileMentionProvider implements AutocompleteProvider {
 
     // Handle slash-command name completion ourselves so that aliases are
     // searchable and visible in the label. Supports mid-prompt `/` tokens
-    // (after existing text) for commands marked `midPrompt`. Bash mode treats
-    // `/` as a path separator, so never intercept there.
+    // (after existing text) for commands marked `midPrompt`, plus inline
+    // skills. Bash mode treats `/` as a path separator, so never intercept there.
     if (!options.force && this.getInputMode() !== 'bash') {
       const slashToken = extractSlashTokenAtCursor(textBeforeCursor);
       if (slashToken !== null) {
-        // Per-line isLeading misses content on earlier lines; fold them in so
-        // `hello\n/` is mid-prompt (midPrompt-only), not a full leading menu.
         const isLeading = isLeadingSlashInEditor(lines, cursorLine, slashToken);
         const tokens = slashToken.token
           .slice(1)
@@ -138,7 +164,10 @@ export class FileMentionProvider implements AutocompleteProvider {
 
         const candidates = isLeading
           ? this.slashCommands
-          : this.slashCommands.filter((cmd) => cmd.midPrompt === true);
+          : this.slashCommands.filter(
+              (cmd) =>
+                cmd.midPrompt === true || (this.skillCommandNames?.has(cmd.name) ?? false),
+            );
 
         type SlashMatch = {
           cmd: SlashAutocompleteCommand;
@@ -185,12 +214,14 @@ export class FileMentionProvider implements AutocompleteProvider {
               // inserting text — say so in the menu.
               const note =
                 !isLeading && m.cmd.immediate === true ? 'runs immediately' : undefined;
+              const isSkill = this.skillCommandNames?.has(m.cmd.name) === true;
               return {
                 value: m.cmd.name,
                 label: m.label,
                 description:
                   [description, note].filter((part) => part !== undefined).join(' — ') ||
                   undefined,
+                data: !isLeading && isSkill ? { inlineSkill: true } : undefined,
               };
             }),
             // Prefix is only the `/token` so applyCompletion replaces just that
@@ -198,9 +229,15 @@ export class FileMentionProvider implements AutocompleteProvider {
             prefix: slashToken.token,
           };
         }
-        // No command matched: fall through so path completion can still run
-        // for mid-prompt tokens that look like paths.
+        // No command matched. Leading `/` with no command is not a path.
+        // Mid-prompt: offer skills if any, suppress a bare `/` (no root dump),
+        // and otherwise fall through to path completion without the inner
+        // slash-command menu.
         if (isLeading) return null;
+        const skillSuggestions = this.getInlineSkillSuggestions(slashToken.token);
+        if (skillSuggestions !== null) return skillSuggestions;
+        if (slashToken.token === '/') return null;
+        midPromptSlash = true;
       }
     }
 
@@ -220,9 +257,30 @@ export class FileMentionProvider implements AutocompleteProvider {
       }
     }
 
+    // Inline skill selection: `/` after whitespace mid-input in prompt mode.
+    // Runs after slash-command argument handling so known commands such as
+    // `/add-dir /` keep their own argument completions.
+    if (
+      inlineSkillPrefix !== null &&
+      this.getInputMode() !== 'bash' &&
+      options.force !== true
+    ) {
+      const skillSuggestions = this.getInlineSkillSuggestions(inlineSkillPrefix);
+      if (skillSuggestions !== null) return skillSuggestions;
+      // No skill match: fall through so path completion can still run for
+      // mid-prompt tokens that look like paths (e.g. `please /tm`).
+    }
+
     try {
       const inner = await this.inner.getSuggestions(lines, cursorLine, cursorCol, options);
-      if (inner === null || this.getInputMode() !== 'bash') {
+      if (inner === null) return null;
+      if (midPromptSlash) {
+        const pathItems = inner.items.filter(
+          (item) => item.value.startsWith('/') || item.label.endsWith('/'),
+        );
+        return pathItems.length === 0 ? null : { ...inner, items: pathItems };
+      }
+      if (this.getInputMode() !== 'bash') {
         return inner;
       }
       // In bash mode `/` is a path separator; hide dot-prefixed entries to
@@ -234,6 +292,37 @@ export class FileMentionProvider implements AutocompleteProvider {
     }
   }
 
+  private getInlineSkillSuggestions(prefix: string): AutocompleteSuggestions | null {
+    if (this.skillCommandNames === undefined || this.skillCommandNames.size === 0) return null;
+    const names = this.skillCommandNames;
+    const tokens = prefix
+      .slice(1)
+      .trim()
+      .split(/\s+/)
+      .filter((t) => t.length > 0);
+
+    const matches: Array<{ cmd: SlashAutocompleteCommand; score: number }> = [];
+    for (const cmd of this.slashCommands) {
+      if (!names.has(cmd.name)) continue;
+      const score = scoreTokens(tokens, cmd.name);
+      if (score !== null) {
+        matches.push({ cmd, score });
+      }
+    }
+    matches.sort((a, b) => a.score - b.score);
+
+    if (matches.length === 0) return null;
+    return {
+      items: matches.map((m) => ({
+        value: m.cmd.name,
+        label: m.cmd.name,
+        description: formatSlashCommandDescription(m.cmd),
+        data: { inlineSkill: true },
+      })),
+      prefix,
+    };
+  }
+
   applyCompletion(
     lines: string[],
     cursorLine: number,
@@ -241,6 +330,30 @@ export class FileMentionProvider implements AutocompleteProvider {
     item: AutocompleteItem,
     prefix: string,
   ): { lines: string[]; cursorLine: number; cursorCol: number; preventSubmit?: boolean } {
+    // Inline skill selection mid-input: pi-tui's default applyCompletion
+    // treats mid-line slash prefixes as file paths and drops the `/`. Preserve
+    // the slash and add a trailing space so the completed token stays a valid
+    // skill reference (e.g. `hello /rev` -> `hello /skill:review `).
+    if (
+      item.data?.['inlineSkill'] === true &&
+      this.getInputMode() !== 'bash' &&
+      prefix.startsWith('/')
+    ) {
+      const currentLine = lines[cursorLine] ?? '';
+      const textBeforeCursor = currentLine.slice(0, cursorCol);
+      if (extractInlineSkillPrefix(textBeforeCursor, cursorLine) === prefix) {
+        const beforePrefix = currentLine.slice(0, cursorCol - prefix.length);
+        const afterCursor = currentLine.slice(cursorCol);
+        const newLines = [...lines];
+        newLines[cursorLine] = `${beforePrefix}/${item.value} ${afterCursor}`;
+        return {
+          lines: newLines,
+          cursorLine,
+          // +2 for the preserved "/" and the appended " ".
+          cursorCol: beforePrefix.length + item.value.length + 2,
+        };
+      }
+    }
     // In bash mode a leading `/` is a path, but pi-tui's applyCompletion
     // mistakes it for a slash command (prefix starts with `/`, nothing before
     // it, no second `/`) and prepends another `/`, producing e.g.
@@ -295,6 +408,32 @@ export class FileMentionProvider implements AutocompleteProvider {
 
     return this.inner.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
   }
+}
+
+/**
+ * Extract the inline skill prefix (e.g. `/rev`) from `text` when the cursor is
+ * positioned after a `/` that is preceded by whitespace and not part of the
+ * leading slash-command area. Returns `null` when the context is not an inline
+ * skill trigger.
+ *
+ * On lines after the first, a `/` at the start of the line always begins an
+ * inline skill prefix — including the partially typed `/rev` — so the picker
+ * stays in skill-only mode while the token is completed.
+ */
+export function extractInlineSkillPrefix(text: string, cursorLine: number = 0): string | null {
+  if (cursorLine > 0) {
+    const trimmedStart = text.trimStart();
+    const match = /^\/[^\s/]*$/.exec(trimmedStart);
+    if (match !== null) return match[0];
+  }
+  // findInlineSkillTokens skips the leading slash-command area, so a line such
+  // as `/skill:review args /` still yields the trailing `/` token.
+  const tokens = findInlineSkillTokens(text, {
+    isKnownSkill: () => true,
+    allowEmpty: true,
+  });
+  const token = tokens.findLast((t) => t.end === text.length);
+  return token === undefined ? null : text.slice(token.start);
 }
 
 export function extractAtPrefix(text: string): string | null {
